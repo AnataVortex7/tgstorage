@@ -111,6 +111,10 @@ def init_db():
                 created_at  REAL NOT NULL,
                 validated   INTEGER DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
             CREATE TABLE IF NOT EXISTS blocked_ips (
                 ip            TEXT PRIMARY KEY,
                 attempts      INTEGER DEFAULT 0,
@@ -271,144 +275,135 @@ def tg(coro, timeout=120):
     return asyncio.run_coroutine_threadsafe(coro, _tg_loop).result(timeout=timeout)
 
 # ── Indexer ──────────────────────────────────────────────────────────────
+# NOTE: Telegram bots are NOT allowed to call GetForumTopics / GetHistory
+# (BOT_METHOD_INVALID). Bots CAN fetch messages by ID (channels.GetMessages),
+# so we scan message IDs 1..latest and rebuild:
+#   - topics  from the "topic created / edited" service messages
+#   - files   from document messages, grouped by their reply_to topic id
 _index_status = {"status": "idle", "progress": "", "last_run": 0}
 
-async def _get_all_topics():
-    """Return list of (topic_id, title). Tries every known API shape."""
+def meta_get(key, default=0):
+    row = db_one("SELECT value FROM meta WHERE key=?", (key,))
+    return int(row["value"]) if row else default
+
+def meta_set(key, value):
+    db_exec("""
+        INSERT INTO meta (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """, (key, str(value)))
+
+def _norm_path(title):
+    return title.replace("\\", "/").replace("//", "/").strip("/")
+
+def _save_topic(tid, title):
+    path = _norm_path(title)
+    parts = path.rsplit("/", 1)
+    parent = parts[0] if len(parts) > 1 else ""
+    depth = path.count("/")
+    db_exec("""
+        INSERT INTO topics (topic_id, name, path, parent_path, depth, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(topic_id) DO UPDATE SET
+            name=excluded.name, path=excluded.path,
+            parent_path=excluded.parent_path, depth=excluded.depth,
+            updated_at=excluded.updated_at
+    """, (tid, title, path, parent, depth, time.time()))
+    db_exec("UPDATE files SET folder_path=? WHERE topic_id=?", (path, tid))
+    return path
+
+def _topic_id_of(m):
+    rt = getattr(m, "reply_to", None)
+    if rt is None:
+        return None
+    return getattr(rt, "reply_to_top_id", None) or getattr(rt, "reply_to_msg_id", None)
+
+async def _latest_msg_id():
+    """Bots can't read history, so post a temp message to learn the newest id."""
+    m = await _tg_client.send_message(BACKUP_GROUP_ID, "⏳ indexing…")
+    mid = m.id
+    try:
+        await _tg_client.delete_messages(BACKUP_GROUP_ID, mid)
+    except Exception:
+        pass
+    return mid
+
+async def _scan_group():
     peer = await _tg_client.resolve_peer(BACKUP_GROUP_ID)
-    result = []
+    ch = tg_raw.types.InputChannel(channel_id=peer.channel_id,
+                                   access_hash=peer.access_hash)
+    latest = await _latest_msg_id()
+    start = meta_get("scan_cursor", 0) + 1
+    topics = {r["topic_id"]: r["path"]
+              for r in db_many("SELECT topic_id, path FROM topics")}
+    BATCH = 200
+    found_files = 0
 
-    msg_fn = getattr(tg_raw.functions.messages, "GetForumTopics", None)
-    ch_fn = getattr(tg_raw.functions.channels, "GetForumTopics", None)
+    for lo in range(start, latest + 1, BATCH):
+        hi = min(lo + BATCH, latest + 1)
+        _index_status["status"] = f"scanning {lo}/{latest}"
+        ids = [tg_raw.types.InputMessageID(id=i) for i in range(lo, hi)]
+        r = await _tg_client.invoke(
+            tg_raw.functions.channels.GetMessages(channel=ch, id=ids))
 
-    if msg_fn is not None or ch_fn is not None:
-        offset_date, offset_id, offset_topic = 0, 0, 0
-        while True:
-            if msg_fn is not None:
-                req = msg_fn(
-                    peer=peer,
-                    offset_date=offset_date,
-                    offset_id=offset_id,
-                    offset_topic=offset_topic,
-                    limit=100,
-                )
-            else:
-                req = ch_fn(
-                    channel=peer,
-                    offset_date=offset_date,
-                    offset_id=offset_id,
-                    offset_topic=offset_topic,
-                    limit=100,
-                )
-            r = await _tg_client.invoke(req)
-            topics = [t for t in r.topics if hasattr(t, "title")]
-            if not topics:
-                break
-            for t in topics:
-                result.append((t.id, t.title))
-            if len(r.topics) < 100:
-                break
-            last = r.topics[-1]
-            offset_topic = last.id
-            offset_id = last.top_message
-            msgs = {m.id: m for m in r.messages}
-            offset_date = msgs[offset_id].date if offset_id in msgs else 0
-        print(f"[index] topics fetched via raw API: {len(result)}", flush=True)
-        return result
-
-    print("[index] no raw GetForumTopics — using client.get_forum_topics", flush=True)
-    async for t in _tg_client.get_forum_topics(BACKUP_GROUP_ID):
-        result.append((t.id, t.title))
-    return result
-
-async def _fetch_topics():
-    """Fetch all forum topics from backup group and store in DB."""
-    all_topics = await _get_all_topics()
-    for tid, raw_name in all_topics:
-        if tid == 1:   # skip "General"
-            continue
-        path = raw_name.replace("\\", "/").replace("//", "/").strip("/")
-        parts = path.rsplit("/", 1)
-        parent = parts[0] if len(parts) > 1 else ""
-        depth  = path.count("/")
-        db_exec("""
-            INSERT INTO topics (topic_id, name, path, parent_path, depth, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(topic_id) DO UPDATE SET
-                name=excluded.name, path=excluded.path,
-                parent_path=excluded.parent_path, depth=excluded.depth,
-                updated_at=excluded.updated_at
-        """, (tid, raw_name, path, parent, depth, time.time()))
-    return len(all_topics)
-
-async def _index_topic_files(topic_id, path):
-    """Index all file messages in a specific forum topic."""
-    peer = await _tg_client.resolve_peer(BACKUP_GROUP_ID)
-    offset_id = 0
-    count = 0
-    while True:
-        r = await _tg_client.invoke(tg_raw.functions.messages.GetReplies(
-            peer=peer,
-            msg_id=topic_id,
-            offset_id=offset_id,
-            offset_date=0,
-            add_offset=0,
-            limit=100,
-            max_id=0,
-            min_id=0,
-            hash=0,
-        ))
-        if not r.messages:
-            break
-        for raw_msg in r.messages:
-            if not hasattr(raw_msg, "media"):
+        for m in r.messages:
+            if isinstance(m, tg_raw.types.MessageService):
+                act = m.action
+                if isinstance(act, tg_raw.types.MessageActionTopicCreate):
+                    topics[m.id] = _save_topic(m.id, act.title)
+                elif isinstance(act, tg_raw.types.MessageActionTopicEdit):
+                    new_title = getattr(act, "title", None)
+                    tid = _topic_id_of(m)
+                    if new_title and tid:
+                        topics[tid] = _save_topic(tid, new_title)
                 continue
-            if not isinstance(raw_msg.media, tg_raw.types.MessageMediaDocument):
+
+            media = getattr(m, "media", None)
+            if not isinstance(media, tg_raw.types.MessageMediaDocument):
                 continue
-            doc = raw_msg.media.document
-            filename = f"file_{raw_msg.id}"
-            size = getattr(doc, "size", 0)
-            mime = getattr(doc, "mime_type", "") or ""
-            for attr in getattr(doc, "attributes", []):
+            doc = media.document
+            if doc is None or not hasattr(doc, "attributes"):
+                continue
+            tid = _topic_id_of(m)
+            if tid not in topics:
+                continue
+            filename = f"file_{m.id}"
+            for attr in doc.attributes:
                 if isinstance(attr, tg_raw.types.DocumentAttributeFilename):
                     filename = attr.file_name
                     break
             db_exec("""
-                INSERT OR IGNORE INTO files (msg_id, topic_id, folder_path, filename, size, mime_type)
+                INSERT OR IGNORE INTO files
+                    (msg_id, topic_id, folder_path, filename, size, mime_type)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (raw_msg.id, topic_id, path, filename, size, mime))
-            count += 1
-        if len(r.messages) < 100:
-            break
-        offset_id = r.messages[-1].id
+            """, (m.id, tid, topics[tid], filename,
+                  getattr(doc, "size", 0) or 0,
+                  getattr(doc, "mime_type", "") or ""))
+            found_files += 1
 
-    db_exec("UPDATE topics SET msg_count=?, files_indexed=1, updated_at=? WHERE topic_id=?",
-            (count, time.time(), topic_id))
-    return count
+        meta_set("scan_cursor", hi - 1)
+        await asyncio.sleep(0.4)   # avoid flood
+
+    db_exec("""
+        UPDATE topics SET files_indexed=1,
+            msg_count=(SELECT COUNT(*) FROM files WHERE files.topic_id=topics.topic_id)
+    """)
+    print(f"[index] scan done up to msg {latest}: +{found_files} files, "
+          f"{len(topics)} topics", flush=True)
 
 async def _full_index():
-    global _index_status
-    _index_status["status"] = "indexing topics..."
-    n = await _fetch_topics()
-    _index_status["progress"] = f"{n} topics loaded"
-
-    topics = db_many("SELECT topic_id, path FROM topics WHERE files_indexed=0")
-    total = len(topics)
-    for i, t in enumerate(topics):
-        _index_status["status"] = f"indexing files {i+1}/{total}"
-        _index_status["progress"] = t["path"]
-        try:
-            await _index_topic_files(t["topic_id"], t["path"])
-        except Exception as e:
-            print(f"[index] Error indexing topic {t['path']}: {e}", flush=True)
-        await asyncio.sleep(0.3)
-
-    _index_status["status"] = "done"
-    _index_status["last_run"] = time.time()
-    print(f"[index] Full index complete. {total} topics.", flush=True)
+    if _index_status["status"].startswith("scanning"):
+        return
+    _index_status["status"] = "scanning..."
+    try:
+        await _scan_group()
+        _index_status["status"] = "done"
+        _index_status["last_run"] = time.time()
+    except Exception as e:
+        _index_status["status"] = f"error: {e}"
+        print(f"[index] Error: {e}", flush=True)
 
 def run_indexer():
-    """Runs on startup and every 30 minutes."""
+    """Runs on startup and every 30 minutes (incremental)."""
     _tg_ready.wait()
     while True:
         try:
@@ -420,24 +415,27 @@ def run_indexer():
 
 # ── Browser helpers ───────────────────────────────────────────────────────
 def build_tree(path=""):
-    """Return (subfolders, files) for a given path."""
-    subfolders = db_many(
-        "SELECT * FROM topics WHERE parent_path=? ORDER BY path",
-        (path,)
-    )
-    topic = db_one("SELECT topic_id, files_indexed FROM topics WHERE path=?", (path,))
+    """Return (subfolders, files) for a given path. Intermediate folders that
+    have no topic of their own are synthesized from deeper topic paths."""
+    prefix = f"{path}/" if path else ""
+    children = {}
+    for t in db_many("SELECT path, msg_count FROM topics"):
+        p = t["path"]
+        if not p.startswith(prefix) or p == path:
+            continue
+        child = p[len(prefix):].split("/")[0]
+        if not child:
+            continue
+        children[child] = children.get(child, 0) + (t["msg_count"] or 0)
+    subfolders = [{"path": prefix + name, "msg_count": cnt}
+                  for name, cnt in sorted(children.items(), key=lambda x: x[0].lower())]
     files = []
-    if topic:
-        if not topic["files_indexed"]:
-            try:
-                tg(_index_topic_files(topic["topic_id"], path), timeout=60)
-            except Exception:
-                pass
+    if path:
         files = db_many(
-            "SELECT * FROM files WHERE topic_id=? ORDER BY filename COLLATE NOCASE",
-            (topic["topic_id"],)
+            "SELECT * FROM files WHERE folder_path=? ORDER BY filename COLLATE NOCASE",
+            (path,)
         )
-    return list(subfolders), list(files)
+    return subfolders, list(files)
 
 def breadcrumbs(path):
     crumbs = []
@@ -907,7 +905,10 @@ def sendtobot(msg_id):
 @app.route("/reindex")
 @require_auth
 def reindex():
-    db_exec("UPDATE topics SET files_indexed=0")
+    db_exec("DELETE FROM files")
+    db_exec("DELETE FROM topics")
+    meta_set("scan_cursor", 0)
+    _index_status["status"] = "idle"
     threading.Thread(
         target=lambda: asyncio.run_coroutine_threadsafe(
             _full_index(), _tg_loop
