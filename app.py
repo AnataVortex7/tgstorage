@@ -11,6 +11,7 @@ from flask import (Flask, render_template_string, redirect, url_for,
                    session, request, Response, jsonify, stream_with_context)
 from pyrogram import Client
 from pyrogram import raw as tg_raw
+from pyrogram.errors import FloodWait
 
 # ── Config (from env vars) ───────────────────────────────────────────────
 API_ID          = int(os.environ.get("API_ID", "0"))
@@ -22,6 +23,8 @@ OWNER_CHAT_ID   = int(os.environ.get("OWNER_CHAT_ID", "0"))
 WEB_PASSWORD    = os.environ.get("WEB_PASSWORD", "changeme")
 SECRET_KEY      = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 WEB_URL         = os.environ.get("WEB_URL", "http://localhost:8080")
+MONGO_URI       = os.environ.get("MONGO_URI", "")      # optional: persists index across restarts
+MONGO_DB        = os.environ.get("MONGO_DB", "tgbackup")
 
 MAX_FAIL        = 2         # wrong password attempts before block
 BLOCK_SECS      = 86400     # 24 hours
@@ -188,6 +191,7 @@ def run_telegram():
             api_hash=API_HASH,
             bot_token=BOT_TOKEN,
             in_memory=True,
+            sleep_threshold=120,
         )
 
         # ── /start TOKEN — approve web login ─────────────────────────────
@@ -261,6 +265,9 @@ def run_telegram():
                 f"🌐 URL: {WEB_URL}"
             )
 
+        from pyrogram.handlers import RawUpdateHandler
+        # group=-1 so it runs alongside (not instead of) the command handlers
+        _tg_client.add_handler(RawUpdateHandler(_on_raw_update), group=-1)
         await _tg_client.start()
         _tg_ready.set()
         print("[tg] Client ready", flush=True)
@@ -275,12 +282,20 @@ def tg(coro, timeout=120):
     return asyncio.run_coroutine_threadsafe(coro, _tg_loop).result(timeout=timeout)
 
 # ── Indexer ──────────────────────────────────────────────────────────────
-# NOTE: Telegram bots are NOT allowed to call GetForumTopics / GetHistory
-# (BOT_METHOD_INVALID). Bots CAN fetch messages by ID (channels.GetMessages),
-# so we scan message IDs 1..latest and rebuild:
-#   - topics  from the "topic created / edited" service messages
-#   - files   from document messages, grouped by their reply_to topic id
+# Design (bots can't read history or list topics, and Telegram flood-limits
+# GetMessages):
+#   1. The index (topics + file name/size/msg_id) lives in SQLite and is
+#      mirrored to MongoDB (MONGO_URI) so it survives Render restarts.
+#   2. On startup: restore snapshot -> scan ONLY ids newer than the saved
+#      cursor (usually nothing) -> done. No periodic re-scanning.
+#   3. New files/topics are indexed live from incoming group updates
+#      (no API calls at all).
+#   4. Telegram is only contacted on demand: download / send-to-bot.
 _index_status = {"status": "idle", "progress": "", "last_run": 0}
+_topics = {}                 # topic_id -> normalized path
+_scanning = False
+_snapshot_dirty = False
+GROUP_CHANNEL_ID = (-1000000000000 - BACKUP_GROUP_ID) if BACKUP_GROUP_ID < -1000000000000 else 0
 
 def meta_get(key, default=0):
     row = db_one("SELECT value FROM meta WHERE key=?", (key,))
@@ -296,19 +311,22 @@ def _norm_path(title):
     return title.replace("\\", "/").replace("//", "/").strip("/")
 
 def _save_topic(tid, title):
+    global _snapshot_dirty
     path = _norm_path(title)
     parts = path.rsplit("/", 1)
     parent = parts[0] if len(parts) > 1 else ""
     depth = path.count("/")
     db_exec("""
-        INSERT INTO topics (topic_id, name, path, parent_path, depth, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO topics (topic_id, name, path, parent_path, depth, files_indexed, updated_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?)
         ON CONFLICT(topic_id) DO UPDATE SET
             name=excluded.name, path=excluded.path,
             parent_path=excluded.parent_path, depth=excluded.depth,
             updated_at=excluded.updated_at
     """, (tid, title, path, parent, depth, time.time()))
     db_exec("UPDATE files SET folder_path=? WHERE topic_id=?", (path, tid))
+    _topics[tid] = path
+    _snapshot_dirty = True
     return path
 
 def _topic_id_of(m):
@@ -316,6 +334,148 @@ def _topic_id_of(m):
     if rt is None:
         return None
     return getattr(rt, "reply_to_top_id", None) or getattr(rt, "reply_to_msg_id", None)
+
+def _handle_raw_message(m):
+    """Index one raw Telegram message (topic service msg or document)."""
+    global _snapshot_dirty
+    if isinstance(m, tg_raw.types.MessageService):
+        act = m.action
+        if isinstance(act, tg_raw.types.MessageActionTopicCreate):
+            _save_topic(m.id, act.title)
+        elif isinstance(act, tg_raw.types.MessageActionTopicEdit):
+            new_title = getattr(act, "title", None)
+            tid = _topic_id_of(m)
+            if new_title and tid:
+                _save_topic(tid, new_title)
+        return False
+
+    media = getattr(m, "media", None)
+    if not isinstance(media, tg_raw.types.MessageMediaDocument):
+        return False
+    doc = media.document
+    if doc is None or not hasattr(doc, "attributes"):
+        return False
+    tid = _topic_id_of(m)
+    if tid not in _topics:
+        return False
+    filename = f"file_{m.id}"
+    for attr in doc.attributes:
+        if isinstance(attr, tg_raw.types.DocumentAttributeFilename):
+            filename = attr.file_name
+            break
+    db_exec("""
+        INSERT OR IGNORE INTO files
+            (msg_id, topic_id, folder_path, filename, size, mime_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (m.id, tid, _topics[tid], filename,
+          getattr(doc, "size", 0) or 0,
+          getattr(doc, "mime_type", "") or ""))
+    db_exec("UPDATE topics SET msg_count=(SELECT COUNT(*) FROM files WHERE topic_id=?) WHERE topic_id=?",
+            (tid, tid))
+    _snapshot_dirty = True
+    return True
+
+async def _on_raw_update(client, update, users, chats):
+    """Live indexing: new group messages arrive as updates — zero API calls."""
+    try:
+        if not isinstance(update, tg_raw.types.UpdateNewChannelMessage):
+            return
+        m = update.message
+        peer = getattr(m, "peer_id", None)
+        if GROUP_CHANNEL_ID == 0 or getattr(peer, "channel_id", None) != GROUP_CHANNEL_ID:
+            return
+        _handle_raw_message(m)
+        if not _scanning and m.id == meta_get("scan_cursor", 0) + 1:
+            meta_set("scan_cursor", m.id)
+    except Exception as e:
+        print(f"[live] {e}", flush=True)
+
+# ── Persistence (MongoDB snapshot) ───────────────────────────────────────
+def _mongo_coll():
+    from pymongo import MongoClient
+    return MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]["index_snapshot"]
+
+CHUNK = 20000
+
+def snapshot_save():
+    if not MONGO_URI:
+        return
+    coll = _mongo_coll()
+    topics = [{k: r[k] for k in ("topic_id", "name", "path", "parent_path",
+                                 "depth", "msg_count", "updated_at")}
+              for r in db_many("SELECT * FROM topics")]
+    rows = [[r["msg_id"], r["topic_id"], r["folder_path"], r["filename"],
+             r["size"], r["mime_type"]]
+            for r in db_many("SELECT msg_id, topic_id, folder_path, filename, size, mime_type FROM files")]
+    n = 0
+    for i in range(0, len(rows), CHUNK):
+        coll.replace_one({"_id": f"files_{n}"},
+                         {"_id": f"files_{n}", "rows": rows[i:i + CHUNK]}, upsert=True)
+        n += 1
+    coll.delete_many({"_id": {"$in": [f"files_{k}" for k in range(n, n + 50)]}})
+    coll.replace_one({"_id": "meta"},
+                     {"_id": "meta", "cursor": meta_get("scan_cursor", 0),
+                      "topics": topics, "nchunks": n, "saved_at": time.time()},
+                     upsert=True)
+    print(f"[snapshot] saved {len(topics)} topics, {len(rows)} files", flush=True)
+
+def snapshot_load():
+    """Restore index into empty SQLite after a restart."""
+    if not MONGO_URI:
+        print("[snapshot] MONGO_URI not set — index will NOT survive restarts", flush=True)
+        return
+    if db_one("SELECT COUNT(*) AS c FROM topics")["c"] > 0:
+        return
+    coll = _mongo_coll()
+    meta = coll.find_one({"_id": "meta"})
+    if not meta:
+        print("[snapshot] no snapshot yet", flush=True)
+        return
+    with _db_lock:
+        conn = get_db()
+        conn.executemany("""
+            INSERT OR REPLACE INTO topics
+              (topic_id, name, path, parent_path, depth, msg_count, files_indexed, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+        """, [(t["topic_id"], t["name"], t["path"], t["parent_path"],
+               t["depth"], t["msg_count"], t["updated_at"]) for t in meta["topics"]])
+        for i in range(meta.get("nchunks", 0)):
+            doc = coll.find_one({"_id": f"files_{i}"})
+            if doc:
+                conn.executemany("""
+                    INSERT OR IGNORE INTO files
+                      (msg_id, topic_id, folder_path, filename, size, mime_type)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, doc["rows"])
+        conn.commit()
+        conn.close()
+    meta_set("scan_cursor", meta.get("cursor", 0))
+    print(f"[snapshot] restored {len(meta['topics'])} topics, cursor={meta.get('cursor')}", flush=True)
+
+def run_snapshotter():
+    """Saves the snapshot at most every 2 minutes, only when something changed."""
+    global _snapshot_dirty
+    while True:
+        time.sleep(120)
+        if _snapshot_dirty and MONGO_URI:
+            _snapshot_dirty = False
+            try:
+                snapshot_save()
+            except Exception as e:
+                _snapshot_dirty = True
+                print(f"[snapshot] save failed: {e}", flush=True)
+
+# ── Catch-up scan (only ids newer than cursor) ───────────────────────────
+async def _invoke_safe(req):
+    """invoke() that waits out FloodWait instead of failing."""
+    while True:
+        try:
+            return await _tg_client.invoke(req)
+        except FloodWait as e:
+            wait = int(getattr(e, "value", 30)) + 2
+            _index_status["status"] = f"scanning (flood wait {wait}s)"
+            print(f"[index] FloodWait {wait}s", flush=True)
+            await asyncio.sleep(wait)
 
 async def _latest_msg_id():
     """Bots can't read history, so post a temp message to learn the newest id."""
@@ -328,70 +488,38 @@ async def _latest_msg_id():
     return mid
 
 async def _scan_group():
-    peer = await _tg_client.resolve_peer(BACKUP_GROUP_ID)
-    ch = tg_raw.types.InputChannel(channel_id=peer.channel_id,
-                                   access_hash=peer.access_hash)
-    latest = await _latest_msg_id()
-    start = meta_get("scan_cursor", 0) + 1
-    topics = {r["topic_id"]: r["path"]
-              for r in db_many("SELECT topic_id, path FROM topics")}
-    BATCH = 200
-    found_files = 0
-
-    for lo in range(start, latest + 1, BATCH):
-        hi = min(lo + BATCH, latest + 1)
-        _index_status["status"] = f"scanning {lo}/{latest}"
-        ids = [tg_raw.types.InputMessageID(id=i) for i in range(lo, hi)]
-        r = await _tg_client.invoke(
-            tg_raw.functions.channels.GetMessages(channel=ch, id=ids))
-
-        for m in r.messages:
-            if isinstance(m, tg_raw.types.MessageService):
-                act = m.action
-                if isinstance(act, tg_raw.types.MessageActionTopicCreate):
-                    topics[m.id] = _save_topic(m.id, act.title)
-                elif isinstance(act, tg_raw.types.MessageActionTopicEdit):
-                    new_title = getattr(act, "title", None)
-                    tid = _topic_id_of(m)
-                    if new_title and tid:
-                        topics[tid] = _save_topic(tid, new_title)
-                continue
-
-            media = getattr(m, "media", None)
-            if not isinstance(media, tg_raw.types.MessageMediaDocument):
-                continue
-            doc = media.document
-            if doc is None or not hasattr(doc, "attributes"):
-                continue
-            tid = _topic_id_of(m)
-            if tid not in topics:
-                continue
-            filename = f"file_{m.id}"
-            for attr in doc.attributes:
-                if isinstance(attr, tg_raw.types.DocumentAttributeFilename):
-                    filename = attr.file_name
-                    break
-            db_exec("""
-                INSERT OR IGNORE INTO files
-                    (msg_id, topic_id, folder_path, filename, size, mime_type)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (m.id, tid, topics[tid], filename,
-                  getattr(doc, "size", 0) or 0,
-                  getattr(doc, "mime_type", "") or ""))
-            found_files += 1
-
-        meta_set("scan_cursor", hi - 1)
-        await asyncio.sleep(0.4)   # avoid flood
-
-    db_exec("""
-        UPDATE topics SET files_indexed=1,
-            msg_count=(SELECT COUNT(*) FROM files WHERE files.topic_id=topics.topic_id)
-    """)
-    print(f"[index] scan done up to msg {latest}: +{found_files} files, "
-          f"{len(topics)} topics", flush=True)
+    global _scanning, _snapshot_dirty
+    _scanning = True
+    try:
+        peer = await _tg_client.resolve_peer(BACKUP_GROUP_ID)
+        ch = tg_raw.types.InputChannel(channel_id=peer.channel_id,
+                                       access_hash=peer.access_hash)
+        start = meta_get("scan_cursor", 0) + 1
+        latest = await _latest_msg_id()
+        if start >= latest:
+            print("[index] up to date, nothing to scan", flush=True)
+            return
+        BATCH = 100            # Telegram max ids per GetMessages call
+        found = 0
+        for lo in range(start, latest + 1, BATCH):
+            hi = min(lo + BATCH, latest + 1)
+            _index_status["status"] = f"scanning {lo}/{latest}"
+            ids = [tg_raw.types.InputMessageID(id=i) for i in range(lo, hi)]
+            r = await _invoke_safe(
+                tg_raw.functions.channels.GetMessages(channel=ch, id=ids))
+            for m in r.messages:
+                if _handle_raw_message(m):
+                    found += 1
+            meta_set("scan_cursor", hi - 1)
+            await asyncio.sleep(2.0)      # gentle pace, avoids FloodWait
+        _snapshot_dirty = True
+        print(f"[index] scan done up to msg {latest}: +{found} files, "
+              f"{len(_topics)} topics", flush=True)
+    finally:
+        _scanning = False
 
 async def _full_index():
-    if _index_status["status"].startswith("scanning"):
+    if _scanning:
         return
     _index_status["status"] = "scanning..."
     try:
@@ -403,15 +531,19 @@ async def _full_index():
         print(f"[index] Error: {e}", flush=True)
 
 def run_indexer():
-    """Runs on startup and every 30 minutes (incremental)."""
+    """Startup only: restore snapshot, catch up on new ids, then rely on live updates."""
     _tg_ready.wait()
-    while True:
-        try:
-            asyncio.run_coroutine_threadsafe(_full_index(), _tg_loop).result(timeout=3600)
-        except Exception as e:
-            _index_status["status"] = f"error: {e}"
-            print(f"[index] Error: {e}", flush=True)
-        time.sleep(1800)
+    try:
+        snapshot_load()
+    except Exception as e:
+        print(f"[snapshot] load failed: {e}", flush=True)
+    for r in db_many("SELECT topic_id, path FROM topics"):
+        _topics[r["topic_id"]] = r["path"]
+    try:
+        asyncio.run_coroutine_threadsafe(_full_index(), _tg_loop).result(timeout=7200)
+    except Exception as e:
+        _index_status["status"] = f"error: {e}"
+        print(f"[index] Error: {e}", flush=True)
 
 # ── Browser helpers ───────────────────────────────────────────────────────
 def build_tree(path=""):
@@ -908,6 +1040,7 @@ def reindex():
     db_exec("DELETE FROM files")
     db_exec("DELETE FROM topics")
     meta_set("scan_cursor", 0)
+    _topics.clear()
     _index_status["status"] = "idle"
     threading.Thread(
         target=lambda: asyncio.run_coroutine_threadsafe(
@@ -994,4 +1127,5 @@ app.jinja_env.filters["urlencode"] = lambda s: urlquote(str(s), safe="")
 if __name__ == "__main__":
     threading.Thread(target=run_telegram, daemon=True, name="tg_client").start()
     threading.Thread(target=run_indexer,  daemon=True, name="indexer").start()
+    threading.Thread(target=run_snapshotter, daemon=True, name="snapshotter").start()
     app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)
