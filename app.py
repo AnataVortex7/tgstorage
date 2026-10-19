@@ -3,7 +3,7 @@ Telegram Backup Browser — app.py
 Browse files backed up to Telegram via relay.py, from any browser.
 """
 
-import os, sqlite3, hashlib, hmac, secrets, time, threading, asyncio
+import os, sqlite3, hashlib, hmac, secrets, time, threading, asyncio, mimetypes
 from datetime import timedelta
 from functools import wraps
 
@@ -822,6 +822,8 @@ a.folder:hover{text-decoration:underline}
 .btn-tg{border-color:#1e6091;color:var(--blue);margin-left:.4rem}
 .btn-tg:hover{background:#1e6091;color:#fff}
 
+.btn-open{border-color:#d29922;color:#d29922;margin-right:.4rem}
+.btn-open:hover{background:#d29922;color:#0d1117}
 .srh{padding:.5rem 1.5rem .2rem;font-size:.875rem;color:var(--muted)}
 .srh b{color:var(--text)}
 .srh a{color:var(--blue);font-size:.82rem;margin-left:.5rem;text-decoration:none}
@@ -933,11 +935,15 @@ a.folder:hover{text-decoration:underline}
       </td>
       <td class="sz">{{ fmt_size(fi.size) }}</td>
       <td class="acts">
+        {% if can_view(fi) %}
+        <a class="btn-s btn-open" target="_blank" rel="noopener"
+           href="/stream/{{ fi.msg_id }}/{{ fi.filename|urlencode }}">▶ Open</a>
+        {% endif %}
         <a class="btn-s btn-dl"
            href="/download/{{ fi.msg_id }}/{{ fi.filename|urlencode }}">⬇ Download</a>
         <a class="btn-s btn-tg"
            href="#"
-           onclick="sendToBot({{ fi.msg_id }}, this); return false;">📤 Send</a>
+           onclick="sendToBot({{ fi.msg_id }}, this); return false;">📤 Telegram</a>
       </td>
     </tr>
     {% endfor %}
@@ -1008,6 +1014,7 @@ def browse(path):
         crumbs=crumbs, parent_url=parent_url,
         search_mode=False, q="",
         fmt_size=fmt_size,
+        can_view=can_view,
         idx_status=_index_status["status"],
         total_files=total_files,
     )
@@ -1029,6 +1036,7 @@ def search():
         crumbs=[], parent_url="/",
         search_mode=True, q=q,
         fmt_size=fmt_size,
+        can_view=can_view,
         idx_status=_index_status["status"],
         total_files=total_files,
     )
@@ -1075,15 +1083,142 @@ def download(msg_id, filename):
 
     return Response(stream_with_context(stream_and_clean()), headers=headers)
 
+# ── Inline viewing (stream from Telegram, no full download) ──────────────
+STREAM_CHUNK = 1024 * 1024      # pyrogram stream_media chunk size (1 MiB)
+
+_TEXT_EXT = {".txt", ".md", ".json", ".py", ".js", ".ts", ".jsx", ".tsx", ".css",
+             ".csv", ".log", ".yml", ".yaml", ".xml", ".sh", ".conf", ".ini",
+             ".toml", ".env", ".go", ".java", ".c", ".cpp", ".h", ".sql",
+             ".html", ".htm", ".rs", ".php", ".rb", ".gitignore"}
+
+def _view_mime(filename, mime):
+    """Content-Type to serve inline, or None if the file should be download-only."""
+    name = (filename or "").lower()
+    ext = os.path.splitext(name)[1]
+    mime = (mime or "").lower()
+    if ext == ".svg" or mime == "image/svg+xml":
+        return None                     # SVG can carry scripts
+    if ext in _TEXT_EXT or name in ("dockerfile", "makefile") or mime.startswith("text/"):
+        return "text/plain; charset=utf-8"   # html etc. shown as plain text, never executed
+    if mime.startswith(("video/", "audio/", "image/")) or mime == "application/pdf":
+        return mime
+    guessed = (mimetypes.guess_type(name)[0] or "").lower()
+    if guessed.startswith(("video/", "audio/", "image/")) and guessed != "image/svg+xml":
+        return guessed
+    if ext == ".pdf":
+        return "application/pdf"
+    return None
+
+def can_view(fi):
+    return _view_mime(fi["filename"], fi["mime_type"] or "") is not None
+
+def _parse_range(header, size):
+    """Returns (start, end), None (no Range header) or 'bad'."""
+    if not header or not header.startswith("bytes="):
+        return None
+    try:
+        a, b = header[6:].split(",")[0].strip().split("-", 1)
+        if a == "":
+            n = int(b)
+            start, end = max(0, size - n), size - 1
+        else:
+            start = int(a)
+            end = int(b) if b else size - 1
+        end = min(end, size - 1)
+        if start > end or start >= size:
+            return "bad"
+        return start, end
+    except Exception:
+        return "bad"
+
+# NOTE: every pyrogram call must be created INSIDE a coroutine that runs on the
+# Telegram loop (tg(...)). Calling _tg_client.xxx() directly from a Flask thread
+# makes pyrogram use another loop -> "attached to a different loop".
+async def _stream_open(msg_id, first_chunk, nchunks):
+    msg = await _tg_client.get_messages(BACKUP_GROUP_ID, msg_id)
+    return _tg_client.stream_media(msg, limit=nchunks, offset=first_chunk)
+
+async def _stream_next(agen):
+    try:
+        return await agen.__anext__()
+    except StopAsyncIteration:
+        return None
+
+async def _stream_close(agen):
+    try:
+        await agen.aclose()
+    except Exception:
+        pass
+
+@app.route("/stream/<int:msg_id>/<path:filename>")
+@require_auth
+def stream(msg_id, filename):
+    """Open a file in the browser (video/audio/image/pdf/text) with Range support."""
+    row = db_one("SELECT size, mime_type, filename FROM files WHERE msg_id=?", (msg_id,))
+    if not row or not row["size"]:
+        return jsonify({"error": "file not found in index"}), 404
+    ctype = _view_mime(row["filename"], row["mime_type"] or "")
+    if not ctype:
+        return jsonify({"error": "preview not supported for this file — use Download"}), 415
+
+    size = row["size"]
+    rng = _parse_range(request.headers.get("Range"), size)
+    if rng == "bad":
+        return Response(status=416, headers={"Content-Range": f"bytes */{size}"})
+    start, end = rng if rng else (0, size - 1)
+    length = end - start + 1
+    first_chunk = start // STREAM_CHUNK
+    skip = start % STREAM_CHUNK
+    nchunks = (skip + length + STREAM_CHUNK - 1) // STREAM_CHUNK
+
+    def generate():
+        agen = None
+        try:
+            agen = tg(_stream_open(msg_id, first_chunk, nchunks), timeout=30)
+            sent = 0
+            first = True
+            while sent < length:
+                chunk = tg(_stream_next(agen), timeout=60)
+                if chunk is None:
+                    break
+                if first:
+                    chunk = chunk[skip:]
+                    first = False
+                if len(chunk) > length - sent:
+                    chunk = chunk[:length - sent]
+                sent += len(chunk)
+                yield chunk
+        finally:
+            if agen is not None:
+                try:
+                    tg(_stream_close(agen), timeout=10)
+                except Exception:
+                    pass
+
+    headers = {
+        "Content-Type": ctype,
+        "Content-Length": str(length),
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": "inline",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, max-age=3600",
+    }
+    if rng:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return Response(stream_with_context(generate()),
+                    status=206 if rng else 200, headers=headers)
+
 @app.route("/sendtobot/<int:msg_id>")
 @require_auth
 def sendtobot(msg_id):
-    try:
-        tg(_tg_client.forward_messages(
+    async def _fwd():
+        return await _tg_client.forward_messages(
             chat_id=OWNER_CHAT_ID,
             from_chat_id=BACKUP_GROUP_ID,
             message_ids=msg_id,
-        ), timeout=30)
+        )
+    try:
+        tg(_fwd(), timeout=30)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 500
