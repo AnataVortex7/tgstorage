@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  tg-backup-browser:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - browser_data:/data
+    environment:
+      # ── Telegram ──────────────────────────────────────────────
+      API_ID:          "YOUR_API_ID"
+      API_HASH:        "YOUR_API_HASH"
+      BOT_TOKEN:       "NEW_BOT_TOKEN"         # नवीन bot — backup group मध्ये admin add कर
+      BOT_NAME:        "YourBotUsername"        # without @  (login deep link साठी)
+
+      # ── Group & owner ──────────────────────────────────────────
+      BACKUP_GROUP_ID: "-100XXXXXXXXXX"         # backup group ID
+      OWNER_CHAT_ID:   "1193564058"             # तुझा chat ID
+
+      # ── Web ────────────────────────────────────────────────────
+      WEB_PASSWORD:    "YourStrongPassword123!"
+      SECRET_KEY:      "CHANGE_THIS_RANDOM_64_CHARS"
+      WEB_URL:         "https://YOUR_APP.koyeb.app"
+
+volumes:
+  browser_data:
