@@ -511,14 +511,16 @@ p{color:#8b949e;font-size:.9rem;line-height:1.6}
 .success{color:#3fb950;font-size:1rem;font-weight:600}
 </style>
 <script>
+const TOKEN = "{{ token }}";
 let tries = 0;
 function poll() {
-  fetch('/check_token?t={{ token }}')
+  fetch('/check_token?t=' + TOKEN)
     .then(r => r.json())
     .then(d => {
       if (d.ok) {
         document.getElementById('status').innerHTML = '<span class="success">✅ Authenticated! Redirecting...</span>';
-        setTimeout(() => window.location.href = '/', 800);
+        // Redirect to /verify — this sets session, unblocks IP, deletes token
+        setTimeout(() => window.location.href = '/verify?token=' + TOKEN, 600);
       } else if (tries++ < 60) {
         setTimeout(poll, 3000);
       } else {
@@ -930,14 +932,11 @@ def bot_login():
 
 @app.route("/check_token")
 def check_token():
+    # Only CHECK — never delete or set session here.
+    # Polling JS redirects to /verify which does the actual login.
     token = request.args.get("t", "")
-    ip = get_ip()
     row = db_one("SELECT validated, created_at FROM login_tokens WHERE token=?", (token,))
     if row and row["validated"] and time.time() - row["created_at"] < 600:
-        session.permanent = True
-        session["authenticated"] = True
-        unblock_ip(ip)   # auto-unblock on successful Telegram login
-        db_exec("DELETE FROM login_tokens WHERE token=?", (token,))
         return jsonify({"ok": True})
     return jsonify({"ok": False})
 
