@@ -9,7 +9,7 @@ from functools import wraps
 
 from flask import (Flask, render_template_string, redirect, url_for,
                    session, request, Response, jsonify, stream_with_context)
-from pyrogram import Client, idle
+from pyrogram import Client
 from pyrogram import raw as tg_raw
 
 # ── Config (from Docker env vars) ───────────────────────────────────────
@@ -247,7 +247,7 @@ def run_telegram():
         await _tg_client.start()
         _tg_ready.set()
         print("[tg] Client ready", flush=True)
-        await idle()
+        await asyncio.Event().wait()  # keep loop running (no signal handlers needed)
 
     _tg_loop.run_until_complete(_start())
 
