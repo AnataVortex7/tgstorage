@@ -274,35 +274,51 @@ def tg(coro, timeout=120):
 _index_status = {"status": "idle", "progress": "", "last_run": 0}
 
 async def _get_all_topics():
-    """Return list of (topic_id, title). Uses raw API if available,
-    otherwise falls back to pyrofork's high-level get_forum_topics."""
-    fn = getattr(tg_raw.functions.channels, "GetForumTopics", None)
+    """Return list of (topic_id, title). Tries every known API shape."""
+    peer = await _tg_client.resolve_peer(BACKUP_GROUP_ID)
     result = []
 
-    if fn is None:
-        print("[index] raw GetForumTopics missing — using client.get_forum_topics", flush=True)
-        async for t in _tg_client.get_forum_topics(BACKUP_GROUP_ID):
-            result.append((t.id, t.title))
+    msg_fn = getattr(tg_raw.functions.messages, "GetForumTopics", None)
+    ch_fn = getattr(tg_raw.functions.channels, "GetForumTopics", None)
+
+    if msg_fn is not None or ch_fn is not None:
+        offset_date, offset_id, offset_topic = 0, 0, 0
+        while True:
+            if msg_fn is not None:
+                req = msg_fn(
+                    peer=peer,
+                    offset_date=offset_date,
+                    offset_id=offset_id,
+                    offset_topic=offset_topic,
+                    limit=100,
+                )
+            else:
+                req = ch_fn(
+                    channel=peer,
+                    offset_date=offset_date,
+                    offset_id=offset_id,
+                    offset_topic=offset_topic,
+                    limit=100,
+                )
+            r = await _tg_client.invoke(req)
+            topics = [t for t in r.topics if hasattr(t, "title")]
+            if not topics:
+                break
+            for t in topics:
+                result.append((t.id, t.title))
+            if len(r.topics) < 100:
+                break
+            last = r.topics[-1]
+            offset_topic = last.id
+            offset_id = last.top_message
+            msgs = {m.id: m for m in r.messages}
+            offset_date = msgs[offset_id].date if offset_id in msgs else 0
+        print(f"[index] topics fetched via raw API: {len(result)}", flush=True)
         return result
 
-    peer = await _tg_client.resolve_peer(BACKUP_GROUP_ID)
-    offset_topic = 0
-    while True:
-        r = await _tg_client.invoke(fn(
-            channel=peer,
-            q="",
-            offset_date=0,
-            offset_id=0,
-            offset_topic=offset_topic,
-            limit=100,
-        ))
-        if not r.topics:
-            break
-        for t in r.topics:
-            result.append((t.id, t.title))
-        if len(r.topics) < 100:
-            break
-        offset_topic = r.topics[-1].id
+    print("[index] no raw GetForumTopics — using client.get_forum_topics", flush=True)
+    async for t in _tg_client.get_forum_topics(BACKUP_GROUP_ID):
+        result.append((t.id, t.title))
     return result
 
 async def _fetch_topics():
