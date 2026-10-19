@@ -176,6 +176,37 @@ _tg_loop   = None
 _tg_client = None
 _tg_ready  = threading.Event()
 
+def _load_session():
+    """Saved bot session string (Mongo, or SESSION_STRING env). Reusing it
+    avoids auth.ImportBotAuthorization on every restart — that call is what
+    Telegram flood-limits when you redeploy several times."""
+    env = os.environ.get("SESSION_STRING", "").strip()
+    if env:
+        return env
+    if not MONGO_URI:
+        return ""
+    try:
+        from pymongo import MongoClient
+        db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]
+        doc = db["session"].find_one({"_id": "bot"})
+        return (doc or {}).get("session_string", "")
+    except Exception as e:
+        print(f"[session] load failed: {e}", flush=True)
+        return ""
+
+def _save_session(session_string):
+    if not MONGO_URI or not session_string:
+        return
+    try:
+        from pymongo import MongoClient
+        db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]
+        db["session"].replace_one({"_id": "bot"},
+                                  {"_id": "bot", "session_string": session_string},
+                                  upsert=True)
+        print("[session] saved", flush=True)
+    except Exception as e:
+        print(f"[session] save failed: {e}", flush=True)
+
 def run_telegram():
     global _tg_loop, _tg_client
     _tg_loop = asyncio.new_event_loop()
@@ -185,11 +216,16 @@ def run_telegram():
         global _tg_client
         from pyrogram import filters
 
+        _loop = asyncio.get_running_loop()
+        sess = await _loop.run_in_executor(None, _load_session)
+        print(f"[session] using saved session: {bool(sess)}", flush=True)
+
         _tg_client = Client(
             name="tg_browser",
             api_id=API_ID,
             api_hash=API_HASH,
             bot_token=BOT_TOKEN,
+            session_string=sess or None,
             in_memory=True,
             sleep_threshold=120,
         )
@@ -268,7 +304,25 @@ def run_telegram():
         from pyrogram.handlers import RawUpdateHandler
         # group=-1 so it runs alongside (not instead of) the command handlers
         _tg_client.add_handler(RawUpdateHandler(_on_raw_update), group=-1)
-        await _tg_client.start()
+        while True:
+            try:
+                await _tg_client.start()
+                break
+            except FloodWait as e:
+                wait = int(getattr(e, "value", 60)) + 5
+                _index_status["status"] = f"telegram login flood wait {wait}s"
+                print(f"[tg] login FloodWait {wait}s — waiting (don't redeploy)", flush=True)
+                try:
+                    await _tg_client.disconnect()
+                except Exception:
+                    pass
+                await asyncio.sleep(wait)
+        if not sess:
+            try:
+                new_sess = await _tg_client.export_session_string()
+                await _loop.run_in_executor(None, _save_session, new_sess)
+            except Exception as e:
+                print(f"[session] export failed: {e}", flush=True)
         _tg_ready.set()
         print("[tg] Client ready", flush=True)
         await asyncio.Event().wait()
