@@ -456,9 +456,20 @@ input:focus{border-color:#58a6ff}
   <h2>Backup Browser</h2>
   {% if blocked %}
   <div class="blocked">
-    ⛔ Too many wrong attempts.<br>Blocked for 24 hours.<br><br>
-    <small>Send <code>/unblock &lt;your IP&gt;</code> to the auth bot to unblock early.</small>
+    ⛔ Too many wrong attempts. Blocked for 24 hours.<br><br>
+    {% if client_ip %}
+    <small>Your IP: <code>{{ client_ip }}</code><br>
+    Send <code>/unblock {{ client_ip }}</code> to the bot.</small>
+    {% endif %}
   </div>
+  {% if auth_bot_name %}
+  <div style="margin-top:1rem">
+    <div class="divider">— or login via Telegram to unblock —</div>
+    <a href="/bot_login" style="text-decoration:none">
+      <button class="btn btn-tg">🤖 Login via Telegram Bot</button>
+    </a>
+  </div>
+  {% endif %}
   {% else %}
     {% if error %}<div class="err">{{ error }}</div>{% endif %}
     <form method="POST" action="/login">
@@ -884,7 +895,7 @@ def login_page():
     ip = get_ip()
     if is_blocked(ip):
         return render_template_string(LOGIN_HTML,
-            blocked=True, error=None, auth_bot_name=BOT_NAME)
+            blocked=True, error=None, auth_bot_name=BOT_NAME, client_ip=ip)
     if request.method == "POST":
         pwd = request.form.get("password", "")
         if check_password(pwd):
@@ -897,18 +908,17 @@ def login_page():
         remaining = max(0, MAX_FAIL - attempts)
         if remaining == 0:
             return render_template_string(LOGIN_HTML,
-                blocked=True, error=None, auth_bot_name=BOT_NAME)
+                blocked=True, error=None, auth_bot_name=BOT_NAME, client_ip=ip)
         return render_template_string(LOGIN_HTML, blocked=False,
             error=f"❌ Wrong password. {remaining} attempt{'s' if remaining != 1 else ''} remaining.",
-            auth_bot_name=BOT_NAME)
+            auth_bot_name=BOT_NAME, client_ip=ip)
     return render_template_string(LOGIN_HTML,
-        blocked=False, error=None, auth_bot_name=BOT_NAME)
+        blocked=False, error=None, auth_bot_name=BOT_NAME, client_ip=ip)
 
 @app.route("/bot_login")
 def bot_login():
     ip = get_ip()
-    if is_blocked(ip):
-        return redirect("/login")
+    # Blocked IPs can still use bot login — it auto-unblocks on success
     if not BOT_NAME:
         return redirect("/login")
     token = secrets.token_urlsafe(32)
@@ -921,22 +931,26 @@ def bot_login():
 @app.route("/check_token")
 def check_token():
     token = request.args.get("t", "")
+    ip = get_ip()
     row = db_one("SELECT validated, created_at FROM login_tokens WHERE token=?", (token,))
     if row and row["validated"] and time.time() - row["created_at"] < 600:
         session.permanent = True
         session["authenticated"] = True
+        unblock_ip(ip)   # auto-unblock on successful Telegram login
         db_exec("DELETE FROM login_tokens WHERE token=?", (token,))
         return jsonify({"ok": True})
     return jsonify({"ok": False})
 
 @app.route("/verify")
 def verify():
-    """Called from auth bot's clickable link — instant login."""
+    """Called from auth bot's clickable link — instant login + auto-unblock."""
     token = request.args.get("token", "")
+    ip = get_ip()
     row = db_one("SELECT validated, created_at FROM login_tokens WHERE token=?", (token,))
     if row and row["validated"] and time.time() - row["created_at"] < 600:
         session.permanent = True
         session["authenticated"] = True
+        unblock_ip(ip)   # auto-unblock on successful Telegram login
         db_exec("DELETE FROM login_tokens WHERE token=?", (token,))
         return redirect("/")
     return redirect("/login")
