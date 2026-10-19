@@ -3,7 +3,7 @@ Telegram Backup Browser — app.py
 Browse files backed up to Telegram via relay.py, from any browser.
 """
 
-import os, sqlite3, hashlib, secrets, time, threading, asyncio, tempfile
+import os, sqlite3, hashlib, hmac, secrets, time, threading, asyncio
 from datetime import timedelta
 from functools import wraps
 
@@ -12,11 +12,11 @@ from flask import (Flask, render_template_string, redirect, url_for,
 from pyrogram import Client
 from pyrogram import raw as tg_raw
 
-# ── Config (from Docker env vars) ───────────────────────────────────────
+# ── Config (from env vars) ───────────────────────────────────────────────
 API_ID          = int(os.environ.get("API_ID", "0"))
 API_HASH        = os.environ.get("API_HASH", "")
-BOT_TOKEN       = os.environ.get("BOT_TOKEN", "")          # single bot — added to backup group as admin
-BOT_NAME        = os.environ.get("BOT_NAME", "")           # @username of the bot (no @)
+BOT_TOKEN       = os.environ.get("BOT_TOKEN", "")
+BOT_NAME        = os.environ.get("BOT_NAME", "").lstrip("@")
 BACKUP_GROUP_ID = int(os.environ.get("BACKUP_GROUP_ID", "0"))
 OWNER_CHAT_ID   = int(os.environ.get("OWNER_CHAT_ID", "0"))
 WEB_PASSWORD    = os.environ.get("WEB_PASSWORD", "changeme")
@@ -35,6 +35,19 @@ os.makedirs(TMP_DIR,  exist_ok=True)
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.permanent_session_lifetime = timedelta(days=7)
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=WEB_URL.startswith("https"),
+    SESSION_COOKIE_HTTPONLY=True,
+)
+print(
+    f"[env] WEB_PASSWORD len={len(WEB_PASSWORD)} "
+    f"default={WEB_PASSWORD == 'changeme'} | "
+    f"BACKUP_GROUP_ID={BACKUP_GROUP_ID} | "
+    f"SECRET_KEY_from_env={'SECRET_KEY' in os.environ} | "
+    f"WEB_URL={WEB_URL}",
+    flush=True,
+)
 
 # ── Database ─────────────────────────────────────────────────────────────
 _db_lock = threading.Lock()
@@ -139,8 +152,9 @@ def unblock_ip(ip):
     db_exec("UPDATE blocked_ips SET attempts=0, blocked_until=0 WHERE ip=?", (ip,))
 
 def check_password(pwd):
-    return (hashlib.sha256(pwd.encode()).hexdigest() ==
-            hashlib.sha256(WEB_PASSWORD.encode()).hexdigest())
+    a = hashlib.sha256((pwd or "").strip().encode()).digest()
+    b = hashlib.sha256((WEB_PASSWORD or "").strip().strip('"').strip("'").encode()).digest()
+    return hmac.compare_digest(a, b)
 
 def require_auth(f):
     @wraps(f)
@@ -172,7 +186,7 @@ def run_telegram():
             in_memory=True,
         )
 
-        # ── /start TOKEN  — web login via deep link ──────────────────────
+        # ── /start TOKEN — approve web login ─────────────────────────────
         @_tg_client.on_message(filters.command("start") & filters.private)
         async def on_start(client, msg):
             if msg.from_user.id != OWNER_CHAT_ID:
@@ -194,14 +208,13 @@ def run_telegram():
                 await msg.reply("⏰ Link expired (5 min). Request a new one.")
                 return
             db_exec("UPDATE login_tokens SET validated=1 WHERE token=?", (token,))
-            verify_url = f"{WEB_URL}/verify?token={token}"
             await msg.reply(
-                f"✅ **Login approved!**\n\n"
-                f"[🌐 Open Backup Browser]({verify_url})\n\n"
-                "_Single-use link, valid for 5 minutes._"
+                "✅ **Login approved!**\n\n"
+                "आता ज्या browser मध्ये login page उघडलं होतं तिथे परत जा, "
+                "ते आपोआप login होईल."
             )
 
-        # ── /unblock [IP]  — unblock a blocked IP ────────────────────────
+        # ── /unblock [IP] ────────────────────────────────────────────────
         @_tg_client.on_message(filters.command("unblock") & filters.private)
         async def on_unblock(client, msg):
             if msg.from_user.id != OWNER_CHAT_ID:
@@ -229,7 +242,7 @@ def run_telegram():
             unblock_ip(ip)
             await msg.reply(f"✅ `{ip}` unblocked.")
 
-        # ── /status  — index + DB stats ──────────────────────────────────
+        # ── /status ──────────────────────────────────────────────────────
         @_tg_client.on_message(filters.command("status") & filters.private)
         async def on_status(client, msg):
             if msg.from_user.id != OWNER_CHAT_ID:
@@ -247,7 +260,7 @@ def run_telegram():
         await _tg_client.start()
         _tg_ready.set()
         print("[tg] Client ready", flush=True)
-        await asyncio.Event().wait()  # keep loop running (no signal handlers needed)
+        await asyncio.Event().wait()
 
     _tg_loop.run_until_complete(_start())
 
@@ -257,18 +270,25 @@ def tg(coro, timeout=120):
         raise RuntimeError("Telegram client not ready yet")
     return asyncio.run_coroutine_threadsafe(coro, _tg_loop).result(timeout=timeout)
 
-
-
 # ── Indexer ──────────────────────────────────────────────────────────────
 _index_status = {"status": "idle", "progress": "", "last_run": 0}
 
-async def _fetch_topics():
-    """Fetch all forum topics from backup group and store in DB."""
+async def _get_all_topics():
+    """Return list of (topic_id, title). Uses raw API if available,
+    otherwise falls back to pyrofork's high-level get_forum_topics."""
+    fn = getattr(tg_raw.functions.channels, "GetForumTopics", None)
+    result = []
+
+    if fn is None:
+        print("[index] raw GetForumTopics missing — using client.get_forum_topics", flush=True)
+        async for t in _tg_client.get_forum_topics(BACKUP_GROUP_ID):
+            result.append((t.id, t.title))
+        return result
+
     peer = await _tg_client.resolve_peer(BACKUP_GROUP_ID)
-    all_topics = []
     offset_topic = 0
     while True:
-        r = await _tg_client.invoke(tg_raw.functions.channels.GetForumTopics(
+        r = await _tg_client.invoke(fn(
             channel=peer,
             q="",
             offset_date=0,
@@ -278,17 +298,19 @@ async def _fetch_topics():
         ))
         if not r.topics:
             break
-        all_topics.extend(r.topics)
+        for t in r.topics:
+            result.append((t.id, t.title))
         if len(r.topics) < 100:
             break
         offset_topic = r.topics[-1].id
+    return result
 
-    for t in all_topics:
-        # Skip the "General" topic (id=1)
-        if t.id == 1:
+async def _fetch_topics():
+    """Fetch all forum topics from backup group and store in DB."""
+    all_topics = await _get_all_topics()
+    for tid, raw_name in all_topics:
+        if tid == 1:   # skip "General"
             continue
-        raw_name = t.title
-        # Normalize Windows backslash path → forward slash
         path = raw_name.replace("\\", "/").replace("//", "/").strip("/")
         parts = path.rsplit("/", 1)
         parent = parts[0] if len(parts) > 1 else ""
@@ -300,7 +322,7 @@ async def _fetch_topics():
                 name=excluded.name, path=excluded.path,
                 parent_path=excluded.parent_path, depth=excluded.depth,
                 updated_at=excluded.updated_at
-        """, (t.id, raw_name, path, parent, depth, time.time()))
+        """, (tid, raw_name, path, parent, depth, time.time()))
     return len(all_topics)
 
 async def _index_topic_files(topic_id, path):
@@ -363,7 +385,7 @@ async def _full_index():
             await _index_topic_files(t["topic_id"], t["path"])
         except Exception as e:
             print(f"[index] Error indexing topic {t['path']}: {e}", flush=True)
-        await asyncio.sleep(0.3)  # avoid flood
+        await asyncio.sleep(0.3)
 
     _index_status["status"] = "done"
     _index_status["last_run"] = time.time()
@@ -391,9 +413,8 @@ def build_tree(path=""):
     files = []
     if topic:
         if not topic["files_indexed"]:
-            # Lazy index on first open
             try:
-                tg(asyncio.ensure_future(_index_topic_files(topic["topic_id"], path), loop=_tg_loop), timeout=60)
+                tg(_index_topic_files(topic["topic_id"], path), timeout=60)
             except Exception:
                 pass
         files = db_many(
@@ -514,19 +535,18 @@ p{color:#8b949e;font-size:.9rem;line-height:1.6}
 const TOKEN = "{{ token }}";
 let tries = 0;
 function poll() {
-  fetch('/check_token?t=' + TOKEN)
+  fetch('/check_token?t=' + TOKEN, {credentials: 'same-origin'})
     .then(r => r.json())
     .then(d => {
       if (d.ok) {
         document.getElementById('status').innerHTML = '<span class="success">✅ Authenticated! Redirecting...</span>';
-        // Redirect to /verify — this sets session, unblocks IP, deletes token
-        setTimeout(() => window.location.href = '/verify?token=' + TOKEN, 600);
-      } else if (tries++ < 60) {
+        setTimeout(() => window.location.href = '/', 600);
+      } else if (tries++ < 100) {
         setTimeout(poll, 3000);
       } else {
         document.getElementById('status').textContent = '⏰ Timed out. Please go back and try again.';
       }
-    }).catch(() => { if (tries++ < 60) setTimeout(poll, 5000); });
+    }).catch(() => { if (tries++ < 100) setTimeout(poll, 5000); });
 }
 window.onload = () => setTimeout(poll, 2000);
 </script>
@@ -535,8 +555,8 @@ window.onload = () => setTimeout(poll, 2000);
 <div class="card">
   <div style="font-size:2.5rem;margin-bottom:.5rem">🤖</div>
   <h2>Login via Telegram</h2>
-  <p>Click the button below to authenticate using Telegram.<br>
-  The bot will send you a login link.</p>
+  <p>Click the button below and press <b>Start</b> in Telegram.<br>
+  Then come back to this tab — it logs in automatically.</p>
   <a class="btn" href="{{ bot_url }}" target="_blank">Open @{{ auth_bot_name }}</a>
   <p id="status"><span class="spin">⏳</span> Waiting for Telegram authentication…</p>
   <p style="margin-top:1rem;font-size:.8rem;color:#484f58">
@@ -558,7 +578,6 @@ BROWSER_HTML = r"""<!DOCTYPE html>
   --muted:#8b949e;--blue:#58a6ff;--green:#3fb950;--yellow:#d29922}
 body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;min-height:100vh}
 
-/* ── Header ── */
 header{background:var(--surf);border-bottom:1px solid var(--border);
   padding:.7rem 1.5rem;display:flex;align-items:center;gap:1rem;
   position:sticky;top:0;z-index:20}
@@ -578,13 +597,11 @@ header{background:var(--surf);border-bottom:1px solid var(--border);
 a.logout{color:var(--muted);font-size:.85rem;text-decoration:none}
 a.logout:hover{color:var(--text)}
 
-/* ── Breadcrumb ── */
 .bc{padding:.6rem 1.5rem;font-size:.875rem;color:var(--muted);display:flex;
   flex-wrap:wrap;gap:.25rem;align-items:center}
 .bc a{color:var(--blue);text-decoration:none}.bc a:hover{text-decoration:underline}
 .bc .sep{color:#484f58}
 
-/* ── Table ── */
 .wrap{max-width:1200px;margin:0 auto;padding:.5rem 1.5rem 4rem}
 table{width:100%;border-collapse:collapse}
 thead th{text-align:left;padding:.5rem 1rem;color:var(--muted);font-size:.75rem;
@@ -605,20 +622,16 @@ a.folder:hover{text-decoration:underline}
 .btn-tg{border-color:#1e6091;color:var(--blue);margin-left:.4rem}
 .btn-tg:hover{background:#1e6091;color:#fff}
 
-/* ── Search results header ── */
 .srh{padding:.5rem 1.5rem .2rem;font-size:.875rem;color:var(--muted)}
 .srh b{color:var(--text)}
 .srh a{color:var(--blue);font-size:.82rem;margin-left:.5rem;text-decoration:none}
 
-/* ── Empty ── */
 .empty{text-align:center;padding:4rem;color:var(--muted)}
 
-/* ── Toast ── */
 #toast{position:fixed;bottom:1.5rem;right:1.5rem;background:#238636;color:#fff;
   padding:.7rem 1.2rem;border-radius:8px;font-size:.9rem;display:none;
   box-shadow:0 4px 12px rgba(0,0,0,.4);z-index:100}
 
-/* ── Status bar ── */
 .statusbar{position:fixed;bottom:0;left:0;right:0;background:var(--surf);
   border-top:1px solid var(--border);padding:.35rem 1.5rem;font-size:.78rem;
   color:var(--muted);display:flex;gap:1.5rem;align-items:center}
@@ -802,7 +815,6 @@ def browse(path):
 @app.route("/search")
 @require_auth
 def search():
-    from urllib.parse import quote
     q = request.args.get("q", "").strip()
     files = []
     if q:
@@ -879,7 +891,6 @@ def sendtobot(msg_id):
 @app.route("/reindex")
 @require_auth
 def reindex():
-    # Reset files_indexed so full re-index runs
     db_exec("UPDATE topics SET files_indexed=0")
     threading.Thread(
         target=lambda: asyncio.run_coroutine_threadsafe(
@@ -919,10 +930,9 @@ def login_page():
 
 @app.route("/bot_login")
 def bot_login():
-    ip = get_ip()
-    # Blocked IPs can still use bot login — it auto-unblocks on success
     if not BOT_NAME:
         return redirect("/login")
+    db_exec("DELETE FROM login_tokens WHERE created_at < ?", (time.time() - 900,))
     token = secrets.token_urlsafe(32)
     db_exec("INSERT INTO login_tokens (token, created_at) VALUES (?, ?)",
             (token, time.time()))
@@ -932,27 +942,17 @@ def bot_login():
 
 @app.route("/check_token")
 def check_token():
-    # Only CHECK — never delete or set session here.
-    # Polling JS redirects to /verify which does the actual login.
+    """Polled by the browser that opened /bot_login. Once the bot has approved
+    the token, THIS browser gets the session cookie."""
     token = request.args.get("t", "")
     row = db_one("SELECT validated, created_at FROM login_tokens WHERE token=?", (token,))
-    if row and row["validated"] and time.time() - row["created_at"] < 600:
-        return jsonify({"ok": True})
-    return jsonify({"ok": False})
-
-@app.route("/verify")
-def verify():
-    """Called from auth bot's clickable link — instant login + auto-unblock."""
-    token = request.args.get("token", "")
-    ip = get_ip()
-    row = db_one("SELECT validated, created_at FROM login_tokens WHERE token=?", (token,))
-    if row and row["validated"] and time.time() - row["created_at"] < 600:
+    if row and row["validated"] and time.time() - row["created_at"] < 300:
         session.permanent = True
         session["authenticated"] = True
-        unblock_ip(ip)   # auto-unblock on successful Telegram login
+        unblock_ip(get_ip())
         db_exec("DELETE FROM login_tokens WHERE token=?", (token,))
-        return redirect("/")
-    return redirect("/login")
+        return jsonify({"ok": True})
+    return jsonify({"ok": False})
 
 @app.route("/logout")
 def logout():
