@@ -1,11 +1,15 @@
 """
 Telegram Backup Browser — app.py
-Browse files backed up to Telegram via relay.py, from any browser.
+Browse files backed up to Telegram groups (forum topics = folders) from any browser.
+
+v2: multiple groups (add / switch from the UI), periodic "anything new?" check
+    (interval changeable from the browser), and a security hardening pass.
 """
 
-import os, sqlite3, hashlib, hmac, secrets, time, threading, asyncio, mimetypes
+import os, sys, re, sqlite3, hashlib, hmac, secrets, time, threading, asyncio, mimetypes, ipaddress
 from datetime import timedelta
 from functools import wraps
+from urllib.parse import quote as urlquote
 
 from flask import (Flask, render_template_string, redirect, url_for,
                    session, request, Response, jsonify, stream_with_context)
@@ -14,20 +18,65 @@ from pyrogram import raw as tg_raw
 from pyrogram.errors import FloodWait
 
 # ── Config (from env vars) ───────────────────────────────────────────────
-API_ID          = int(os.environ.get("API_ID", "0"))
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+API_ID          = _env_int("API_ID", 0)
 API_HASH        = os.environ.get("API_HASH", "")
 BOT_TOKEN       = os.environ.get("BOT_TOKEN", "")
 BOT_NAME        = os.environ.get("BOT_NAME", "").lstrip("@")
-BACKUP_GROUP_ID = int(os.environ.get("BACKUP_GROUP_ID", "0"))
-OWNER_CHAT_ID   = int(os.environ.get("OWNER_CHAT_ID", "0"))
-WEB_PASSWORD    = os.environ.get("WEB_PASSWORD", "changeme")
-SECRET_KEY      = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+BACKUP_GROUP_ID = _env_int("BACKUP_GROUP_ID", 0)          # first / legacy group
+OWNER_CHAT_ID   = _env_int("OWNER_CHAT_ID", 0)
+WEB_PASSWORD    = os.environ.get("WEB_PASSWORD", "")
 WEB_URL         = os.environ.get("WEB_URL", "http://localhost:8080")
 MONGO_URI       = os.environ.get("MONGO_URI", "")      # optional: persists index across restarts
 MONGO_DB        = os.environ.get("MONGO_DB", "tgbackup")
 
-MAX_FAIL        = 2         # wrong password attempts before block
-BLOCK_SECS      = 86400     # 24 hours
+# Extra groups that are always present (comma separated). Groups can also be
+# added later from the web UI (they are stored in SQLite / the Mongo snapshot).
+ENV_GROUP_IDS = []
+for _x in [str(BACKUP_GROUP_ID)] + os.environ.get("BACKUP_GROUP_IDS", "").split(","):
+    try:
+        _g = int(_x.strip())
+    except ValueError:
+        continue
+    if _g and _g not in ENV_GROUP_IDS:
+        ENV_GROUP_IDS.append(_g)
+LEGACY_GID = BACKUP_GROUP_ID or (ENV_GROUP_IDS[0] if ENV_GROUP_IDS else 0)
+
+MAX_GROUPS   = 20
+MIN_POLL     = 10          # seconds — lowest "check for new files" interval
+MAX_POLL     = 3600
+POLL_DEFAULT = min(MAX_POLL, max(MIN_POLL, _env_int("POLL_INTERVAL", 60)))
+MAX_FAIL     = _env_int("MAX_FAIL", 2)           # wrong password attempts before block
+BLOCK_SECS   = _env_int("BLOCK_SECS", 86400)     # 24 hours
+# How many reverse proxies sit in front of this app (Koyeb/Render/Cloudflare...).
+# The client IP is taken from the RIGHT side of X-Forwarded-For, so a visitor
+# can't fake it. 0 = no proxy (use the socket address).
+TRUST_PROXY  = _env_int("TRUST_PROXY", 1)
+
+# ── Security: refuse obviously unsafe config ──────────────────────────────
+_pw = (WEB_PASSWORD or "").strip().strip('"').strip("'")
+if _pw.lower() in ("", "changeme", "yourstrongpassword123!"):
+    print("[security] WEB_PASSWORD is empty / default — refusing to start. "
+          "Set a strong WEB_PASSWORD env var.", flush=True)
+    sys.exit(1)
+if len(_pw) < 10:
+    print("[security] WARNING: WEB_PASSWORD is shorter than 10 characters.", flush=True)
+
+_sk = os.environ.get("SECRET_KEY", "")
+if len(_sk) < 32 or _sk.startswith("CHANGE_THIS"):
+    print("[security] WARNING: SECRET_KEY missing/weak — using a random key "
+          "(everyone gets logged out on every restart). Set SECRET_KEY to 64 random chars.",
+          flush=True)
+    _sk = secrets.token_hex(32)
+SECRET_KEY = _sk
+if "localhost" in WEB_URL or "127.0.0.1" in WEB_URL:
+    print("[config] WARNING: WEB_URL is localhost — the login link sent by the bot will not work "
+          "from your phone. Set WEB_URL to your public https URL.", flush=True)
 
 DB_PATH  = "/data/browser.db"
 TMP_DIR  = "/tmp/tg_dl"
@@ -42,15 +91,30 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=WEB_URL.startswith("https"),
     SESSION_COOKIE_HTTPONLY=True,
+    MAX_CONTENT_LENGTH=1024 * 1024,      # API bodies are tiny JSON
 )
-print(
-    f"[env] WEB_PASSWORD len={len(WEB_PASSWORD)} "
-    f"default={WEB_PASSWORD == 'changeme'} | "
-    f"BACKUP_GROUP_ID={BACKUP_GROUP_ID} | "
-    f"SECRET_KEY_from_env={'SECRET_KEY' in os.environ} | "
-    f"WEB_URL={WEB_URL}",
-    flush=True,
-)
+print(f"[env] groups={ENV_GROUP_IDS} | TRUST_PROXY={TRUST_PROXY} | "
+      f"SECRET_KEY_from_env={'SECRET_KEY' in os.environ} | WEB_URL={WEB_URL}", flush=True)
+
+@app.after_request
+def _security_headers(resp):
+    h = resp.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("Referrer-Policy", "no-referrer")
+    h.setdefault("X-Frame-Options", "SAMEORIGIN")        # same-origin: preview iframe still works
+    if resp.mimetype == "text/html":
+        h.setdefault("Content-Security-Policy",
+                     "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                     "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+                     "media-src 'self' blob:; frame-src 'self'; object-src 'self'; "
+                     "connect-src 'self'; base-uri 'none'; form-action 'self'; "
+                     "frame-ancestors 'self'")
+        h.setdefault("Cache-Control", "no-store")
+    if request.path.startswith("/api/"):
+        h["Cache-Control"] = "no-store"
+    if WEB_URL.startswith("https"):
+        h.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return resp
 
 # ── Database ─────────────────────────────────────────────────────────────
 _db_lock = threading.Lock()
@@ -62,11 +126,14 @@ def get_db():
     return conn
 
 def db_exec(sql, params=()):
+    """Runs a write; returns the number of rows affected."""
     with _db_lock:
         conn = get_db()
-        conn.execute(sql, params)
+        cur = conn.execute(sql, params)
         conn.commit()
+        n = cur.rowcount
         conn.close()
+        return n
 
 def db_many(sql, params=()):
     with _db_lock:
@@ -85,34 +152,56 @@ def db_one(sql, params=()):
 def init_db():
     with _db_lock:
         conn = get_db()
+        tcols = {r[1] for r in conn.execute("PRAGMA table_info(topics)")}
+        legacy = bool(tcols) and "group_id" not in tcols
+        if legacy:      # v1 (single group) database -> migrate below
+            conn.executescript("""
+                DROP INDEX IF EXISTS idx_files_topic;
+                DROP INDEX IF EXISTS idx_files_path;
+                DROP INDEX IF EXISTS idx_files_name;
+                ALTER TABLE topics RENAME TO topics_old;
+                ALTER TABLE files  RENAME TO files_old;
+            """)
         conn.executescript("""
+            CREATE TABLE IF NOT EXISTS groups (
+                group_id  INTEGER PRIMARY KEY,
+                title     TEXT DEFAULT '',
+                source    TEXT DEFAULT 'ui',
+                added_at  REAL DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS topics (
-                topic_id    INTEGER PRIMARY KEY,
+                group_id    INTEGER NOT NULL,
+                topic_id    INTEGER NOT NULL,
                 name        TEXT NOT NULL,
                 path        TEXT NOT NULL,
                 parent_path TEXT NOT NULL DEFAULT '',
                 depth       INTEGER DEFAULT 0,
                 msg_count   INTEGER DEFAULT 0,
                 files_indexed INTEGER DEFAULT 0,
-                updated_at  REAL DEFAULT 0
+                updated_at  REAL DEFAULT 0,
+                PRIMARY KEY (group_id, topic_id)
             );
             CREATE TABLE IF NOT EXISTS files (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id    INTEGER NOT NULL,
                 msg_id      INTEGER NOT NULL,
                 topic_id    INTEGER NOT NULL,
                 folder_path TEXT NOT NULL,
                 filename    TEXT NOT NULL,
                 size        INTEGER DEFAULT 0,
                 mime_type   TEXT DEFAULT '',
-                UNIQUE(msg_id, topic_id)
+                UNIQUE(group_id, msg_id, topic_id)
             );
-            CREATE INDEX IF NOT EXISTS idx_files_topic  ON files(topic_id);
-            CREATE INDEX IF NOT EXISTS idx_files_path   ON files(folder_path);
+            CREATE INDEX IF NOT EXISTS idx_files_gtopic ON files(group_id, topic_id);
+            CREATE INDEX IF NOT EXISTS idx_files_gpath  ON files(group_id, folder_path);
+            CREATE INDEX IF NOT EXISTS idx_files_gmsg   ON files(group_id, msg_id);
             CREATE INDEX IF NOT EXISTS idx_files_name   ON files(filename COLLATE NOCASE);
             CREATE TABLE IF NOT EXISTS login_tokens (
                 token       TEXT PRIMARY KEY,
                 created_at  REAL NOT NULL,
-                validated   INTEGER DEFAULT 0
+                validated   INTEGER DEFAULT 0,
+                ip          TEXT DEFAULT '',
+                ua          TEXT DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
@@ -124,15 +213,91 @@ def init_db():
                 blocked_until REAL DEFAULT 0
             );
         """)
+        if legacy:
+            conn.execute("""INSERT OR IGNORE INTO topics
+                (group_id, topic_id, name, path, parent_path, depth, msg_count, files_indexed, updated_at)
+                SELECT ?, topic_id, name, path, parent_path, depth, msg_count, files_indexed, updated_at
+                FROM topics_old""", (LEGACY_GID,))
+            conn.execute("""INSERT OR IGNORE INTO files
+                (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
+                SELECT ?, msg_id, topic_id, folder_path, filename, size, mime_type
+                FROM files_old""", (LEGACY_GID,))
+            conn.execute("DROP TABLE topics_old")
+            conn.execute("DROP TABLE files_old")
+            old = conn.execute("SELECT value FROM meta WHERE key='scan_cursor'").fetchone()
+            if old:
+                conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                             (f"cursor_{LEGACY_GID}", old[0]))
+            print(f"[db] migrated single-group database -> group {LEGACY_GID}", flush=True)
+        lcols = {r[1] for r in conn.execute("PRAGMA table_info(login_tokens)")}
+        for col in ("ip", "ua"):
+            if col not in lcols:
+                conn.execute(f"ALTER TABLE login_tokens ADD COLUMN {col} TEXT DEFAULT ''")
+        for g in ENV_GROUP_IDS:
+            conn.execute("INSERT OR IGNORE INTO groups (group_id, title, source, added_at) "
+                         "VALUES (?, '', 'env', ?)", (g, time.time()))
+            conn.execute("UPDATE groups SET source='env' WHERE group_id=?", (g,))
         conn.commit()
         conn.close()
 
 init_db()
 
+# ── Groups ───────────────────────────────────────────────────────────────
+_chan_to_gid = {}       # telegram channel id (positive) -> group id (-100...)
+_topics      = {}       # gid -> {topic_id: path}
+_group_ver   = {}       # gid -> counter, bumped on every index change (browser polls it)
+_last_check  = {}       # gid -> time of last "anything new?" check
+_last_new    = {}       # gid -> time the last new item was found
+
+def chan_id(gid):
+    return (-1000000000000 - gid) if gid < -1000000000000 else 0
+
+def list_groups():
+    return db_many("SELECT group_id, title, source FROM groups ORDER BY added_at, group_id")
+
+def refresh_chan_map():
+    _chan_to_gid.clear()
+    for r in list_groups():
+        c = chan_id(r["group_id"])
+        if c:
+            _chan_to_gid[c] = r["group_id"]
+
+refresh_chan_map()
+
+def req_group():
+    """Group the request is about: ?g=<id> or {"g": id} in the JSON body.
+    Falls back to the first group. Returns None if unknown."""
+    raw = request.args.get("g")
+    if raw is None:
+        body = request.get_json(silent=True)
+        if isinstance(body, dict):
+            raw = body.get("g")
+    if raw is not None and str(raw).strip() != "":
+        try:
+            gid = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return gid if db_one("SELECT 1 FROM groups WHERE group_id=?", (gid,)) else None
+    r = db_one("SELECT group_id FROM groups ORDER BY added_at, group_id LIMIT 1")
+    return r["group_id"] if r else None
+
+def _no_group():
+    return jsonify({"ok": False, "msg": "group not found"}), 404
+
 # ── Auth helpers ─────────────────────────────────────────────────────────
 def get_ip():
-    return (request.headers.get("X-Forwarded-For", request.remote_addr or "")
-            .split(",")[0].strip())
+    remote = request.remote_addr or ""
+    ip = remote
+    if TRUST_PROXY > 0:
+        parts = [p.strip() for p in request.headers.get("X-Forwarded-For", "").split(",") if p.strip()]
+        if len(parts) >= TRUST_PROXY:
+            ip = parts[-TRUST_PROXY]          # rightmost = added by OUR proxy, can't be forged
+    for cand in (ip, remote):
+        try:
+            return str(ipaddress.ip_address(cand))
+        except ValueError:
+            continue
+    return "unknown"
 
 def is_blocked(ip):
     row = db_one("SELECT attempts, blocked_until FROM blocked_ips WHERE ip=?", (ip,))
@@ -181,6 +346,10 @@ def require_api(f):
         return f(*args, **kwargs)
     return wrapped
 
+def _clean(s, n=120):
+    """Make untrusted text safe to show inside a Telegram markdown message."""
+    return re.sub(r"[`*_\[\]\r\n]", "", str(s or ""))[:n] or "?"
+
 # ── Telegram client ──────────────────────────────────────────────────────
 _tg_loop   = None
 _tg_client = None
@@ -217,6 +386,32 @@ def _save_session(session_string):
     except Exception as e:
         print(f"[session] save failed: {e}", flush=True)
 
+async def _send_magic_link(msg):
+    """Owner sent /start or /login to the bot -> reply with a one-time login button.
+    (validated=2 marks a 'magic' token; opening the link logs that browser in.)"""
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    db_exec("DELETE FROM login_tokens WHERE created_at < ?", (time.time() - 900,))
+    token = secrets.token_urlsafe(32)
+    db_exec("INSERT INTO login_tokens (token, created_at, validated, ip, ua) VALUES (?, ?, 2, 'bot', 'bot')",
+            (token, time.time()))
+    url = f"{WEB_URL.rstrip('/')}/magic_login?t={token}"
+    # Inline URL button (no link preview, so Telegram's preview fetcher can't burn the token)
+    await msg.reply(
+        "🔐 **Backup Browser login**\n\n"
+        "खालचं बटन दाब — login होऊन site उघडेल.\n"
+        "⏰ 5 मिनिटं valid, फक्त **एकदाच** चालतं. तू मागितलं नसेल तर वापरू नकोस.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Open Backup Browser", url=url)]]),
+        disable_web_page_preview=True)
+
+async def _send_keyboard(msg):
+    """Persistent button under the chat box, so no command has to be typed."""
+    from pyrogram.types import ReplyKeyboardMarkup, KeyboardButton
+    try:
+        kb = ReplyKeyboardMarkup([[KeyboardButton("🔓 Login")]], resize_keyboard=True, is_persistent=True)
+    except TypeError:
+        kb = ReplyKeyboardMarkup([[KeyboardButton("🔓 Login")]], resize_keyboard=True)
+    await msg.reply("👇 खालचं **🔓 Login** बटन दाबलं की नवीन login link मिळेल.", reply_markup=kb)
+
 def run_telegram():
     global _tg_loop, _tg_client
     _tg_loop = asyncio.new_event_loop()
@@ -225,6 +420,7 @@ def run_telegram():
     async def _start():
         global _tg_client
         from pyrogram import filters
+        from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
         _loop = asyncio.get_running_loop()
         sess = await _loop.run_in_executor(None, _load_session)
@@ -240,19 +436,17 @@ def run_telegram():
             sleep_threshold=120,
         )
 
-        # ── /start TOKEN — approve web login ─────────────────────────────
+        # ── /start TOKEN — ask the owner to approve a web login ──────────
         @_tg_client.on_message(filters.command("start") & filters.private)
         async def on_start(client, msg):
-            if msg.from_user.id != OWNER_CHAT_ID:
+            if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
                 await msg.reply("⛔ Access denied.")
                 return
             args = msg.text.split(maxsplit=1)
             token = args[1].strip() if len(args) > 1 else ""
             if not token:
-                await msg.reply(
-                    "👋 **Backup Browser**\n\n"
-                    "Use the **Login via Telegram** button on the web UI to get your login link."
-                )
+                await _send_magic_link(msg)
+                await _send_keyboard(msg)
                 return
             row = db_one("SELECT * FROM login_tokens WHERE token=? AND validated=0", (token,))
             if not row:
@@ -261,17 +455,62 @@ def run_telegram():
             if time.time() - row["created_at"] > 300:
                 await msg.reply("⏰ Link expired (5 min). Request a new one.")
                 return
-            db_exec("UPDATE login_tokens SET validated=1 WHERE token=?", (token,))
+            # Anyone can send the owner a link containing THEIR token (phishing),
+            # so never approve silently — show who is asking and require a tap.
             await msg.reply(
-                "✅ **Login approved!**\n\n"
-                "आता ज्या browser मध्ये login page उघडलं होतं तिथे परत जा, "
-                "ते आपोआप login होईल."
-            )
+                "🔐 **Login request**\n\n"
+                f"🌐 IP: `{_clean(row['ip'])}`\n"
+                f"💻 Browser: `{_clean(row['ua'])}`\n\n"
+                "ही request **तूच** केलीस का? नसेल तर ❌ Deny दाब.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Approve", callback_data=f"ok:{token}"),
+                    InlineKeyboardButton("❌ Deny",    callback_data=f"no:{token}"),
+                ]]))
+
+        @_tg_client.on_message(filters.command("login") & filters.private)
+        async def on_login(client, msg):
+            if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
+                await msg.reply("⛔ Access denied.")
+                return
+            await _send_magic_link(msg)
+
+        @_tg_client.on_message(filters.private & filters.text & ~filters.command)
+        async def on_text(client, msg):
+            # Tapping the persistent "🔓 Login" button (or any text) -> fresh login link
+            if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
+                return
+            await _send_magic_link(msg)
+
+        @_tg_client.on_callback_query()
+        async def on_cb(client, cq):
+            if not cq.from_user or cq.from_user.id != OWNER_CHAT_ID:
+                await cq.answer("⛔ Access denied", show_alert=True)
+                return
+            data = cq.data.decode() if isinstance(cq.data, bytes) else (cq.data or "")
+            action, _, token = data.partition(":")
+            if action == "ok":
+                n = db_exec("UPDATE login_tokens SET validated=1 "
+                            "WHERE token=? AND validated=0 AND created_at>?",
+                            (token, time.time() - 300))
+                text = ("✅ **Login approved!**\n\nआता ज्या browser मध्ये login page उघडलं होतं "
+                        "तिथे परत जा, ते आपोआप login होईल.") if n else \
+                       "⏰ Link expired / already used. Request a new one."
+            elif action == "no":
+                db_exec("DELETE FROM login_tokens WHERE token=?", (token,))
+                text = "🚫 Login denied."
+            else:
+                await cq.answer()
+                return
+            try:
+                await cq.message.edit_text(text)
+            except Exception:
+                pass
+            await cq.answer()
 
         # ── /unblock [IP] ────────────────────────────────────────────────
         @_tg_client.on_message(filters.command("unblock") & filters.private)
         async def on_unblock(client, msg):
-            if msg.from_user.id != OWNER_CHAT_ID:
+            if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
                 return
             args = msg.text.split(maxsplit=1)
             if len(args) < 2:
@@ -294,20 +533,23 @@ def run_telegram():
                 return
             ip = args[1].strip()
             unblock_ip(ip)
-            await msg.reply(f"✅ `{ip}` unblocked.")
+            await msg.reply(f"✅ `{_clean(ip)}` unblocked.")
 
         # ── /status ──────────────────────────────────────────────────────
         @_tg_client.on_message(filters.command("status") & filters.private)
         async def on_status(client, msg):
-            if msg.from_user.id != OWNER_CHAT_ID:
+            if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
                 return
             topics_count = db_one("SELECT COUNT(*) as c FROM topics")["c"]
             files_count  = db_one("SELECT COUNT(*) as c FROM files")["c"]
+            groups_count = db_one("SELECT COUNT(*) as c FROM groups")["c"]
             await msg.reply(
                 f"📊 **Backup Browser**\n\n"
+                f"👥 Groups: `{groups_count}`\n"
                 f"🗂 Topics indexed: `{topics_count}`\n"
                 f"📄 Files indexed:  `{files_count}`\n"
                 f"🔄 Indexer: `{_index_status['status']}`\n"
+                f"⏱ Check every: `{get_poll_interval()}s`\n"
                 f"🌐 URL: {WEB_URL}"
             )
 
@@ -342,6 +584,7 @@ def run_telegram():
 def tg(coro, timeout=120):
     """Run a coroutine on the Telegram event loop from any thread."""
     if not _tg_ready.is_set():
+        coro.close()
         raise RuntimeError("Telegram client not ready yet")
     return asyncio.run_coroutine_threadsafe(coro, _tg_loop).result(timeout=timeout)
 
@@ -349,21 +592,26 @@ def tg(coro, timeout=120):
 # Design (bots can't read history or list topics, and Telegram flood-limits
 # GetMessages):
 #   1. The index (topics + file name/size/msg_id) lives in SQLite and is
-#      mirrored to MongoDB (MONGO_URI) so it survives Render restarts.
-#   2. On startup: restore snapshot -> scan ONLY ids newer than the saved
-#      cursor (usually nothing) -> done. No periodic re-scanning.
+#      mirrored to MongoDB (MONGO_URI) so it survives restarts.
+#   2. On startup (and when a group is added): restore snapshot -> scan ONLY
+#      ids newer than the saved cursor of each group.
 #   3. New files/topics are indexed live from incoming group updates
 #      (no API calls at all).
-#   4. Telegram is only contacted on demand: download / send-to-bot.
+#   4. SAFETY NET: every <poll interval> seconds (default 60, editable from the
+#      browser) a tiny GetMessages call per group probes the next 100 ids after
+#      the cursor — catches anything the live updates missed. No spam messages.
+#   5. The browser polls /api/status and reloads the folder when the group's
+#      version counter changes.
 _index_status = {"status": "idle", "progress": "", "last_run": 0}
-_topics = {}                 # topic_id -> normalized path
-_scanning = False
+_scanning = set()            # gids currently doing a full catch-up scan
 _snapshot_dirty = False
-GROUP_CHANNEL_ID = (-1000000000000 - BACKUP_GROUP_ID) if BACKUP_GROUP_ID < -1000000000000 else 0
 
 def meta_get(key, default=0):
     row = db_one("SELECT value FROM meta WHERE key=?", (key,))
-    return int(row["value"]) if row else default
+    try:
+        return int(row["value"]) if row else default
+    except (TypeError, ValueError):
+        return default
 
 def meta_set(key, value):
     db_exec("""
@@ -371,26 +619,34 @@ def meta_set(key, value):
         ON CONFLICT(key) DO UPDATE SET value=excluded.value
     """, (key, str(value)))
 
+def get_poll_interval():
+    return max(MIN_POLL, min(MAX_POLL, meta_get("poll_interval", POLL_DEFAULT)))
+
+def _changed(gid):
+    global _snapshot_dirty
+    _snapshot_dirty = True
+    _group_ver[gid] = _group_ver.get(gid, 0) + 1
+    _last_new[gid] = time.time()
+
 def _norm_path(title):
     return title.replace("\\", "/").replace("//", "/").strip("/")
 
-def _save_topic(tid, title):
-    global _snapshot_dirty
+def _save_topic(gid, tid, title):
     path = _norm_path(title)
     parts = path.rsplit("/", 1)
     parent = parts[0] if len(parts) > 1 else ""
     depth = path.count("/")
     db_exec("""
-        INSERT INTO topics (topic_id, name, path, parent_path, depth, files_indexed, updated_at)
-        VALUES (?, ?, ?, ?, ?, 1, ?)
-        ON CONFLICT(topic_id) DO UPDATE SET
+        INSERT INTO topics (group_id, topic_id, name, path, parent_path, depth, files_indexed, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(group_id, topic_id) DO UPDATE SET
             name=excluded.name, path=excluded.path,
             parent_path=excluded.parent_path, depth=excluded.depth,
             updated_at=excluded.updated_at
-    """, (tid, title, path, parent, depth, time.time()))
-    db_exec("UPDATE files SET folder_path=? WHERE topic_id=?", (path, tid))
-    _topics[tid] = path
-    _snapshot_dirty = True
+    """, (gid, tid, title, path, parent, depth, time.time()))
+    db_exec("UPDATE files SET folder_path=? WHERE group_id=? AND topic_id=?", (path, gid, tid))
+    _topics.setdefault(gid, {})[tid] = path
+    _changed(gid)
     return path
 
 def _topic_id_of(m):
@@ -399,18 +655,18 @@ def _topic_id_of(m):
         return None
     return getattr(rt, "reply_to_top_id", None) or getattr(rt, "reply_to_msg_id", None)
 
-def _handle_raw_message(m):
-    """Index one raw Telegram message (topic service msg or document)."""
-    global _snapshot_dirty
+def _handle_raw_message(gid, m):
+    """Index one raw Telegram message (topic service msg or document).
+    Returns True when a NEW file was added to the index."""
     if isinstance(m, tg_raw.types.MessageService):
         act = m.action
         if isinstance(act, tg_raw.types.MessageActionTopicCreate):
-            _save_topic(m.id, act.title)
+            _save_topic(gid, m.id, act.title)
         elif isinstance(act, tg_raw.types.MessageActionTopicEdit):
             new_title = getattr(act, "title", None)
             tid = _topic_id_of(m)
             if new_title and tid:
-                _save_topic(tid, new_title)
+                _save_topic(gid, tid, new_title)
         return False
 
     media = getattr(m, "media", None)
@@ -420,23 +676,26 @@ def _handle_raw_message(m):
     if doc is None or not hasattr(doc, "attributes"):
         return False
     tid = _topic_id_of(m)
-    if tid not in _topics:
+    topics = _topics.get(gid, {})
+    if tid not in topics:
         return False
     filename = f"file_{m.id}"
     for attr in doc.attributes:
         if isinstance(attr, tg_raw.types.DocumentAttributeFilename):
             filename = attr.file_name
             break
-    db_exec("""
+    n = db_exec("""
         INSERT OR IGNORE INTO files
-            (msg_id, topic_id, folder_path, filename, size, mime_type)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (m.id, tid, _topics[tid], filename,
+            (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (gid, m.id, tid, topics[tid], filename,
           getattr(doc, "size", 0) or 0,
           getattr(doc, "mime_type", "") or ""))
-    db_exec("UPDATE topics SET msg_count=(SELECT COUNT(*) FROM files WHERE topic_id=?) WHERE topic_id=?",
-            (tid, tid))
-    _snapshot_dirty = True
+    if not n:
+        return False
+    db_exec("UPDATE topics SET msg_count=(SELECT COUNT(*) FROM files WHERE group_id=? AND topic_id=?) "
+            "WHERE group_id=? AND topic_id=?", (gid, tid, gid, tid))
+    _changed(gid)
     return True
 
 async def _on_raw_update(client, update, users, chats):
@@ -446,11 +705,12 @@ async def _on_raw_update(client, update, users, chats):
             return
         m = update.message
         peer = getattr(m, "peer_id", None)
-        if GROUP_CHANNEL_ID == 0 or getattr(peer, "channel_id", None) != GROUP_CHANNEL_ID:
+        gid = _chan_to_gid.get(getattr(peer, "channel_id", None))
+        if gid is None:
             return
-        _handle_raw_message(m)
-        if not _scanning and m.id == meta_get("scan_cursor", 0) + 1:
-            meta_set("scan_cursor", m.id)
+        _handle_raw_message(gid, m)
+        if gid not in _scanning and m.id == meta_get(f"cursor_{gid}", 0) + 1:
+            meta_set(f"cursor_{gid}", m.id)
     except Exception as e:
         print(f"[live] {e}", flush=True)
 
@@ -465,12 +725,15 @@ def snapshot_save():
     if not MONGO_URI:
         return
     coll = _mongo_coll()
-    topics = [{k: r[k] for k in ("topic_id", "name", "path", "parent_path",
+    topics = [{k: r[k] for k in ("group_id", "topic_id", "name", "path", "parent_path",
                                  "depth", "msg_count", "updated_at")}
               for r in db_many("SELECT * FROM topics")]
-    rows = [[r["msg_id"], r["topic_id"], r["folder_path"], r["filename"],
+    groups = [{"group_id": r["group_id"], "title": r["title"], "source": r["source"]}
+              for r in list_groups()]
+    cursors = {str(g["group_id"]): meta_get(f"cursor_{g['group_id']}", 0) for g in groups}
+    rows = [[r["group_id"], r["msg_id"], r["topic_id"], r["folder_path"], r["filename"],
              r["size"], r["mime_type"]]
-            for r in db_many("SELECT msg_id, topic_id, folder_path, filename, size, mime_type FROM files")]
+            for r in db_many("SELECT group_id, msg_id, topic_id, folder_path, filename, size, mime_type FROM files")]
     n = 0
     for i in range(0, len(rows), CHUNK):
         coll.replace_one({"_id": f"files_{n}"},
@@ -478,43 +741,52 @@ def snapshot_save():
         n += 1
     coll.delete_many({"_id": {"$in": [f"files_{k}" for k in range(n, n + 50)]}})
     coll.replace_one({"_id": "meta"},
-                     {"_id": "meta", "cursor": meta_get("scan_cursor", 0),
-                      "topics": topics, "nchunks": n, "saved_at": time.time()},
+                     {"_id": "meta", "cursors": cursors, "groups": groups, "topics": topics,
+                      "nchunks": n, "saved_at": time.time()},
                      upsert=True)
-    print(f"[snapshot] saved {len(topics)} topics, {len(rows)} files", flush=True)
+    print(f"[snapshot] saved {len(groups)} groups, {len(topics)} topics, {len(rows)} files", flush=True)
 
 def snapshot_load():
-    """Restore index into empty SQLite after a restart."""
+    """Restore groups + index into an empty SQLite after a restart.
+    Also understands the old single-group snapshot format."""
     if not MONGO_URI:
-        print("[snapshot] MONGO_URI not set — index will NOT survive restarts", flush=True)
-        return
-    if db_one("SELECT COUNT(*) AS c FROM topics")["c"] > 0:
+        print("[snapshot] MONGO_URI not set — index/groups will NOT survive restarts", flush=True)
         return
     coll = _mongo_coll()
     meta = coll.find_one({"_id": "meta"})
     if not meta:
         print("[snapshot] no snapshot yet", flush=True)
         return
+    for g in meta.get("groups", []):
+        db_exec("INSERT OR IGNORE INTO groups (group_id, title, source, added_at) VALUES (?, ?, ?, ?)",
+                (g["group_id"], g.get("title", ""), g.get("source", "ui"), time.time()))
+    refresh_chan_map()
+    if db_one("SELECT COUNT(*) AS c FROM topics")["c"] > 0:
+        return
+    old = LEGACY_GID            # v1 snapshots have no group ids
     with _db_lock:
         conn = get_db()
         conn.executemany("""
             INSERT OR REPLACE INTO topics
-              (topic_id, name, path, parent_path, depth, msg_count, files_indexed, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-        """, [(t["topic_id"], t["name"], t["path"], t["parent_path"],
+              (group_id, topic_id, name, path, parent_path, depth, msg_count, files_indexed, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+        """, [(t.get("group_id", old), t["topic_id"], t["name"], t["path"], t["parent_path"],
                t["depth"], t["msg_count"], t["updated_at"]) for t in meta["topics"]])
         for i in range(meta.get("nchunks", 0)):
             doc = coll.find_one({"_id": f"files_{i}"})
             if doc:
+                rows = [r if len(r) == 7 else [old] + list(r) for r in doc["rows"]]
                 conn.executemany("""
                     INSERT OR IGNORE INTO files
-                      (msg_id, topic_id, folder_path, filename, size, mime_type)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, doc["rows"])
+                      (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, rows)
         conn.commit()
         conn.close()
-    meta_set("scan_cursor", meta.get("cursor", 0))
-    print(f"[snapshot] restored {len(meta['topics'])} topics, cursor={meta.get('cursor')}", flush=True)
+    cursors = meta.get("cursors") or {str(old): meta.get("cursor", 0)}
+    for g, c in cursors.items():
+        meta_set(f"cursor_{g}", c)
+    print(f"[snapshot] restored {len(meta['topics'])} topics, cursors={cursors}", flush=True)
 
 def run_snapshotter():
     """Saves the snapshot at most every 2 minutes, only when something changed."""
@@ -529,7 +801,7 @@ def run_snapshotter():
                 _snapshot_dirty = True
                 print(f"[snapshot] save failed: {e}", flush=True)
 
-# ── Catch-up scan (only ids newer than cursor) ───────────────────────────
+# ── Catch-up scan + periodic check ───────────────────────────────────────
 async def _invoke_safe(req):
     """invoke() that waits out FloodWait instead of failing."""
     while True:
@@ -541,27 +813,30 @@ async def _invoke_safe(req):
             print(f"[index] FloodWait {wait}s", flush=True)
             await asyncio.sleep(wait)
 
-async def _latest_msg_id():
-    """Bots can't read history, so post a temp message to learn the newest id."""
-    m = await _tg_client.send_message(BACKUP_GROUP_ID, "⏳ indexing…")
+async def _input_channel(gid):
+    peer = await _tg_client.resolve_peer(gid)
+    return tg_raw.types.InputChannel(channel_id=peer.channel_id, access_hash=peer.access_hash)
+
+async def _latest_msg_id(gid):
+    """Bots can't read history, so post a temp message to learn the newest id.
+    (Only used for the startup / new-group / re-index scan — NOT for the periodic check.)"""
+    m = await _tg_client.send_message(gid, "⏳ indexing…")
     mid = m.id
     try:
-        await _tg_client.delete_messages(BACKUP_GROUP_ID, mid)
+        await _tg_client.delete_messages(gid, mid)
     except Exception:
         pass
     return mid
 
-async def _scan_group():
-    global _scanning, _snapshot_dirty
-    _scanning = True
+async def _scan_group(gid):
+    global _snapshot_dirty
+    _scanning.add(gid)
     try:
-        peer = await _tg_client.resolve_peer(BACKUP_GROUP_ID)
-        ch = tg_raw.types.InputChannel(channel_id=peer.channel_id,
-                                       access_hash=peer.access_hash)
-        start = meta_get("scan_cursor", 0) + 1
-        latest = await _latest_msg_id()
+        ch = await _input_channel(gid)
+        start = meta_get(f"cursor_{gid}", 0) + 1
+        latest = await _latest_msg_id(gid)
         if start >= latest:
-            print("[index] up to date, nothing to scan", flush=True)
+            print(f"[index] {gid}: up to date, nothing to scan", flush=True)
             return
         BATCH = 100            # Telegram max ids per GetMessages call
         found = 0
@@ -572,74 +847,102 @@ async def _scan_group():
             r = await _invoke_safe(
                 tg_raw.functions.channels.GetMessages(channel=ch, id=ids))
             for m in r.messages:
-                if _handle_raw_message(m):
+                if _handle_raw_message(gid, m):
                     found += 1
-            meta_set("scan_cursor", hi - 1)
+            meta_set(f"cursor_{gid}", hi - 1)
             await asyncio.sleep(2.0)      # gentle pace, avoids FloodWait
         _snapshot_dirty = True
-        print(f"[index] scan done up to msg {latest}: +{found} files, "
-              f"{len(_topics)} topics", flush=True)
+        print(f"[index] {gid}: scan done up to msg {latest}: +{found} files, "
+              f"{len(_topics.get(gid, {}))} topics", flush=True)
     finally:
-        _scanning = False
+        _scanning.discard(gid)
 
-async def _full_index():
-    if _scanning:
+async def _full_index(gid):
+    if gid in _scanning:
         return
     _index_status["status"] = "scanning..."
     try:
-        await _scan_group()
+        await _scan_group(gid)
         _index_status["status"] = "done"
         _index_status["last_run"] = time.time()
+        _last_check[gid] = time.time()
     except Exception as e:
         _index_status["status"] = f"error: {e}"
-        print(f"[index] Error: {e}", flush=True)
+        print(f"[index] {gid} Error: {e}", flush=True)
+
+async def _poll_group(gid):
+    """Cheap 'anything new?' check: ask Telegram for the 100 message ids after
+    our cursor. Existing ones are indexed; empty ones mean nothing new yet."""
+    if gid in _scanning:
+        return 0
+    cursor = meta_get(f"cursor_{gid}", 0)
+    if cursor <= 0:
+        return 0                      # never scanned — the full scan handles it
+    ch = await _input_channel(gid)
+    found = 0
+    for _ in range(10):               # at most 1000 ids per check
+        ids = [tg_raw.types.InputMessageID(id=i) for i in range(cursor + 1, cursor + 101)]
+        r = await _invoke_safe(tg_raw.functions.channels.GetMessages(channel=ch, id=ids))
+        real = [m for m in r.messages if not isinstance(m, tg_raw.types.MessageEmpty)]
+        if not real:
+            break
+        for m in real:
+            if _handle_raw_message(gid, m):
+                found += 1
+        cursor = max(m.id for m in real)
+        meta_set(f"cursor_{gid}", cursor)
+    _last_check[gid] = time.time()
+    return found
+
+_poll_wakeup = threading.Event()
+
+def run_poller():
+    """Every <interval> seconds (editable from the browser) check every group."""
+    _tg_ready.wait()
+    time.sleep(20)                    # let the startup catch-up scan go first
+    next_at = 0.0
+    while True:
+        forced = _poll_wakeup.wait(timeout=3)
+        _poll_wakeup.clear()
+        if not forced and time.time() < next_at:
+            continue
+        next_at = time.time() + get_poll_interval()
+        for r in list_groups():
+            try:
+                asyncio.run_coroutine_threadsafe(_poll_group(r["group_id"]), _tg_loop).result(timeout=180)
+            except Exception as e:
+                print(f"[poll] {r['group_id']}: {e}", flush=True)
+
+async def _fill_titles():
+    for r in list_groups():
+        if r["title"]:
+            continue
+        try:
+            chat = await _tg_client.get_chat(r["group_id"])
+            db_exec("UPDATE groups SET title=? WHERE group_id=?",
+                    (chat.title or "", r["group_id"]))
+        except Exception as e:
+            print(f"[groups] title for {r['group_id']}: {e}", flush=True)
 
 def run_indexer():
-    """Startup only: restore snapshot, catch up on new ids, then rely on live updates."""
+    """Startup only: restore snapshot, catch up on new ids, then rely on live updates + poller."""
     _tg_ready.wait()
     try:
         snapshot_load()
     except Exception as e:
         print(f"[snapshot] load failed: {e}", flush=True)
-    for r in db_many("SELECT topic_id, path FROM topics"):
-        _topics[r["topic_id"]] = r["path"]
+    for r in db_many("SELECT group_id, topic_id, path FROM topics"):
+        _topics.setdefault(r["group_id"], {})[r["topic_id"]] = r["path"]
     try:
-        asyncio.run_coroutine_threadsafe(_full_index(), _tg_loop).result(timeout=7200)
+        asyncio.run_coroutine_threadsafe(_fill_titles(), _tg_loop).result(timeout=120)
     except Exception as e:
-        _index_status["status"] = f"error: {e}"
-        print(f"[index] Error: {e}", flush=True)
-
-# ── Browser helpers ───────────────────────────────────────────────────────
-def build_tree(path=""):
-    """Return (subfolders, files) for a given path. Intermediate folders that
-    have no topic of their own are synthesized from deeper topic paths."""
-    prefix = f"{path}/" if path else ""
-    children = {}
-    for t in db_many("SELECT path, msg_count FROM topics"):
-        p = t["path"]
-        if not p.startswith(prefix) or p == path:
-            continue
-        child = p[len(prefix):].split("/")[0]
-        if not child:
-            continue
-        children[child] = children.get(child, 0) + (t["msg_count"] or 0)
-    subfolders = [{"path": prefix + name, "msg_count": cnt}
-                  for name, cnt in sorted(children.items(), key=lambda x: x[0].lower())]
-    files = []
-    if path:
-        files = db_many(
-            "SELECT * FROM files WHERE folder_path=? ORDER BY filename COLLATE NOCASE",
-            (path,)
-        )
-    return subfolders, list(files)
-
-def breadcrumbs(path):
-    crumbs = []
-    if path:
-        parts = path.split("/")
-        for i in range(len(parts) - 1):
-            crumbs.append({"name": parts[i], "path": "/".join(parts[:i+1])})
-    return crumbs
+        print(f"[groups] {e}", flush=True)
+    for g in list_groups():
+        try:
+            asyncio.run_coroutine_threadsafe(_full_index(g["group_id"]), _tg_loop).result(timeout=7200)
+        except Exception as e:
+            _index_status["status"] = f"error: {e}"
+            print(f"[index] Error: {e}", flush=True)
 
 def fmt_size(n):
     for unit in ("B", "KB", "MB", "GB"):
@@ -647,6 +950,7 @@ def fmt_size(n):
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} TB"
+
 
 # ── HTML Templates ────────────────────────────────────────────────────────
 LOGIN_HTML = r"""<!DOCTYPE html>
@@ -776,233 +1080,7 @@ window.onload = () => setTimeout(poll, 2000);
 </body>
 </html>"""
 
-BROWSER_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ path or 'Root' }} — Backup Browser</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#0d1117;--surf:#161b22;--border:#30363d;--text:#e6edf3;
-  --muted:#8b949e;--blue:#58a6ff;--green:#3fb950;--yellow:#d29922}
-body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;min-height:100vh}
 
-header{background:var(--surf);border-bottom:1px solid var(--border);
-  padding:.7rem 1.5rem;display:flex;align-items:center;gap:1rem;
-  position:sticky;top:0;z-index:20}
-.logo{font-size:1.1rem;color:var(--blue);font-weight:700;white-space:nowrap}
-.search-wrap{flex:1;max-width:520px}
-.search-wrap form{display:flex;gap:.5rem}
-.search-wrap input{flex:1;padding:.45rem .9rem;background:var(--bg);
-  border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.9rem;outline:none}
-.search-wrap input:focus{border-color:var(--blue)}
-.search-wrap button{padding:.45rem .9rem;background:var(--blue);color:#0d1117;
-  border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:.85rem}
-.hdr-right{display:flex;gap:1rem;align-items:center;white-space:nowrap}
-.idx-badge{font-size:.75rem;color:var(--muted);background:#21262d;
-  padding:.25rem .6rem;border-radius:999px}
-.idx-badge.done{color:var(--green)}
-.idx-badge.indexing{color:var(--yellow)}
-a.logout{color:var(--muted);font-size:.85rem;text-decoration:none}
-a.logout:hover{color:var(--text)}
-
-.bc{padding:.6rem 1.5rem;font-size:.875rem;color:var(--muted);display:flex;
-  flex-wrap:wrap;gap:.25rem;align-items:center}
-.bc a{color:var(--blue);text-decoration:none}.bc a:hover{text-decoration:underline}
-.bc .sep{color:#484f58}
-
-.wrap{max-width:1200px;margin:0 auto;padding:.5rem 1.5rem 4rem}
-table{width:100%;border-collapse:collapse}
-thead th{text-align:left;padding:.5rem 1rem;color:var(--muted);font-size:.75rem;
-  text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)}
-tbody td{padding:.55rem 1rem;border-bottom:1px solid #1c2128;vertical-align:middle}
-tbody tr:hover td{background:#1c2128}
-.name-cell{display:flex;align-items:center;gap:.6rem}
-.icon{font-size:1rem;flex-shrink:0;width:1.2rem;text-align:center}
-a.folder{color:var(--blue);text-decoration:none;font-weight:500}
-a.folder:hover{text-decoration:underline}
-.fname{color:var(--text);font-size:.92rem;word-break:break-all}
-.sz{color:var(--muted);font-size:.82rem;white-space:nowrap}
-.acts{white-space:nowrap;text-align:right}
-.btn-s{padding:.28rem .65rem;border-radius:5px;font-size:.78rem;cursor:pointer;
-  text-decoration:none;display:inline-block;border:1px solid var(--border);
-  background:transparent;color:var(--text);transition:all .15s;line-height:1.5}
-.btn-dl{border-color:#238636;color:var(--green)}.btn-dl:hover{background:#238636;color:#fff}
-.btn-tg{border-color:#1e6091;color:var(--blue);margin-left:.4rem}
-.btn-tg:hover{background:#1e6091;color:#fff}
-
-.btn-open{border-color:#d29922;color:#d29922;margin-right:.4rem}
-.btn-open:hover{background:#d29922;color:#0d1117}
-.srh{padding:.5rem 1.5rem .2rem;font-size:.875rem;color:var(--muted)}
-.srh b{color:var(--text)}
-.srh a{color:var(--blue);font-size:.82rem;margin-left:.5rem;text-decoration:none}
-
-.empty{text-align:center;padding:4rem;color:var(--muted)}
-
-#toast{position:fixed;bottom:1.5rem;right:1.5rem;background:#238636;color:#fff;
-  padding:.7rem 1.2rem;border-radius:8px;font-size:.9rem;display:none;
-  box-shadow:0 4px 12px rgba(0,0,0,.4);z-index:100}
-
-.statusbar{position:fixed;bottom:0;left:0;right:0;background:var(--surf);
-  border-top:1px solid var(--border);padding:.35rem 1.5rem;font-size:.78rem;
-  color:var(--muted);display:flex;gap:1.5rem;align-items:center}
-.statusbar a{color:var(--muted);text-decoration:none}.statusbar a:hover{color:var(--text)}
-
-@media(max-width:600px){
-  header{padding:.6rem 1rem;gap:.5rem}
-  .logo{display:none}
-  .idx-badge{display:none}
-  .wrap{padding:.5rem .75rem 4rem}
-  thead th:nth-child(2){display:none}
-  tbody td:nth-child(2){display:none}
-}
-</style>
-</head>
-<body>
-
-<header>
-  <span class="logo">📦 Backup</span>
-  <div class="search-wrap">
-    <form method="GET" action="/search">
-      <input type="search" name="q" placeholder="Search files…" value="{{ q or '' }}">
-      <button type="submit">🔍</button>
-    </form>
-  </div>
-  <div class="hdr-right">
-    <span class="idx-badge {{ 'done' if idx_status == 'done' else 'indexing' }}">
-      {{ '✓ indexed' if idx_status == 'done' else '⟳ ' + idx_status }}
-    </span>
-    <a class="logout" href="/logout">logout</a>
-  </div>
-</header>
-
-{% if search_mode %}
-<div class="srh">
-  {{ files|length }} result{{ 's' if files|length != 1 else '' }} for <b>{{ q }}</b>
-  <a href="/">← Clear</a>
-</div>
-{% else %}
-<nav class="bc">
-  <a href="/">🏠 Root</a>
-  {% for c in crumbs %}
-  <span class="sep">›</span>
-  <a href="/browse/{{ c.path }}">{{ c.name }}</a>
-  {% endfor %}
-  {% if path %}
-  <span class="sep">›</span>
-  <span>{{ path.split('/')[-1] }}</span>
-  {% endif %}
-</nav>
-{% endif %}
-
-<div class="wrap">
-<table>
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th>Size</th>
-      <th style="text-align:right">Actions</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% if not search_mode and path %}
-    <tr>
-      <td colspan="3">
-        <div class="name-cell">
-          <span class="icon">⬆️</span>
-          <a class="folder" href="{{ parent_url }}">.. (go up)</a>
-        </div>
-      </td>
-    </tr>
-    {% endif %}
-
-    {% for f in folders %}
-    <tr>
-      <td>
-        <div class="name-cell">
-          <span class="icon">📁</span>
-          <a class="folder" href="/browse/{{ f.path }}">{{ f.path.split('/')[-1] }}</a>
-        </div>
-      </td>
-      <td class="sz">{{ f.msg_count }} file{{ 's' if f.msg_count != 1 else '' }}</td>
-      <td class="acts"></td>
-    </tr>
-    {% endfor %}
-
-    {% for fi in files %}
-    <tr>
-      <td>
-        <div class="name-cell">
-          <span class="icon">{{ '🎬' if 'video' in fi.mime_type else '🎵' if 'audio' in fi.mime_type else '🖼️' if 'image' in fi.mime_type else '📄' }}</span>
-          <span class="fname">
-            {% if search_mode %}
-            <small style="color:var(--muted);display:block;font-size:.75rem">📁 {{ fi.folder_path }}</small>
-            {% endif %}
-            {{ fi.filename }}
-          </span>
-        </div>
-      </td>
-      <td class="sz">{{ fmt_size(fi.size) }}</td>
-      <td class="acts">
-        {% if can_view(fi) %}
-        <a class="btn-s btn-open" target="_blank" rel="noopener"
-           href="/stream/{{ fi.msg_id }}/{{ fi.filename|urlencode }}">▶ Open</a>
-        {% endif %}
-        <a class="btn-s btn-dl"
-           href="/download/{{ fi.msg_id }}/{{ fi.filename|urlencode }}">⬇ Download</a>
-        <a class="btn-s btn-tg"
-           href="#"
-           onclick="sendToBot({{ fi.msg_id }}, this); return false;">📤 Telegram</a>
-      </td>
-    </tr>
-    {% endfor %}
-
-    {% if not folders and not files %}
-    <tr><td colspan="3" class="empty">📭 Empty folder</td></tr>
-    {% endif %}
-  </tbody>
-</table>
-</div>
-
-<div class="statusbar">
-  <span>📁 {{ folders|length }} folder{{ 's' if folders|length != 1 else '' }}</span>
-  <span>📄 {{ files|length }} file{{ 's' if files|length != 1 else '' }}</span>
-  <a href="/reindex">↻ Re-index</a>
-  {% if not search_mode %}
-  <span style="margin-left:auto;color:#484f58">
-    Total files in DB: {{ total_files }}
-  </span>
-  {% endif %}
-</div>
-
-<div id="toast"></div>
-
-<script>
-function sendToBot(msgId, btn) {
-  const orig = btn.textContent;
-  btn.textContent = '⏳…';
-  btn.style.opacity = '.6';
-  fetch('/sendtobot/' + msgId)
-    .then(r => r.json())
-    .then(d => {
-      btn.textContent = orig;
-      btn.style.opacity = '1';
-      showToast(d.ok ? '✅ Sent to your chat!' : '❌ ' + d.msg);
-    })
-    .catch(() => { btn.textContent = orig; btn.style.opacity = '1'; showToast('❌ Error'); });
-}
-function showToast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.style.display = 'block';
-  setTimeout(() => t.style.display = 'none', 3000);
-}
-</script>
-</body>
-</html>"""
-
-# ── Flask routes ──────────────────────────────────────────────────────────
 @app.route("/")
 @require_auth
 def index():
@@ -1011,6 +1089,7 @@ def index():
 @app.route("/favicon.ico")
 def favicon():
     return Response(status=204)
+
 
 EXPLORER_HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -1036,6 +1115,7 @@ body{font:14px/1.35 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif;backgro
 .addr a{padding:3px 6px;border-radius:4px;cursor:pointer}
 .addr a:hover{background:var(--hover)}
 .addr .sep{color:var(--muted)}
+#grp{max-width:180px;height:34px;padding:0 6px;border:1px solid var(--line);border-radius:6px;background:var(--content);color:inherit;font:inherit;flex:none}
 #q{width:260px;height:34px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--content);color:inherit;font:inherit}
 .cmd{border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
 .vsep{width:1px;height:20px;background:var(--line);margin:0 4px;flex:none}
@@ -1095,12 +1175,22 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
 #toast{position:fixed;left:50%;bottom:44px;transform:translateX(-50%);background:#323232;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;z-index:80;max-width:90vw;box-shadow:var(--shadow)}
 #toast[hidden]{display:none}
 #toast.err{background:#b3261e}
+#viewer{position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.94);display:flex;flex-direction:column;color:#fff}
+#viewer[hidden]{display:none}
+#viewer .vh{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(0,0,0,.5)}
+#vt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+#viewer .cb:hover:not(:disabled){background:rgba(255,255,255,.18)}
+#vbody{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px}
+#vbody video,#vbody img{max-width:100%;max-height:100%;border-radius:6px}
+#vbody audio{width:min(92vw,560px)}
+#vbody iframe{width:100%;height:100%;border:0;background:#fff;border-radius:6px}
 #navbtn{display:none}
 @media(max-width:760px){
   #navbtn{display:inline-block}
   #nav{position:fixed;left:0;top:96px;bottom:30px;z-index:40;display:none;box-shadow:var(--shadow);width:270px}
   #nav.open{display:block}
   #q{width:92px;padding:0 6px}
+  #grp{max-width:96px}
   .lbl{display:none}
   .cb{padding:6px 9px}
   #preview{display:none!important}
@@ -1117,7 +1207,9 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
     <button class="ib" id="bk" title="Back">←</button>
     <button class="ib" id="fw" title="Forward">→</button>
     <button class="ib" id="up" title="Up">↑</button>
-    <button class="ib" id="rf" title="Refresh">⟳</button>
+    <button class="ib" id="rf" title="Check for new files now">⟳</button>
+    <select id="grp" title="Group"></select>
+    <button class="ib" id="gadd" title="Add group">＋</button>
     <div class="addr" id="addr"></div>
     <input id="q" type="search" placeholder="Search files…" autocomplete="off">
   </div>
@@ -1150,6 +1242,12 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
     <button class="ib" id="v-i" title="Large icons">▦</button>
   </div>
 </div>
+<div id="viewer" hidden>
+  <div class="vh"><span id="vt"></span><span class="sp"></span>
+    <button class="cb" id="vdl">⬇ <span class="lbl">Download</span></button>
+    <button class="cb" id="vx">✕ <span class="lbl">Close</span></button></div>
+  <div id="vbody"></div>
+</div>
 <div id="menu" hidden></div>
 <div id="toast" hidden></div>
 <dialog id="dlg">
@@ -1178,7 +1276,9 @@ const store = { get(k, d) { try { return localStorage.getItem(k) || d; } catch (
 
 const S = { path: '', search: '', folders: [], files: [], items: [], map: new Map(), topicId: null,
   sel: new Set(), anchor: null, view: store.get('xview', 'icons'), sort: store.get('xsort', 'name'),
-  desc: store.get('xdesc', '') === '1', clip: null, preview: false, idx: '' };
+  desc: store.get('xdesc', '') === '1', clip: null, preview: false, idx: '',
+  group: null, groups: [], ver: null, topics: null, interval: 60, lastCheck: 0, minIv: 10, maxIv: 3600 };
+const gq = () => '?g=' + encodeURIComponent(S.group);
 
 /* ---------- icons ---------- */
 const FOLDER = '<svg viewBox="0 0 64 64"><path d="M4 14a4 4 0 0 1 4-4h14l6 6h28a4 4 0 0 1 4 4v32a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="#f0b93a"/><path d="M4 24h56v28a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="#fcd462"/></svg>';
@@ -1208,7 +1308,9 @@ function kind(x) {
 /* ---------- api / ui helpers ---------- */
 async function api(url, body) {
   const o = { headers: { 'X-Requested-With': 'fetch' } };
-  if (body) { o.method = 'POST'; o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(body); }
+  const scoped = S.group != null && !/^\/api\/(groups|settings)/.test(url);
+  if (scoped && !body) url += (url.includes('?') ? '&' : '?') + 'g=' + encodeURIComponent(S.group);
+  if (body) { if (scoped) body = Object.assign({ g: S.group }, body); o.method = 'POST'; o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(body); }
   let r;
   try { r = await fetch(url, o); } catch (e) { return { ok: false, msg: 'network error' }; }
   if (r.status === 401) { location.href = '/login'; return { ok: false, msg: 'login required' }; }
@@ -1259,7 +1361,7 @@ async function go(path, push = true) {
   S.search = ''; $('#q').value = '';
   S.path = r.path; S.topicId = r.topic_id; S.folders = r.folders; S.files = r.files; tag();
   S.sel.clear(); S.anchor = null;
-  if (push) history.pushState({ p: S.path }, '', '/browse/' + enc(S.path));
+  if (push) history.pushState({ p: S.path }, '', '/browse/' + enc(S.path) + gq());
   document.title = (S.path.split('/').pop() || 'Backup') + ' — Backup Explorer';
   render(); drawAddr(); revealTree(S.path); closeNav();
 }
@@ -1316,7 +1418,9 @@ function drawAddr() {
 }
 function drawIdx() {
   const s = S.idx;
-  $('#st-i').textContent = !s || s === 'idle' ? '' : s === 'done' ? '✓ indexed' : '⟳ ' + s;
+  let t = !s || s === 'idle' ? '' : s === 'done' ? '✓ indexed' : '⟳ ' + s;
+  if (S.lastCheck) { const a = Math.max(0, Math.round(Date.now() / 1000 + (S.skew || 0) - S.lastCheck)); t += (t ? '  ·  ' : '') + '🔎 checked ' + (a < 60 ? a + 's' : Math.round(a / 60) + 'm') + ' ago · every ' + (S.interval >= 60 && S.interval % 60 === 0 ? S.interval / 60 + 'm' : S.interval + 's'); }
+  $('#st-i').textContent = t;
 }
 
 /* ---------- selection / open ---------- */
@@ -1333,22 +1437,44 @@ const clearSel = () => { S.sel.clear(); S.anchor = null; paintSel(); updateBar()
 function openItem(i) {
   if (!i) return;
   if (i.type === 'dir') return go(i.path);
-  if (i.view) window.open('/stream/' + i.id + '/' + encodeURIComponent(i.name), '_blank', 'noopener');
+  if (i.view) openViewer(i);
   else downloadFiles([i]);
 }
+
+/* ---------- viewer (same tab, Close button, Back/Esc also closes) ---------- */
+const viewer = $('#viewer');
+function openViewer(i) {
+  const url = '/stream/' + i.id + '/' + encodeURIComponent(i.name) + gq(), k = kind(i);
+  const body = k === 'video' ? '<video controls autoplay playsinline src="' + url + '"></video>'
+    : k === 'audio' ? '<audio controls autoplay src="' + url + '"></audio>'
+    : k === 'image' ? '<img alt="" src="' + url + '">'
+    : '<iframe src="' + url + '"></iframe>';
+  $('#vt').textContent = i.name;
+  $('#vdl').onclick = () => downloadFiles([i]);
+  $('#vbody').innerHTML = body;
+  viewer.hidden = false;
+  history.pushState({ p: S.path, viewer: true }, '');
+}
+function closeViewer(fromPop) {
+  if (viewer.hidden) return;
+  viewer.hidden = true;
+  $('#vbody').innerHTML = '';                 // stops video/audio
+  if (!fromPop && history.state && history.state.viewer) { S.closing = true; history.back(); }
+}
+$('#vx').onclick = () => closeViewer(false);
 
 /* ---------- actions ---------- */
 function downloadFiles(files) {
   files.forEach((f, n) => setTimeout(() => {
     const a = document.createElement('a');
-    a.href = '/download/' + f.id + '/' + encodeURIComponent(f.name); a.download = f.name;
+    a.href = '/download/' + f.id + '/' + encodeURIComponent(f.name) + gq(); a.download = f.name;
     document.body.appendChild(a); a.click(); a.remove();
   }, n * 700));
 }
 async function sendTG(files) {
   let ok = 0;
   for (const f of files) {
-    const r = await api('/sendtobot/' + f.id);
+    const r = await api('/sendtobot/' + f.id, {});
     if (r.ok) ok++; else toast('❌ ' + (r.msg || 'failed'), true);
     await sleep(350);
   }
@@ -1398,7 +1524,7 @@ async function paste() {
 function setView(v) { S.view = v; store.set('xview', v); render(); }
 function sortBy(k) { if (S.sort === k) S.desc = !S.desc; else { S.sort = k; S.desc = false; } store.set('xsort', S.sort); store.set('xdesc', S.desc ? '1' : ''); render(); }
 async function reindex() {
-  const yes = await dialog({ title: 'Re-index everything?', text: 'Index साफ होऊन Telegram group पुन्हा पूर्ण scan होईल (वेळ लागतो). Rename केलेली नावं जातील.', ok: 'Re-index', danger: true });
+  const yes = await dialog({ title: 'Re-index this group?', text: 'या group चा index साफ होऊन Telegram group पुन्हा पूर्ण scan होईल (वेळ लागतो). Rename केलेली नावं जातील.', ok: 'Re-index', danger: true });
   if (!yes) return;
   const r = await api('/api/reindex', {});
   toast(r.ok ? '⟳ Re-index सुरू' : '❌ ' + r.msg, !r.ok); if (r.ok) { S.idx = 'scanning'; drawIdx(); }
@@ -1480,7 +1606,7 @@ function drawPreview() {
   if (!S.preview) { p.innerHTML = ''; return; }
   const f = selFiles();
   if (S.sel.size !== 1 || f.length !== 1) { p.innerHTML = '<div class="empty">Select a file to preview</div>'; return; }
-  const x = f[0], url = '/stream/' + x.id + '/' + encodeURIComponent(x.name), k = kind(x);
+  const x = f[0], url = '/stream/' + x.id + '/' + encodeURIComponent(x.name) + gq(), k = kind(x);
   let body = '';
   if (!x.view) body = '<div class="empty">Preview उपलब्ध नाही — Download वापर</div>';
   else if (k === 'video') body = '<video controls preload="metadata" src="' + url + '"></video>';
@@ -1530,7 +1656,7 @@ $('#navbtn').onclick = e => { e.stopPropagation(); $('#nav').classList.toggle('o
 $('#bk').onclick = () => history.back();
 $('#fw').onclick = () => history.forward();
 $('#up').onclick = () => { if (S.search) go(S.path, false); else if (S.path) go(parentOf(S.path)); };
-$('#rf').onclick = refresh;
+$('#rf').onclick = checkNow;
 $('#c-cut').onclick = () => setClip('cut');
 $('#c-copy').onclick = () => setClip('copy');
 $('#c-paste').onclick = paste;
@@ -1551,14 +1677,19 @@ $('#c-sort').onclick = e => {
 };
 $('#c-more').onclick = e => {
   e.stopPropagation();
-  btnMenu(e.currentTarget, [['Select all', () => { S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }], ['Re-index', reindex], '-', ['Logout', () => { location.href = '/logout'; }]]);
+  btnMenu(e.currentTarget, [['Select all', () => { S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }], ['Check for new files now', checkNow], ['⏱ Check interval…', setIntervalDlg], '-', ['➕ Add group…', addGroup], ['➖ Remove this group', removeGroup], '-', ['Re-index this group', reindex], '-', ['Logout', () => { location.href = '/logout'; }]]);
 };
 $('#q').addEventListener('keydown', e => {
   if (e.key === 'Enter') { const q = e.target.value.trim(); if (q) runSearch(q); else go(S.path, false); }
   else if (e.key === 'Escape') { e.target.value = ''; if (S.search) go(S.path, false); }
 });
-window.addEventListener('popstate', e => go(e.state && e.state.p != null ? e.state.p : pathFromUrl(), false));
+window.addEventListener('popstate', e => {
+  if (S.closing) { S.closing = false; return; }          // we closed the viewer ourselves
+  if (!viewer.hidden) { closeViewer(true); return; }     // browser Back closes the viewer
+  go(e.state && e.state.p != null ? e.state.p : pathFromUrl(), false);
+});
 document.addEventListener('keydown', e => {
+  if (!viewer.hidden) { if (e.key === 'Escape') closeViewer(false); return; }
   if (e.target.closest('input,textarea,dialog')) return;
   const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
   if (k === 'delete') delFiles(selFiles());
@@ -1572,14 +1703,106 @@ document.addEventListener('keydown', e => {
   else if (mod && k === 'v') { e.preventDefault(); paste(); }
 });
 
-/* ---------- index status ---------- */
-async function pollStatus() {
-  const r = await api('/api/status');
-  if (r && r.index) {
-    const was = S.idx; S.idx = r.index.status; drawIdx();
-    if (was && was !== S.idx && S.idx === 'done' && !S.search) refresh();
+/* ---------- groups ---------- */
+function drawGroups() {
+  const sel = $('#grp');
+  sel.innerHTML = S.groups.map(g => '<option value="' + esc(g.id) + '"' + (String(g.id) === String(S.group) ? ' selected' : '') + '>' + esc(g.title) + '</option>').join('');
+  sel.style.display = S.groups.length > 1 ? '' : 'none';
+}
+async function loadGroups() {
+  const r = await api('/api/groups');
+  S.groups = r.groups || [];
+  const want = new URLSearchParams(location.search).get('g') || store.get('xgroup', '');
+  const hit = S.groups.find(g => String(g.id) === String(want)) || S.groups[0];
+  S.group = hit ? hit.id : null;
+  if (S.group != null) store.set('xgroup', String(S.group));
+  drawGroups();
+}
+async function switchGroup(id) {
+  S.group = id; store.set('xgroup', String(id));
+  S.clip = null; S.ver = null; S.topics = null; S.sel.clear(); S.search = ''; $('#q').value = '';
+  treeCache.clear(); drawGroups();
+  await initTree(); await go('', true);
+  pollStatus();
+}
+async function addGroup() {
+  const v = await dialog({ title: 'Add group', text: 'Telegram group चा ID (उदा. -1001234567890). Bot त्या group मध्ये admin असावा आणि group मध्ये Topics ON असावेत.', input: '', ok: 'Add' });
+  if (!v) return;
+  const r = await api('/api/groups', { group_id: v });
+  if (!r.ok) { toast('❌ ' + r.msg, true); return; }
+  toast('✅ ' + r.group.title + ' add झाला — index होत आहे');
+  const l = await api('/api/groups'); S.groups = l.groups || [];
+  await switchGroup(r.group.id);
+}
+async function removeGroup() {
+  const g = S.groups.find(x => String(x.id) === String(S.group));
+  if (!g) return;
+  if (g.source === 'env') { toast('हा group env variable मधून आहे — तिथूनच काढ', true); return; }
+  const yes = await dialog({ title: 'Remove group?', text: '"' + g.title + '" इथून काढला जाईल (फक्त index; Telegram वरच्या files delete होत नाहीत).', ok: 'Remove', danger: true });
+  if (!yes) return;
+  const r = await api('/api/groups/remove', { group_id: g.id });
+  if (!r.ok) { toast('❌ ' + r.msg, true); return; }
+  const l = await api('/api/groups'); S.groups = l.groups || [];
+  await switchGroup(S.groups.length ? S.groups[0].id : null);
+}
+$('#grp').onchange = e => switchGroup(e.target.value);
+$('#gadd').onclick = addGroup;
+
+/* ---------- index status / auto-check ---------- */
+async function setIntervalDlg() {
+  const v = await dialog({ title: 'Check interval', text: 'नवीन files साठी किती seconds नी check करायचं? (' + S.minIv + ' – ' + S.maxIv + '). Server आणि browser दोन्ही हाच interval वापरतात.', input: String(S.interval), ok: 'Save' });
+  if (!v) return;
+  const n = parseInt(v, 10);
+  if (!(n >= S.minIv && n <= S.maxIv)) { toast('❌ ' + S.minIv + ' ते ' + S.maxIv + ' मधला number दे', true); return; }
+  const r = await api('/api/settings', { poll_interval: n });
+  if (!r.ok) { toast('❌ ' + r.msg, true); return; }
+  S.interval = r.interval; toast('⏱ आता दर ' + r.interval + ' seconds ला check होईल'); drawIdx(); pollStatus();
+}
+async function softRefresh(announce) {
+  const before = new Set(S.files.map(f => f.id));
+  const url = S.search ? '/api/search?q=' + encodeURIComponent(S.search) : '/api/list?path=' + encodeURIComponent(S.path);
+  const r = await api(url);
+  if (r.ok === false) return;
+  if (S.search) { S.folders = []; S.files = r.files; }
+  else { S.topicId = r.topic_id; S.folders = r.folders; S.files = r.files; }
+  tag(); render();
+  if (announce) {
+    const added = S.files.filter(f => !before.has(f.id)).length;
+    toast(added ? '🆕 ' + added + ' new file' + (added > 1 ? 's' : '') : '🔄 Updated');
   }
-  setTimeout(pollStatus, S.idx === 'done' ? 30000 : 4000);
+}
+async function checkNow() {
+  const b = $('#rf'); b.disabled = true;
+  const r = await api('/api/checknow', {});
+  b.disabled = false;
+  if (!r.ok) { toast('❌ ' + (r.msg || 'check failed'), true); return; }
+  if (!r.found) toast(r.scanning ? '⟳ Scan चालू आहे…' : '✓ नवीन काही नाही');
+  await pollStatus();
+}
+let pollT;
+async function pollStatus() {
+  clearTimeout(pollT);
+  const r = await api('/api/status');
+  let next = 5000;
+  if (r && r.index) {
+    const was = S.idx; S.idx = r.index.status;
+    S.interval = r.interval || S.interval; S.minIv = r.min_interval || S.minIv; S.maxIv = r.max_interval || S.maxIv;
+    S.lastCheck = r.group ? r.group.last_check : 0; if (r.now) S.skew = r.now - Date.now() / 1000;
+    const ver = r.group ? r.group.ver : null;
+    const busy = !!document.querySelector('dialog[open]');
+    if (r.topics !== S.topics) {
+      const first = S.topics == null; S.topics = r.topics;
+      if (!first) { treeCache.clear(); initTree().then(() => revealTree(S.path)); }
+    }
+    if (ver != null) {
+      if (S.ver == null) S.ver = ver;
+      else if (ver !== S.ver && !busy) { S.ver = ver; await softRefresh(true); }
+    }
+    if (was && was !== S.idx && S.idx === 'done' && !S.search) await softRefresh(false);
+    drawIdx();
+    next = /^(scanning|idle|telegram)/.test(S.idx) ? 4000 : Math.max(S.minIv, S.interval) * 1000;
+  }
+  pollT = setTimeout(pollStatus, next);
 }
 
 /* ---------- init ---------- */
@@ -1590,6 +1813,7 @@ function pathFromUrl() {
 (async function init() {
   const p = pathFromUrl();
   history.replaceState({ p }, '');
+  await loadGroups();
   await initTree();
   await go(p, false);
   pollStatus();
@@ -1621,14 +1845,122 @@ def _file_json(r):
         "view": _view_mime(name, r["mime_type"] or "") is not None,
     }
 
+# ── Groups ──────────────────────────────────────────────────────────────
+@app.route("/api/groups")
+@require_api
+def api_groups():
+    rows = db_many("""
+        SELECT g.group_id, g.title, g.source,
+               (SELECT COUNT(*) FROM files f WHERE f.group_id = g.group_id) AS files
+        FROM groups g ORDER BY g.added_at, g.group_id""")
+    return jsonify({"ok": True, "groups": [
+        {"id": r["group_id"], "title": r["title"] or f"Group {r['group_id']}",
+         "source": r["source"], "files": r["files"]} for r in rows]})
+
+@app.route("/api/groups", methods=["POST"])
+@require_api
+def api_group_add():
+    d = request.get_json(silent=True) or {}
+    try:
+        gid = int(str(d.get("group_id", "")).strip())
+    except ValueError:
+        return jsonify({"ok": False, "msg": "Group ID number हवा (उदा. -1001234567890)"}), 400
+    if gid >= -1000000000000:
+        return jsonify({"ok": False, "msg": "Supergroup ID -100… ने सुरू होतो"}), 400
+    if db_one("SELECT 1 FROM groups WHERE group_id=?", (gid,)):
+        return jsonify({"ok": False, "msg": "हा group आधीच add आहे"}), 409
+    if db_one("SELECT COUNT(*) AS c FROM groups")["c"] >= MAX_GROUPS:
+        return jsonify({"ok": False, "msg": f"जास्तीत जास्त {MAX_GROUPS} groups"}), 400
+    if not _tg_ready.is_set():
+        return jsonify({"ok": False, "msg": "Telegram अजून तयार नाही, थोड्या वेळाने try कर"}), 503
+
+    async def _chk():
+        return await _tg_client.get_chat(gid)
+    try:
+        chat = tg(_chk(), timeout=30)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"Bot ला हा group दिसत नाही — bot group मध्ये "
+                                            f"admin add केला आहे का? ({type(e).__name__})"}), 400
+    if getattr(chat, "is_forum", None) is False:
+        return jsonify({"ok": False, "msg": "या group मध्ये Topics (Forum) ON नाहीत — "
+                                            "folders topics वरून बनतात"}), 400
+    title = (getattr(chat, "title", "") or "")[:100]
+    db_exec("INSERT OR IGNORE INTO groups (group_id, title, source, added_at) VALUES (?, ?, 'ui', ?)",
+            (gid, title, time.time()))
+    refresh_chan_map()
+    _topics.setdefault(gid, {})
+    _changed(gid)
+    threading.Thread(
+        target=lambda: asyncio.run_coroutine_threadsafe(_full_index(gid), _tg_loop).result(timeout=7200),
+        daemon=True).start()
+    return jsonify({"ok": True, "group": {"id": gid, "title": title or f"Group {gid}"}})
+
+@app.route("/api/groups/remove", methods=["POST"])
+@require_api
+def api_group_remove():
+    d = request.get_json(silent=True) or {}
+    try:
+        gid = int(d.get("group_id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "bad group"}), 400
+    row = db_one("SELECT source FROM groups WHERE group_id=?", (gid,))
+    if not row:
+        return _no_group()
+    if row["source"] == "env":
+        return jsonify({"ok": False, "msg": "हा group env variable (BACKUP_GROUP_ID/S) मधून आहे — "
+                                            "तिथूनच काढ"}), 400
+    # Only the local index is removed; nothing is deleted from Telegram.
+    db_exec("DELETE FROM files  WHERE group_id=?", (gid,))
+    db_exec("DELETE FROM topics WHERE group_id=?", (gid,))
+    db_exec("DELETE FROM groups WHERE group_id=?", (gid,))
+    db_exec("DELETE FROM meta   WHERE key=?", (f"cursor_{gid}",))
+    _topics.pop(gid, None)
+    refresh_chan_map()
+    global _snapshot_dirty
+    _snapshot_dirty = True
+    return jsonify({"ok": True})
+
+# ── Settings / live check ───────────────────────────────────────────────
+@app.route("/api/settings", methods=["POST"])
+@require_api
+def api_settings():
+    d = request.get_json(silent=True) or {}
+    try:
+        iv = int(d.get("poll_interval"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "number हवा"}), 400
+    if not (MIN_POLL <= iv <= MAX_POLL):
+        return jsonify({"ok": False, "msg": f"{MIN_POLL} ते {MAX_POLL} seconds"}), 400
+    meta_set("poll_interval", iv)
+    _poll_wakeup.set()
+    return jsonify({"ok": True, "interval": iv})
+
+@app.route("/api/checknow", methods=["POST"])
+@require_api
+def api_checknow():
+    gid = req_group()
+    if gid is None:
+        return _no_group()
+    if gid in _scanning:
+        return jsonify({"ok": True, "found": 0, "scanning": True})
+    try:
+        found = tg(_poll_group(gid), timeout=90)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"check failed: {e}"}), 500
+    return jsonify({"ok": True, "found": found})
+
+# ── File API ────────────────────────────────────────────────────────────
 @app.route("/api/list")
 @require_api
 def api_list():
+    gid = req_group()
+    if gid is None:
+        return _no_group()
     path = (request.args.get("path", "") or "").strip("/")
     dirs_only = request.args.get("dirs") == "1"
     prefix = f"{path}/" if path else ""
     children = {}
-    for t in db_many("SELECT path, msg_count FROM topics"):
+    for t in db_many("SELECT path, msg_count FROM topics WHERE group_id=?", (gid,)):
         p = t["path"]
         if not p.startswith(prefix) or p == path:
             continue
@@ -1639,11 +1971,12 @@ def api_list():
                for n, c in sorted(children.items(), key=lambda x: x[0].lower())]
     if dirs_only:
         return jsonify({"ok": True, "folders": folders})
-    topic = db_one("SELECT topic_id FROM topics WHERE path=?", (path,)) if path else None
+    topic = db_one("SELECT topic_id FROM topics WHERE group_id=? AND path=?", (gid, path)) if path else None
     files = []
     if path:
         files = [_file_json(r) for r in db_many(
-            "SELECT * FROM files WHERE folder_path=? ORDER BY filename COLLATE NOCASE", (path,))]
+            "SELECT * FROM files WHERE group_id=? AND folder_path=? ORDER BY filename COLLATE NOCASE",
+            (gid, path))]
     return jsonify({"ok": True, "path": path,
                     "topic_id": topic["topic_id"] if topic else None,
                     "folders": folders, "files": files})
@@ -1651,13 +1984,16 @@ def api_list():
 @app.route("/api/search")
 @require_api
 def api_search():
+    gid = req_group()
+    if gid is None:
+        return _no_group()
     q = (request.args.get("q", "") or "").strip()
     if not q:
         return jsonify({"ok": True, "files": []})
     like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     rows = db_many(
-        "SELECT * FROM files WHERE filename LIKE ? ESCAPE '\\' "
-        "ORDER BY filename COLLATE NOCASE LIMIT 300", (like,))
+        "SELECT * FROM files WHERE group_id=? AND filename LIKE ? ESCAPE '\\' "
+        "ORDER BY filename COLLATE NOCASE LIMIT 300", (gid, like))
     return jsonify({"ok": True, "files": [_file_json(r) for r in rows]})
 
 def _ids(data, limit=100):
@@ -1669,39 +2005,44 @@ def _ids(data, limit=100):
     except Exception:
         return None
 
-def _recount(topic_ids):
+def _recount(gid, topic_ids):
     for tid in set(topic_ids):
-        db_exec("UPDATE topics SET msg_count=(SELECT COUNT(*) FROM files WHERE topic_id=?) "
-                "WHERE topic_id=?", (tid, tid))
+        db_exec("UPDATE topics SET msg_count=(SELECT COUNT(*) FROM files WHERE group_id=? AND topic_id=?) "
+                "WHERE group_id=? AND topic_id=?", (gid, tid, gid, tid))
 
 @app.route("/api/delete", methods=["POST"])
 @require_api
 def api_delete():
-    global _snapshot_dirty
+    gid = req_group()
+    if gid is None:
+        return _no_group()
     ids = _ids(request.get_json(silent=True) or {})
     if not ids:
         return jsonify({"ok": False, "msg": "no files selected"}), 400
-    rows = [r for r in (db_one("SELECT msg_id, topic_id FROM files WHERE msg_id=?", (i,)) for i in ids) if r]
+    rows = [r for r in (db_one("SELECT msg_id, topic_id FROM files WHERE group_id=? AND msg_id=?", (gid, i))
+                        for i in ids) if r]
     if not rows:
         return jsonify({"ok": False, "msg": "files not found in index"}), 404
 
     async def _del():
-        return await _tg_client.delete_messages(BACKUP_GROUP_ID, [r["msg_id"] for r in rows])
+        return await _tg_client.delete_messages(gid, [r["msg_id"] for r in rows])
     try:
         tg(_del(), timeout=60)
     except Exception as e:
         return jsonify({"ok": False, "msg": f"Telegram delete failed: {e} "
                         "(bot ला group मध्ये 'Delete messages' admin right हवा)"}), 500
     for r in rows:
-        db_exec("DELETE FROM files WHERE msg_id=?", (r["msg_id"],))
-    _recount([r["topic_id"] for r in rows])
-    _snapshot_dirty = True
+        db_exec("DELETE FROM files WHERE group_id=? AND msg_id=?", (gid, r["msg_id"]))
+    _recount(gid, [r["topic_id"] for r in rows])
+    _changed(gid)
     return jsonify({"ok": True, "deleted": [r["msg_id"] for r in rows]})
 
 @app.route("/api/rename", methods=["POST"])
 @require_api
 def api_rename():
-    global _snapshot_dirty
+    gid = req_group()
+    if gid is None:
+        return _no_group()
     d = request.get_json(silent=True) or {}
     try:
         mid = int(d.get("id"))
@@ -1710,19 +2051,21 @@ def api_rename():
     name = str(d.get("name", "")).strip()
     if not name or len(name) > 255 or any(c in name for c in '/\\\0'):
         return jsonify({"ok": False, "msg": "invalid name"}), 400
-    if not db_one("SELECT 1 FROM files WHERE msg_id=?", (mid,)):
+    if not db_one("SELECT 1 FROM files WHERE group_id=? AND msg_id=?", (gid, mid)):
         return jsonify({"ok": False, "msg": "file not found"}), 404
-    db_exec("UPDATE files SET filename=? WHERE msg_id=?", (name, mid))
-    _snapshot_dirty = True
+    db_exec("UPDATE files SET filename=? WHERE group_id=? AND msg_id=?", (name, gid, mid))
+    _changed(gid)
     return jsonify({"ok": True, "name": name,
                     "ext": os.path.splitext(name)[1].lstrip(".").lower()})
 
 @app.route("/api/paste", methods=["POST"])
 @require_api
 def api_paste():
-    """Copy / move files into another topic folder (server-side copy on Telegram,
-    no download/upload through this server)."""
-    global _snapshot_dirty
+    """Copy / move files into another topic folder of the SAME group (server-side
+    copy on Telegram, no download/upload through this server)."""
+    gid = req_group()
+    if gid is None:
+        return _no_group()
     d = request.get_json(silent=True) or {}
     ids = _ids(d, 20)
     mode = d.get("mode")
@@ -1732,21 +2075,21 @@ def api_paste():
         return jsonify({"ok": False, "msg": "bad target folder"}), 400
     if not ids or mode not in ("copy", "move"):
         return jsonify({"ok": False, "msg": "bad request"}), 400
-    target = db_one("SELECT topic_id, path FROM topics WHERE topic_id=?", (tid,))
+    target = db_one("SELECT topic_id, path FROM topics WHERE group_id=? AND topic_id=?", (gid, tid))
     if not target:
         return jsonify({"ok": False, "msg": "target folder not found"}), 404
 
     async def _copy(mid):
-        m = await _tg_client.copy_message(chat_id=BACKUP_GROUP_ID, from_chat_id=BACKUP_GROUP_ID,
+        m = await _tg_client.copy_message(chat_id=gid, from_chat_id=gid,
                                           message_id=mid, message_thread_id=tid)
         return m.id
 
     async def _rm(mid):
-        await _tg_client.delete_messages(BACKUP_GROUP_ID, mid)
+        await _tg_client.delete_messages(gid, mid)
 
     results, touched = [], [tid]
     for mid in ids:
-        row = db_one("SELECT * FROM files WHERE msg_id=?", (mid,))
+        row = db_one("SELECT * FROM files WHERE group_id=? AND msg_id=?", (gid, mid))
         if not row:
             results.append({"id": mid, "ok": False, "msg": "file not in index"}); continue
         if mode == "move" and row["topic_id"] == tid:
@@ -1755,53 +2098,78 @@ def api_paste():
             new_id = tg(_copy(mid), timeout=60)
         except Exception as e:
             results.append({"id": mid, "ok": False, "msg": f"{row['filename']}: {e}"}); continue
-        db_exec("""INSERT OR IGNORE INTO files (msg_id, topic_id, folder_path, filename, size, mime_type)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (new_id, tid, target["path"], row["filename"], row["size"], row["mime_type"]))
+        db_exec("""INSERT OR IGNORE INTO files (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (gid, new_id, tid, target["path"], row["filename"], row["size"], row["mime_type"]))
         if mode == "move":
             try:
                 tg(_rm(mid), timeout=30)
-                db_exec("DELETE FROM files WHERE msg_id=?", (mid,))
+                db_exec("DELETE FROM files WHERE group_id=? AND msg_id=?", (gid, mid))
                 touched.append(row["topic_id"])
             except Exception as e:
                 results.append({"id": mid, "ok": False,
                                 "msg": f"copied, but original not deleted: {e}"}); continue
         results.append({"id": mid, "ok": True, "new_id": new_id})
         time.sleep(0.4)
-    _recount(touched)
-    _snapshot_dirty = True
+    _recount(gid, touched)
+    _changed(gid)
     return jsonify({"ok": True, "results": results})
 
 @app.route("/api/reindex", methods=["POST"])
 @require_api
 def api_reindex():
-    db_exec("DELETE FROM files")
-    db_exec("DELETE FROM topics")
-    meta_set("scan_cursor", 0)
-    _topics.clear()
+    gid = req_group()
+    if gid is None:
+        return _no_group()
+    if gid in _scanning:
+        return jsonify({"ok": False, "msg": "scan आधीच चालू आहे"}), 409
+    db_exec("DELETE FROM files  WHERE group_id=?", (gid,))
+    db_exec("DELETE FROM topics WHERE group_id=?", (gid,))
+    meta_set(f"cursor_{gid}", 0)
+    _topics[gid] = {}
+    _changed(gid)
     _index_status["status"] = "idle"
     threading.Thread(
-        target=lambda: asyncio.run_coroutine_threadsafe(_full_index(), _tg_loop).result(timeout=7200),
+        target=lambda: asyncio.run_coroutine_threadsafe(_full_index(gid), _tg_loop).result(timeout=7200),
         daemon=True).start()
     return jsonify({"ok": True})
+
+# ── Download / stream ───────────────────────────────────────────────────
+def _content_disposition(kind, name):
+    """Header-safe Content-Disposition that also works for Marathi/Unicode names."""
+    ascii_name = re.sub(r'[^\x20-\x7e]', "_", name).replace('"', "_").replace("\\", "_")
+    return f"{kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{urlquote(name, safe='')}"
 
 @app.route("/download/<int:msg_id>/<path:filename>")
 @require_auth
 def download(msg_id, filename):
     """Download a file by streaming it from Telegram through a temp file."""
+    gid = req_group()
+    row = db_one("SELECT filename FROM files WHERE group_id=? AND msg_id=?", (gid, msg_id)) if gid else None
+    if not row:
+        return jsonify({"error": "file not found in index"}), 404
     tmp_path = os.path.join(TMP_DIR, f"{msg_id}_{secrets.token_hex(4)}")
 
     async def _dl():
-        msg = await _tg_client.get_messages(BACKUP_GROUP_ID, msg_id)
-        await _tg_client.download_media(msg, file_name=tmp_path)
+        msg = await _tg_client.get_messages(gid, msg_id)
+        if not msg or getattr(msg, "empty", False):
+            return False
+        return bool(await _tg_client.download_media(msg, file_name=tmp_path))
+
+    def _cleanup():
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
     try:
-        tg(_dl(), timeout=180)
+        ok = tg(_dl(), timeout=180)
     except Exception as e:
+        _cleanup()
         return jsonify({"error": str(e)}), 500
-
-    file_row = db_one("SELECT size FROM files WHERE msg_id=?", (msg_id,))
-    size = file_row["size"] if file_row else None
+    if not ok or not os.path.exists(tmp_path):
+        _cleanup()
+        return jsonify({"error": "file no longer exists in Telegram"}), 404
 
     def stream_and_clean():
         try:
@@ -1812,19 +2180,13 @@ def download(msg_id, filename):
                         break
                     yield chunk
         finally:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+            _cleanup()
 
-    safe_name = os.path.basename(filename)
     headers = {
-        "Content-Disposition": f'attachment; filename="{safe_name}"',
+        "Content-Disposition": _content_disposition("attachment", row["filename"]),
         "Content-Type": "application/octet-stream",
+        "Content-Length": str(os.path.getsize(tmp_path)),
     }
-    if size:
-        headers["Content-Length"] = str(size)
-
     return Response(stream_with_context(stream_and_clean()), headers=headers)
 
 # ── Inline viewing (stream from Telegram, no full download) ──────────────
@@ -1853,9 +2215,6 @@ def _view_mime(filename, mime):
         return "application/pdf"
     return None
 
-def can_view(fi):
-    return _view_mime(fi["filename"], fi["mime_type"] or "") is not None
-
 def _parse_range(header, size):
     """Returns (start, end), None (no Range header) or 'bad'."""
     if not header or not header.startswith("bytes="):
@@ -1878,8 +2237,8 @@ def _parse_range(header, size):
 # NOTE: every pyrogram call must be created INSIDE a coroutine that runs on the
 # Telegram loop (tg(...)). Calling _tg_client.xxx() directly from a Flask thread
 # makes pyrogram use another loop -> "attached to a different loop".
-async def _stream_open(msg_id, first_chunk, nchunks):
-    msg = await _tg_client.get_messages(BACKUP_GROUP_ID, msg_id)
+async def _stream_open(gid, msg_id, first_chunk, nchunks):
+    msg = await _tg_client.get_messages(gid, msg_id)
     return _tg_client.stream_media(msg, limit=nchunks, offset=first_chunk)
 
 async def _stream_next(agen):
@@ -1898,7 +2257,9 @@ async def _stream_close(agen):
 @require_auth
 def stream(msg_id, filename):
     """Open a file in the browser (video/audio/image/pdf/text) with Range support."""
-    row = db_one("SELECT size, mime_type, filename FROM files WHERE msg_id=?", (msg_id,))
+    gid = req_group()
+    row = db_one("SELECT size, mime_type, filename FROM files WHERE group_id=? AND msg_id=?",
+                 (gid, msg_id)) if gid else None
     if not row or not row["size"]:
         return jsonify({"error": "file not found in index"}), 404
     ctype = _view_mime(row["filename"], row["mime_type"] or "")
@@ -1918,7 +2279,7 @@ def stream(msg_id, filename):
     def generate():
         agen = None
         try:
-            agen = tg(_stream_open(msg_id, first_chunk, nchunks), timeout=30)
+            agen = tg(_stream_open(gid, msg_id, first_chunk, nchunks), timeout=30)
             sent = 0
             first = True
             while sent < length:
@@ -1943,7 +2304,7 @@ def stream(msg_id, filename):
         "Content-Type": ctype,
         "Content-Length": str(length),
         "Accept-Ranges": "bytes",
-        "Content-Disposition": "inline",
+        "Content-Disposition": _content_disposition("inline", row["filename"]),
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, max-age=3600",
     }
@@ -1952,13 +2313,18 @@ def stream(msg_id, filename):
     return Response(stream_with_context(generate()),
                     status=206 if rng else 200, headers=headers)
 
-@app.route("/sendtobot/<int:msg_id>")
-@require_auth
+@app.route("/sendtobot/<int:msg_id>", methods=["POST"])
+@require_api
 def sendtobot(msg_id):
+    """POST (not GET) so a malicious page can't trigger it via a link/img tag."""
+    gid = req_group()
+    if gid is None or not db_one("SELECT 1 FROM files WHERE group_id=? AND msg_id=?", (gid, msg_id)):
+        return jsonify({"ok": False, "msg": "file not found in index"}), 404
+
     async def _fwd():
         return await _tg_client.forward_messages(
             chat_id=OWNER_CHAT_ID,
-            from_chat_id=BACKUP_GROUP_ID,
+            from_chat_id=gid,
             message_ids=msg_id,
         )
     try:
@@ -1966,22 +2332,6 @@ def sendtobot(msg_id):
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 500
-
-@app.route("/reindex")
-@require_auth
-def reindex():
-    db_exec("DELETE FROM files")
-    db_exec("DELETE FROM topics")
-    meta_set("scan_cursor", 0)
-    _topics.clear()
-    _index_status["status"] = "idle"
-    threading.Thread(
-        target=lambda: asyncio.run_coroutine_threadsafe(
-            _full_index(), _tg_loop
-        ).result(timeout=3600),
-        daemon=True
-    ).start()
-    return redirect(request.referrer or "/")
 
 # ── Login routes ───────────────────────────────────────────────────────────
 @app.route("/login", methods=["GET", "POST"])
@@ -1995,6 +2345,7 @@ def login_page():
     if request.method == "POST":
         pwd = request.form.get("password", "")
         if check_password(pwd):
+            session.clear()
             session.permanent = True
             session["authenticated"] = True
             return redirect("/")
@@ -2016,20 +2367,38 @@ def bot_login():
     if not BOT_NAME:
         return redirect("/login")
     db_exec("DELETE FROM login_tokens WHERE created_at < ?", (time.time() - 900,))
+    if db_one("SELECT COUNT(*) AS c FROM login_tokens WHERE validated=0")["c"] >= 50:
+        return Response("Too many pending login requests, try again in a few minutes.", status=429)
     token = secrets.token_urlsafe(32)
-    db_exec("INSERT INTO login_tokens (token, created_at) VALUES (?, ?)",
-            (token, time.time()))
+    db_exec("INSERT INTO login_tokens (token, created_at, ip, ua) VALUES (?, ?, ?, ?)",
+            (token, time.time(), get_ip(), (request.headers.get("User-Agent", "") or "")[:200]))
     bot_url = f"https://t.me/{BOT_NAME}?start={token}"
     return render_template_string(BOT_LOGIN_HTML,
         token=token, bot_url=bot_url, auth_bot_name=BOT_NAME)
 
+@app.route("/magic_login")
+def magic_login():
+    """One-time link sent by the bot to the owner: valid 5 min, works once."""
+    token = request.args.get("t", "")
+    n = db_exec("DELETE FROM login_tokens WHERE token=? AND validated=2 AND created_at>?",
+                (token, time.time() - 300))
+    if not n:
+        return Response("❌ Link expired or already used. Send /start to the bot again.",
+                        status=403, mimetype="text/plain")
+    session.clear()
+    session.permanent = True
+    session["authenticated"] = True
+    unblock_ip(get_ip())
+    return redirect("/")
+
 @app.route("/check_token")
 def check_token():
-    """Polled by the browser that opened /bot_login. Once the bot has approved
-    the token, THIS browser gets the session cookie."""
+    """Polled by the browser that opened /bot_login. Once the owner approved
+    the token in Telegram, THIS browser gets the session cookie."""
     token = request.args.get("t", "")
     row = db_one("SELECT validated, created_at FROM login_tokens WHERE token=?", (token,))
-    if row and row["validated"] and time.time() - row["created_at"] < 300:
+    if row and row["validated"] == 1 and time.time() - row["created_at"] < 300:
+        session.clear()
         session.permanent = True
         session["authenticated"] = True
         unblock_ip(get_ip())
@@ -2045,20 +2414,33 @@ def logout():
 @app.route("/api/status")
 @require_api
 def api_status():
+    gid = req_group()
+    g = {"id": gid, "ver": 0, "last_check": 0, "last_new": 0}
+    if gid is not None:
+        g.update(ver=_group_ver.get(gid, 0), last_check=_last_check.get(gid, 0),
+                 last_new=_last_new.get(gid, 0))
+        topics = db_one("SELECT COUNT(*) as c FROM topics WHERE group_id=?", (gid,))["c"]
+        files = db_one("SELECT COUNT(*) as c FROM files WHERE group_id=?", (gid,))["c"]
+    else:
+        topics = files = 0
     return jsonify({
         "index": _index_status,
-        "topics": db_one("SELECT COUNT(*) as c FROM topics")["c"],
-        "files":  db_one("SELECT COUNT(*) as c FROM files")["c"],
+        "topics": topics,
+        "files": files,
         "tg_ready": _tg_ready.is_set(),
+        "interval": get_poll_interval(),
+        "min_interval": MIN_POLL, "max_interval": MAX_POLL,
+        "group": g,
+        "now": time.time(),
     })
 
 # ── Jinja filter ─────────────────────────────────────────────────────────
-from urllib.parse import quote as urlquote
 app.jinja_env.filters["urlencode"] = lambda s: urlquote(str(s), safe="")
 
 # ── Main ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     threading.Thread(target=run_telegram, daemon=True, name="tg_client").start()
     threading.Thread(target=run_indexer,  daemon=True, name="indexer").start()
+    threading.Thread(target=run_poller,   daemon=True, name="poller").start()
     threading.Thread(target=run_snapshotter, daemon=True, name="snapshotter").start()
     app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)
