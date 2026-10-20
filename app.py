@@ -474,9 +474,12 @@ def run_telegram():
                 return
             await _send_magic_link(msg)
 
-        @_tg_client.on_message(filters.private & filters.text & ~filters.command)
+        @_tg_client.on_message(filters.private & filters.text)
         async def on_text(client, msg):
-            # Tapping the persistent "🔓 Login" button (or any text) -> fresh login link
+            # Tapping the persistent "🔓 Login" button (or any plain text) -> fresh login link.
+            # (/start, /unblock, /status are matched by their own handlers first.)
+            if (msg.text or "").startswith("/"):
+                return
             if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
                 return
             await _send_magic_link(msg)
@@ -579,13 +582,19 @@ def run_telegram():
         print("[tg] Client ready", flush=True)
         await asyncio.Event().wait()
 
-    _tg_loop.run_until_complete(_start())
+    try:
+        _tg_loop.run_until_complete(_start())
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        _index_status["status"] = f"telegram error: {type(e).__name__}: {e}"
+        print(f"[tg] FATAL — Telegram client stopped: {e}", flush=True)
 
 def tg(coro, timeout=120):
     """Run a coroutine on the Telegram event loop from any thread."""
     if not _tg_ready.is_set():
         coro.close()
-        raise RuntimeError("Telegram client not ready yet")
+        raise RuntimeError("Telegram अजून connect झालं नाही (status bar बघ / logs तपास)")
     return asyncio.run_coroutine_threadsafe(coro, _tg_loop).result(timeout=timeout)
 
 # ── Indexer ──────────────────────────────────────────────────────────────
@@ -926,13 +935,13 @@ async def _fill_titles():
 
 def run_indexer():
     """Startup only: restore snapshot, catch up on new ids, then rely on live updates + poller."""
-    _tg_ready.wait()
     try:
         snapshot_load()
     except Exception as e:
         print(f"[snapshot] load failed: {e}", flush=True)
     for r in db_many("SELECT group_id, topic_id, path FROM topics"):
         _topics.setdefault(r["group_id"], {})[r["topic_id"]] = r["path"]
+    _tg_ready.wait()
     try:
         asyncio.run_coroutine_threadsafe(_fill_titles(), _tg_loop).result(timeout=120)
     except Exception as e:
@@ -1086,6 +1095,10 @@ window.onload = () => setTimeout(poll, 2000);
 def index():
     return redirect(url_for("browse", path=""))
 
+@app.route("/healthz")
+def healthz():
+    return Response("ok", mimetype="text/plain")
+
 @app.route("/favicon.ico")
 def favicon():
     return Response(status=204)
@@ -1211,6 +1224,7 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
     <select id="grp" title="Group"></select>
     <button class="ib" id="gadd" title="Add group">＋</button>
     <div class="addr" id="addr"></div>
+    <button class="ib" id="lo" title="Logout">⏻</button>
     <input id="q" type="search" placeholder="Search files…" autocomplete="off">
   </div>
   <div class="bar cmd">
@@ -1419,6 +1433,7 @@ function drawAddr() {
 function drawIdx() {
   const s = S.idx;
   let t = !s || s === 'idle' ? '' : s === 'done' ? '✓ indexed' : '⟳ ' + s;
+  if (S.tg === false && !/telegram/.test(s || '')) t = '⚠ Telegram connect होत आहे…' + (t ? '  ·  ' + t : '');
   if (S.lastCheck) { const a = Math.max(0, Math.round(Date.now() / 1000 + (S.skew || 0) - S.lastCheck)); t += (t ? '  ·  ' : '') + '🔎 checked ' + (a < 60 ? a + 's' : Math.round(a / 60) + 'm') + ' ago · every ' + (S.interval >= 60 && S.interval % 60 === 0 ? S.interval / 60 + 'm' : S.interval + 's'); }
   $('#st-i').textContent = t;
 }
@@ -1747,6 +1762,7 @@ async function removeGroup() {
 }
 $('#grp').onchange = e => switchGroup(e.target.value);
 $('#gadd').onclick = addGroup;
+$('#lo').onclick = () => { location.href = '/logout'; };
 
 /* ---------- index status / auto-check ---------- */
 async function setIntervalDlg() {
@@ -1785,7 +1801,7 @@ async function pollStatus() {
   const r = await api('/api/status');
   let next = 5000;
   if (r && r.index) {
-    const was = S.idx; S.idx = r.index.status;
+    const was = S.idx; S.idx = r.index.status; S.tg = r.tg_ready;
     S.interval = r.interval || S.interval; S.minIv = r.min_interval || S.minIv; S.maxIv = r.max_interval || S.maxIv;
     S.lastCheck = r.group ? r.group.last_check : 0; if (r.now) S.skew = r.now - Date.now() / 1000;
     const ver = r.group ? r.group.ver : null;
