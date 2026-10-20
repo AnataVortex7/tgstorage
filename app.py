@@ -34,6 +34,9 @@ WEB_PASSWORD    = os.environ.get("WEB_PASSWORD", "")
 WEB_URL         = os.environ.get("WEB_URL", "http://localhost:8080")
 MONGO_URI       = os.environ.get("MONGO_URI", "")      # optional: persists index across restarts
 MONGO_DB        = os.environ.get("MONGO_DB", "tgbackup")
+# Optional: Pyrogram session string of YOUR user account. A bot can never see files
+# uploaded by ANOTHER bot, a user account can. When set, it is used to read the group.
+USER_SESSION    = os.environ.get("USER_SESSION", "").strip()
 
 # Extra groups that are always present (comma separated). Groups can also be
 # added later from the web UI (they are stored in SQLite / the Mongo snapshot).
@@ -353,6 +356,8 @@ def _clean(s, n=120):
 # ── Telegram client ──────────────────────────────────────────────────────
 _tg_loop   = None
 _tg_client = None
+_tg_user   = None      # optional user-account client (reads the group)
+_warmed    = False
 _tg_ready  = threading.Event()
 
 def _load_session():
@@ -400,17 +405,19 @@ async def _send_magic_link(msg):
         "🔐 **Backup Browser login**\n\n"
         "खालचं बटन दाब — login होऊन site उघडेल.\n"
         "⏰ 5 मिनिटं valid, फक्त **एकदाच** चालतं. तू मागितलं नसेल तर वापरू नकोस.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Open Backup Browser", url=url)]]),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔓 Open Backup Browser", url=url)],
+            [InlineKeyboardButton("👤 Telegram User Login", callback_data="ul:begin")]]),
         disable_web_page_preview=True)
 
 async def _send_keyboard(msg):
     """Persistent button under the chat box, so no command has to be typed."""
     from pyrogram.types import ReplyKeyboardMarkup, KeyboardButton
     try:
-        kb = ReplyKeyboardMarkup([[KeyboardButton("🔓 Login")]], resize_keyboard=True, is_persistent=True)
+        kb = ReplyKeyboardMarkup([[KeyboardButton("🔓 Login"), KeyboardButton("👤 User Login")]], resize_keyboard=True, is_persistent=True)
     except TypeError:
-        kb = ReplyKeyboardMarkup([[KeyboardButton("🔓 Login")]], resize_keyboard=True)
-    await msg.reply("👇 खालचं **🔓 Login** बटन दाबलं की नवीन login link मिळेल.", reply_markup=kb)
+        kb = ReplyKeyboardMarkup([[KeyboardButton("🔓 Login"), KeyboardButton("👤 User Login")]], resize_keyboard=True)
+    await msg.reply("👇 **🔓 Login** = website login link, **👤 User Login** = Telegram account login (files दिसण्यासाठी).", reply_markup=kb)
 
 def run_telegram():
     global _tg_loop, _tg_client
@@ -474,15 +481,52 @@ def run_telegram():
                 return
             await _send_magic_link(msg)
 
-        @_tg_client.on_message(filters.private & filters.text)
+        @_tg_client.on_message(filters.command("userlogin") & filters.private)
+        async def on_userlogin(client, msg):
+            if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
+                await msg.reply("⛔ Access denied.")
+                return
+            await _login_begin(msg, msg.from_user.id)
+
+        @_tg_client.on_message(filters.command("usercancel") & filters.private)
+        async def on_usercancel(client, msg):
+            if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
+                return
+            await _login_cleanup(msg.from_user.id)
+            await msg.reply("🚫 User login रद्द केला.")
+
+        @_tg_client.on_message(filters.command("userlogout") & filters.private)
+        async def on_userlogout(client, msg):
+            global _tg_user
+            if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
+                return
+            if _tg_user is not None:
+                old, _tg_user = _tg_user, None
+                try:
+                    await old.stop()
+                except Exception:
+                    pass
+            _user_status.update(ready=False, me="", error="")
+            await _loop.run_in_executor(None, _delete_user_session)
+            extra = "\n(USER_SESSION env variable आहे — तो तिथून काढ.)" if USER_SESSION else ""
+            await msg.reply("👋 User session काढला (database मधून delete). "
+                            "Telegram app → Settings → Devices मधूनही हा session terminate करू शकतोस." + extra)
+
+        @_tg_client.on_message(filters.private & filters.text, group=1)
         async def on_text(client, msg):
-            # Tapping the persistent "🔓 Login" button (or any plain text) -> fresh login link.
-            # (/start, /unblock, /status are matched by their own handlers first.)
-            if (msg.text or "").startswith("/"):
+            # group=1 -> runs AFTER the command handlers, so /unblock, /status etc. still work.
+            t = msg.text or ""
+            if t.startswith("/"):
                 return
             if not msg.from_user or msg.from_user.id != OWNER_CHAT_ID:
                 return
-            await _send_magic_link(msg)
+            if msg.from_user.id in _login_state:        # in the middle of user login
+                await _login_step(msg)
+                return
+            if t.strip() == "👤 User Login":
+                await _login_begin(msg, msg.from_user.id)
+                return
+            await _send_magic_link(msg)                 # "🔓 Login" button / any text
 
         @_tg_client.on_callback_query()
         async def on_cb(client, cq):
@@ -491,6 +535,10 @@ def run_telegram():
                 return
             data = cq.data.decode() if isinstance(cq.data, bytes) else (cq.data or "")
             action, _, token = data.partition(":")
+            if action == "ul":
+                await _login_begin(cq.message, cq.from_user.id)
+                await cq.answer()
+                return
             if action == "ok":
                 n = db_exec("UPDATE login_tokens SET validated=1 "
                             "WHERE token=? AND validated=0 AND created_at>?",
@@ -551,6 +599,7 @@ def run_telegram():
                 f"👥 Groups: `{groups_count}`\n"
                 f"🗂 Topics indexed: `{topics_count}`\n"
                 f"📄 Files indexed:  `{files_count}`\n"
+                f"👤 User session: `{'ON ' + _user_status['me'] if _user_status['ready'] else 'OFF (/userlogin)'}`\n"
                 f"🔄 Indexer: `{_index_status['status']}`\n"
                 f"⏱ Check every: `{get_poll_interval()}s`\n"
                 f"🌐 URL: {WEB_URL}"
@@ -578,6 +627,15 @@ def run_telegram():
                 await _loop.run_in_executor(None, _save_session, new_sess)
             except Exception as e:
                 print(f"[session] export failed: {e}", flush=True)
+        usess = await _loop.run_in_executor(None, _load_user_session)
+        if usess:
+            try:
+                await _start_user(usess)
+                print(f"[tg] user client ready as {_user_status['me']} (reads the group)", flush=True)
+            except Exception as e:
+                _user_status.update(ready=False, error=f"{type(e).__name__}: {e}")
+                print(f"[tg] user session failed: {e} — send /userlogin to the bot", flush=True)
+        asyncio.create_task(_bridge_sweeper())
         _tg_ready.set()
         print("[tg] Client ready", flush=True)
         await asyncio.Event().wait()
@@ -596,6 +654,338 @@ def tg(coro, timeout=120):
         coro.close()
         raise RuntimeError("Telegram अजून connect झालं नाही (status bar बघ / logs तपास)")
     return asyncio.run_coroutine_threadsafe(coro, _tg_loop).result(timeout=timeout)
+
+def _rd():
+    """Client used to READ the group: user account if configured, else the bot."""
+    return _tg_user or _tg_client
+
+async def _warm():
+    """A fresh user session has an empty peer cache; loading dialogs fills it."""
+    global _warmed
+    if _tg_user and not _warmed:
+        async for _ in _tg_user.get_dialogs():
+            pass
+        _warmed = True
+
+async def _get_chat(gid):
+    """Bot first (the bot must be in the group anyway to open files), user account as fallback."""
+    try:
+        return await _tg_client.get_chat(gid)
+    except Exception:
+        if not _tg_user:
+            raise
+        await _warm()
+        return await _tg_user.get_chat(gid)
+
+# ── Opening files: BOT does the heavy work, user account only helps briefly ─
+# A bot cannot read files uploaded by ANOTHER bot. When that happens the user
+# account makes an instant, server-side copy of the message inside the group
+# (no data transfer, a fraction of a second); the copy is a normal user message,
+# so the bot can read it and does the real download / streaming itself.
+# Copies are deleted again after BRIDGE_TTL seconds of inactivity.
+# Order: 1) bot reads original  2) bot reads user-made copy  3) user reads directly.
+_bridge = {}                 # (gid, msg_id) -> {"id": copy_id, "ts": last use, "hold": busy-until}
+_bridge_lock = None
+BRIDGE_TTL = 600
+
+def _bridge_touch(gid, msg_id, hold=0):
+    b = _bridge.get((gid, msg_id))
+    if b:
+        b["ts"] = time.time()
+        if hold:
+            b["hold"] = time.time() + hold
+
+def _bridge_release(gid, msg_id):
+    b = _bridge.get((gid, msg_id))
+    if b:
+        b["hold"] = 0
+        b["ts"] = time.time()
+
+def _ok_msg(m):
+    return bool(m) and not getattr(m, "empty", False) and getattr(m, "media", None)
+
+async def _resolve_msg(gid, msg_id):
+    """-> (client, message) that can be downloaded/streamed, or (None, None)."""
+    global _bridge_lock
+    key = (gid, msg_id)
+    b = _bridge.get(key)
+    if b:                                            # already bridged: bot reads the copy
+        try:
+            m = await _tg_client.get_messages(gid, b["id"])
+            if _ok_msg(m):
+                b["ts"] = time.time()
+                return _tg_client, m
+        except Exception:
+            pass
+        _bridge.pop(key, None)
+    try:                                             # 1) bot reads the original
+        m = await _tg_client.get_messages(gid, msg_id)
+        if _ok_msg(m):
+            return _tg_client, m
+    except Exception as e:
+        print(f"[open] bot read failed: {e}", flush=True)
+    if not _tg_user:
+        return None, None
+    if _bridge_lock is None:
+        _bridge_lock = asyncio.Lock()
+    async with _bridge_lock:                         # 2) user makes a copy, bot reads it
+        b = _bridge.get(key)
+        if b:
+            return _tg_client, await _tg_client.get_messages(gid, b["id"])
+        try:
+            await _warm()
+            c = await _tg_user.copy_message(chat_id=gid, from_chat_id=gid,
+                                            message_id=msg_id, disable_notification=True)
+            m2 = await _tg_client.get_messages(gid, c.id)
+            if _ok_msg(m2):
+                _bridge[key] = {"id": c.id, "ts": time.time(), "hold": 0}
+                return _tg_client, m2
+            try:
+                await _tg_user.delete_messages(gid, c.id)
+            except Exception:
+                pass
+            print("[open] bot cannot read the user-made copy either — using user account", flush=True)
+        except Exception as e:
+            print(f"[open] bridge copy failed: {e}", flush=True)
+    try:                                             # 3) last resort: user account reads directly
+        mu = await _tg_user.get_messages(gid, msg_id)
+        if _ok_msg(mu):
+            return _tg_user, mu
+    except Exception as e:
+        print(f"[open] user read failed: {e}", flush=True)
+    return None, None
+
+async def _bridge_sweeper():
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        dead = [(k, v) for k, v in list(_bridge.items())
+                if now > max(v["ts"] + BRIDGE_TTL, v.get("hold", 0))]
+        by_gid = {}
+        for k, v in dead:
+            _bridge.pop(k, None)
+            by_gid.setdefault(k[0], []).append(v["id"])
+        for gid, ids in by_gid.items():
+            try:
+                await (_tg_user or _tg_client).delete_messages(gid, ids)
+            except Exception as e:
+                print(f"[open] copy cleanup failed: {e}", flush=True)
+
+# ── User-account login (done inside the bot chat) ────────────────────────
+# Owner sends /start -> taps "👤 Telegram User Login" (or /userlogin) -> phone ->
+# OTP (any separators ok: 1-3-2-2-2) -> 2FA password if enabled.
+# Only the resulting session string is stored (SQLite + MongoDB), never the
+# phone number / OTP / password. The user's messages with OTP / password are
+# deleted from the chat right after they are read.
+_user_status = {"ready": False, "me": "", "error": ""}
+_login_state = {}            # owner id -> {"step", "client", "phone", "hash", "tries", "ts"}
+LOGIN_TTL = 600
+
+def _digits(s):
+    return re.sub(r"\D", "", s or "")
+
+def _load_user_session():
+    if USER_SESSION:
+        return USER_SESSION
+    if MONGO_URI:
+        try:
+            from pymongo import MongoClient
+            db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]
+            doc = db["session"].find_one({"_id": "user"})
+            if doc and doc.get("session_string"):
+                return doc["session_string"]
+        except Exception as e:
+            print(f"[user-session] mongo load failed: {e}", flush=True)
+    row = db_one("SELECT value FROM meta WHERE key='user_session_string'")
+    return row["value"] if row else ""
+
+def _save_user_session(sess):
+    meta_set("user_session_string", sess)
+    if MONGO_URI:
+        try:
+            from pymongo import MongoClient
+            db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]
+            db["session"].replace_one({"_id": "user"}, {"_id": "user", "session_string": sess}, upsert=True)
+        except Exception as e:
+            print(f"[user-session] mongo save failed: {e}", flush=True)
+    else:
+        print("[user-session] MONGO_URI not set — session is lost on restart, "
+              "you will have to /userlogin again", flush=True)
+
+def _delete_user_session():
+    db_exec("DELETE FROM meta WHERE key='user_session_string'")
+    if MONGO_URI:
+        try:
+            from pymongo import MongoClient
+            MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]["session"].delete_one({"_id": "user"})
+        except Exception as e:
+            print(f"[user-session] mongo delete failed: {e}", flush=True)
+
+async def _start_user(sess):
+    """(Re)start the user-account client that reads the group."""
+    global _tg_user, _warmed
+    from pyrogram.handlers import RawUpdateHandler
+    if _tg_user is not None:
+        old, _tg_user = _tg_user, None
+        try:
+            await old.stop()
+        except Exception:
+            pass
+    _warmed = False
+    c = Client(name="tg_user", api_id=API_ID, api_hash=API_HASH,
+               session_string=sess, in_memory=True, sleep_threshold=120)
+    c.add_handler(RawUpdateHandler(_on_raw_update), group=-1)
+    await c.start()
+    me = await c.get_me()
+    _tg_user = c
+    _user_status.update(ready=True, error="",
+                        me=f"{me.first_name or ''} ({me.id})".strip())
+
+async def _reindex_all():
+    """After a (new) user login: wipe + rescan every group with the user account."""
+    for r in list_groups():
+        gid = r["group_id"]
+        if gid in _scanning:
+            continue
+        db_exec("DELETE FROM files  WHERE group_id=?", (gid,))
+        db_exec("DELETE FROM topics WHERE group_id=?", (gid,))
+        meta_set(f"cursor_{gid}", 0)
+        _topics[gid] = {}
+        _changed(gid)
+        await _full_index(gid)
+
+async def _login_cleanup(uid):
+    st = _login_state.pop(uid, None)
+    if st and st.get("client"):
+        try:
+            await st["client"].disconnect()
+        except Exception:
+            pass
+
+async def _login_begin(msg, uid):
+    await _login_cleanup(uid)
+    _login_state[uid] = {"step": "phone", "ts": time.time()}
+    await msg.reply(
+        "👤 **Telegram User Login**\n\n"
+        "ज्या Telegram account ने group वाचायचा आहे त्याचा **phone number** country code सह पाठव.\n"
+        "उदा. `+919876543210`\n\n"
+        "रद्द करायचं असेल तर /usercancel")
+
+async def _login_finish(msg, uid):
+    st = _login_state.get(uid) or {}
+    c = st.get("client")
+    sess = await c.export_session_string()
+    await _login_cleanup(uid)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _save_user_session, sess)
+    await _start_user(sess)
+    await msg.reply(
+        f"✅ **User login झाला:** {_clean(_user_status['me'])}\n\n"
+        "Session database मध्ये save झाला. आता सगळे groups नव्याने scan होत आहेत — "
+        "website च्या खाली status bar मध्ये progress दिसेल.\n\n"
+        "⚠ तुझे OTP/password चे messages मी chat मधून delete केले आहेत (नाही झाले असतील तर स्वतः delete कर).")
+    asyncio.create_task(_reindex_all())
+
+async def _login_step(msg):
+    from pyrogram.errors import (PhoneCodeInvalid, PhoneCodeExpired, SessionPasswordNeeded,
+                                 PasswordHashInvalid, PhoneNumberInvalid, FloodWait as _FW)
+    uid = msg.from_user.id
+    st = _login_state.get(uid)
+    if not st:
+        return
+    if time.time() - st["ts"] > LOGIN_TTL:
+        await _login_cleanup(uid)
+        await msg.reply("⏰ Login वेळ संपला. परत /userlogin पाठव.")
+        return
+    st["ts"] = time.time()
+    text = (msg.text or "").strip()
+    try:
+        if st["step"] == "phone":
+            raw = re.sub(r"[^\d+]", "", text)
+            d = _digits(raw)
+            note = ""
+            if not raw.startswith("+"):
+                if len(d) == 10:
+                    raw, note = "+91" + d, " (+91 धरला)"
+                else:
+                    raw = "+" + d
+            if len(_digits(raw)) < 8:
+                await msg.reply("❌ Number बरोबर नाही. country code सह पाठव, उदा. `+919876543210`")
+                return
+            c = Client(name=f"login{uid}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+            await c.connect()
+            try:
+                sent = await c.send_code(raw)
+            except Exception:
+                await c.disconnect()
+                raise
+            st.update(client=c, phone=raw, hash=sent.phone_code_hash, step="code", tries=0)
+            await msg.reply(
+                f"📨 Code पाठवला{note}. Telegram app मध्ये **Telegram** नावाच्या chat मध्ये बघ.\n\n"
+                "Code असा पाठव **मध्ये dash टाकून**, उदा. `1-3-2-2-2` "
+                "(dash/space/dot चालेल — मी फक्त आकडे घेतो).\n"
+                "सरळ आकडे पाठवले तर Telegram code रद्द करू शकतो.\n\n/usercancel = रद्द")
+            return
+
+        if st["step"] == "code":
+            code = _digits(text)
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            if not 5 <= len(code) <= 6:
+                await msg.reply("❌ Code 5 आकडी हवा (उदा. `1-3-2-2-2`). परत पाठव.")
+                return
+            try:
+                await st["client"].sign_in(st["phone"], st["hash"], code)
+            except SessionPasswordNeeded:
+                st["step"] = "pwd"
+                st["tries"] = 0
+                await msg.reply("🔐 या account ला **2-step verification (2FA)** आहे.\n"
+                                "तुझा 2FA **password** पाठव (मी तो message लगेच delete करेन).")
+                return
+            except PhoneCodeInvalid:
+                st["tries"] += 1
+                if st["tries"] >= 3:
+                    await _login_cleanup(uid)
+                    await msg.reply("❌ 3 वेळा चुकीचा code. परत /userlogin पाठव.")
+                else:
+                    await msg.reply(f"❌ चुकीचा code ({st['tries']}/3). परत पाठव, उदा. `1-3-2-2-2`")
+                return
+            except PhoneCodeExpired:
+                await _login_cleanup(uid)
+                await msg.reply("⏰ Code expire झाला. परत /userlogin पाठव.")
+                return
+            await _login_finish(msg, uid)
+            return
+
+        if st["step"] == "pwd":
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            try:
+                await st["client"].check_password(text)
+            except PasswordHashInvalid:
+                st["tries"] += 1
+                if st["tries"] >= 3:
+                    await _login_cleanup(uid)
+                    await msg.reply("❌ 3 वेळा चुकीचा password. परत /userlogin पाठव.")
+                else:
+                    await msg.reply(f"❌ चुकीचा password ({st['tries']}/3). परत पाठव.")
+                return
+            await _login_finish(msg, uid)
+            return
+    except PhoneNumberInvalid:
+        await _login_cleanup(uid)
+        await msg.reply("❌ Phone number invalid आहे. परत /userlogin पाठव.")
+    except _FW as e:
+        await _login_cleanup(uid)
+        await msg.reply(f"⏳ Telegram ने थांबवलं: {int(getattr(e, 'value', 60))} सेकंद थांब आणि परत try कर.")
+    except Exception as e:
+        await _login_cleanup(uid)
+        print(f"[login] {type(e).__name__}: {e}", flush=True)
+        await msg.reply(f"❌ Login failed: `{_clean(type(e).__name__)}` — {_clean(e, 150)}\nपरत /userlogin पाठव.")
 
 # ── Indexer ──────────────────────────────────────────────────────────────
 # Design (bots can't read history or list topics, and Telegram flood-limits
@@ -836,7 +1226,7 @@ async def _invoke_safe(req):
     """invoke() that waits out FloodWait instead of failing."""
     while True:
         try:
-            return await _tg_client.invoke(req)
+            return await _rd().invoke(req)
         except FloodWait as e:
             wait = int(getattr(e, "value", 30)) + 2
             _index_status["status"] = f"scanning (flood wait {wait}s)"
@@ -844,12 +1234,23 @@ async def _invoke_safe(req):
             await asyncio.sleep(wait)
 
 async def _input_channel(gid):
-    peer = await _tg_client.resolve_peer(gid)
+    try:
+        peer = await _rd().resolve_peer(gid)
+    except Exception:
+        if not _tg_user:
+            raise
+        await _warm()
+        peer = await _rd().resolve_peer(gid)
     return tg_raw.types.InputChannel(channel_id=peer.channel_id, access_hash=peer.access_hash)
 
 async def _latest_msg_id(gid):
     """Bots can't read history, so post a temp message to learn the newest id.
     (Only used for the startup / new-group / re-index scan — NOT for the periodic check.)"""
+    if _tg_user:                      # user account can read history: no temp message needed
+        await _warm()
+        async for hm in _tg_user.get_chat_history(gid, limit=1):
+            return hm.id
+        return 0
     m = await _tg_client.send_message(gid, "⏳ indexing…")
     mid = m.id
     try:
@@ -955,7 +1356,7 @@ async def _fill_titles():
         if r["title"]:
             continue
         try:
-            chat = await _tg_client.get_chat(r["group_id"])
+            chat = await _get_chat(r["group_id"])
             db_exec("UPDATE groups SET title=? WHERE group_id=?",
                     (chat.title or "", r["group_id"]))
         except Exception as e:
@@ -1465,6 +1866,7 @@ function drawIdx() {
   const n = x => (+x || 0).toLocaleString();
   const plural = (k, w) => n(k) + ' ' + w + (k === 1 ? '' : 's');
   if (S.tg === false && !/telegram/.test(s || '')) parts.push('⚠ Telegram connect होत आहे…');
+  if (S.user === false) parts.push('⚠ User login नाही — files दिसणार नाहीत; bot ला /userlogin पाठव');
   // this folder
   if (S.search) parts.push('🔎 ' + plural(S.files.length, 'result'));
   else if (S.path) {
@@ -1851,7 +2253,7 @@ async function pollStatus() {
   const r = await api('/api/status');
   let next = 5000;
   if (r && r.index) {
-    const was = S.idx; S.idx = r.index.status; S.tg = r.tg_ready; S.stats = { files: r.files, topics: r.topics, bytes: r.bytes, scan: r.scan, allFiles: r.all_files };
+    const was = S.idx; S.idx = r.index.status; S.tg = r.tg_ready; S.user = r.user_ready; S.stats = { files: r.files, topics: r.topics, bytes: r.bytes, scan: r.scan, allFiles: r.all_files };
     S.interval = r.interval || S.interval; S.minIv = r.min_interval || S.minIv; S.maxIv = r.max_interval || S.maxIv;
     S.lastCheck = r.group ? r.group.last_check : 0; if (r.now) S.skew = r.now - Date.now() / 1000;
     const ver = r.group ? r.group.ver : null;
@@ -1941,7 +2343,7 @@ def api_group_add():
         return jsonify({"ok": False, "msg": "Telegram अजून तयार नाही, थोड्या वेळाने try कर"}), 503
 
     async def _chk():
-        return await _tg_client.get_chat(gid)
+        return await _get_chat(gid)
     try:
         chat = tg(_chk(), timeout=30)
     except Exception as e:
@@ -2091,7 +2493,13 @@ def api_delete():
         return jsonify({"ok": False, "msg": "files not found in index"}), 404
 
     async def _del():
-        return await _tg_client.delete_messages(gid, [r["msg_id"] for r in rows])
+        ids = [r["msg_id"] for r in rows]
+        try:
+            return await _tg_client.delete_messages(gid, ids)
+        except Exception:
+            if not _tg_user:
+                raise
+            return await _tg_user.delete_messages(gid, ids)
     try:
         tg(_del(), timeout=60)
     except Exception as e:
@@ -2146,12 +2554,12 @@ def api_paste():
         return jsonify({"ok": False, "msg": "target folder not found"}), 404
 
     async def _copy(mid):
-        m = await _tg_client.copy_message(chat_id=gid, from_chat_id=gid,
+        m = await _rd().copy_message(chat_id=gid, from_chat_id=gid,
                                           message_id=mid, message_thread_id=tid)
         return m.id
 
     async def _rm(mid):
-        await _tg_client.delete_messages(gid, mid)
+        await _rd().delete_messages(gid, mid)
 
     results, touched = [], [tid]
     for mid in ids:
@@ -2217,10 +2625,14 @@ def download(msg_id, filename):
     tmp_path = os.path.join(TMP_DIR, f"{msg_id}_{secrets.token_hex(4)}")
 
     async def _dl():
-        msg = await _tg_client.get_messages(gid, msg_id)
-        if not msg or getattr(msg, "empty", False):
+        cl, msg = await _resolve_msg(gid, msg_id)
+        if not msg:
             return False
-        return bool(await _tg_client.download_media(msg, file_name=tmp_path))
+        _bridge_touch(gid, msg_id, hold=3600)       # keep the copy alive while downloading
+        try:
+            return bool(await cl.download_media(msg, file_name=tmp_path))
+        finally:
+            _bridge_release(gid, msg_id)
 
     def _cleanup():
         try:
@@ -2304,8 +2716,10 @@ def _parse_range(header, size):
 # Telegram loop (tg(...)). Calling _tg_client.xxx() directly from a Flask thread
 # makes pyrogram use another loop -> "attached to a different loop".
 async def _stream_open(gid, msg_id, first_chunk, nchunks):
-    msg = await _tg_client.get_messages(gid, msg_id)
-    return _tg_client.stream_media(msg, limit=nchunks, offset=first_chunk)
+    cl, msg = await _resolve_msg(gid, msg_id)
+    if not msg:
+        raise RuntimeError("file cannot be opened right now")
+    return cl.stream_media(msg, limit=nchunks, offset=first_chunk)
 
 async def _stream_next(agen):
     try:
@@ -2350,6 +2764,7 @@ def stream(msg_id, filename):
             first = True
             while sent < length:
                 chunk = tg(_stream_next(agen), timeout=60)
+                _bridge_touch(gid, msg_id)
                 if chunk is None:
                     break
                 if first:
@@ -2388,10 +2803,13 @@ def sendtobot(msg_id):
         return jsonify({"ok": False, "msg": "file not found in index"}), 404
 
     async def _fwd():
-        return await _tg_client.forward_messages(
+        cl, msg = await _resolve_msg(gid, msg_id)
+        if not msg:
+            raise RuntimeError("file cannot be read")
+        return await cl.forward_messages(
             chat_id=OWNER_CHAT_ID,
             from_chat_id=gid,
-            message_ids=msg_id,
+            message_ids=msg.id,
         )
     try:
         tg(_fwd(), timeout=30)
@@ -2498,6 +2916,7 @@ def api_status():
         "all_files": db_one("SELECT COUNT(*) as c FROM files")["c"],
         "scan": _scan_progress.get(gid),
         "tg_ready": _tg_ready.is_set(),
+        "user_ready": _user_status["ready"], "user_error": _user_status["error"],
         "interval": get_poll_interval(),
         "min_interval": MIN_POLL, "max_interval": MAX_POLL,
         "group": g,
