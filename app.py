@@ -613,6 +613,7 @@ def tg(coro, timeout=120):
 #      version counter changes.
 _index_status = {"status": "idle", "progress": "", "last_run": 0}
 _scanning = set()            # gids currently doing a full catch-up scan
+_scan_progress = {}          # gid -> {"done": last scanned msg id, "total": newest msg id}
 _snapshot_dirty = False
 
 def meta_get(key, default=0):
@@ -849,6 +850,7 @@ async def _scan_group(gid):
             return
         BATCH = 100            # Telegram max ids per GetMessages call
         found = 0
+        _scan_progress[gid] = {"done": start - 1, "total": latest}
         for lo in range(start, latest + 1, BATCH):
             hi = min(lo + BATCH, latest + 1)
             _index_status["status"] = f"scanning {lo}/{latest}"
@@ -859,12 +861,14 @@ async def _scan_group(gid):
                 if _handle_raw_message(gid, m):
                     found += 1
             meta_set(f"cursor_{gid}", hi - 1)
+            _scan_progress[gid] = {"done": hi - 1, "total": latest}
             await asyncio.sleep(2.0)      # gentle pace, avoids FloodWait
         _snapshot_dirty = True
         print(f"[index] {gid}: scan done up to msg {latest}: +{found} files, "
               f"{len(_topics.get(gid, {}))} topics", flush=True)
     finally:
         _scanning.discard(gid)
+        _scan_progress.pop(gid, None)
 
 async def _full_index(gid):
     if gid in _scanning:
@@ -1197,6 +1201,7 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
 #vbody video,#vbody img{max-width:100%;max-height:100%;border-radius:6px}
 #vbody audio{width:min(92vw,560px)}
 #vbody iframe{width:100%;height:100%;border:0;background:#fff;border-radius:6px}
+#st-i{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 #navbtn{display:none}
 @media(max-width:760px){
   #navbtn{display:inline-block}
@@ -1423,6 +1428,7 @@ function updateBar() {
   $('#st-n').textContent = S.items.length + ' item' + (S.items.length === 1 ? '' : 's');
   $('#st-s').textContent = n ? n + ' selected' + (f.length ? '  ·  ' + fmt(f.reduce((a, x) => a + (x.size || 0), 0)) : '') : '';
   drawPreview();
+  drawIdx();
 }
 function drawAddr() {
   const a = $('#addr'); let h = '<a data-p="">🏠 Backup</a>';
@@ -1431,11 +1437,31 @@ function drawAddr() {
   a.innerHTML = h; a.scrollLeft = a.scrollWidth;
 }
 function drawIdx() {
-  const s = S.idx;
-  let t = !s || s === 'idle' ? '' : s === 'done' ? '✓ indexed' : '⟳ ' + s;
-  if (S.tg === false && !/telegram/.test(s || '')) t = '⚠ Telegram connect होत आहे…' + (t ? '  ·  ' + t : '');
-  if (S.lastCheck) { const a = Math.max(0, Math.round(Date.now() / 1000 + (S.skew || 0) - S.lastCheck)); t += (t ? '  ·  ' : '') + '🔎 checked ' + (a < 60 ? a + 's' : Math.round(a / 60) + 'm') + ' ago · every ' + (S.interval >= 60 && S.interval % 60 === 0 ? S.interval / 60 + 'm' : S.interval + 's'); }
-  $('#st-i').textContent = t;
+  const st = S.stats || {}, parts = [], s = S.idx;
+  const n = x => (+x || 0).toLocaleString();
+  const plural = (k, w) => n(k) + ' ' + w + (k === 1 ? '' : 's');
+  if (S.tg === false && !/telegram/.test(s || '')) parts.push('⚠ Telegram connect होत आहे…');
+  // this folder
+  if (S.search) parts.push('🔎 ' + plural(S.files.length, 'result'));
+  else if (S.path) {
+    const sub = S.folders.reduce((a, f) => a + (f.count || 0), 0);
+    parts.push('📁 ' + plural(S.files.length, 'file') + (sub ? ' (+' + n(sub) + ' in subfolders)' : ''));
+  }
+  // whole group (what is in the database)
+  if (st.files != null) parts.push('🗄 ' + plural(st.files, 'file') + ' · ' + plural(st.topics, 'folder') + (st.bytes ? ' · ' + fmt(st.bytes) : ''));
+  // scan progress / remaining
+  const sc = st.scan;
+  if (sc && sc.total) {
+    const left = Math.max(0, sc.total - sc.done);
+    parts.push('⟳ scanning ' + Math.min(100, Math.floor(sc.done * 100 / sc.total)) + '% · ' + n(left) + ' msgs left');
+  } else if (s === 'done') parts.push('✓ up to date');
+  else if (s && s !== 'idle') parts.push('⟳ ' + s);
+  if (S.lastCheck) {
+    const a = Math.max(0, Math.round(Date.now() / 1000 + (S.skew || 0) - S.lastCheck));
+    parts.push('🔎 ' + (a < 60 ? a + 's' : Math.round(a / 60) + 'm') + ' ago / ' + (S.interval >= 60 && S.interval % 60 === 0 ? S.interval / 60 + 'm' : S.interval + 's'));
+  }
+  const el = $('#st-i'); el.textContent = parts.join('  ·  ');
+  el.title = parts.join('\n') + (st.scan ? '\n(msgs = Telegram messages still to be checked; files among them are counted as they are found)' : '') + (st.allFiles != null ? '\nAll groups: ' + plural(st.allFiles, 'file') : '');
 }
 
 /* ---------- selection / open ---------- */
@@ -1801,7 +1827,7 @@ async function pollStatus() {
   const r = await api('/api/status');
   let next = 5000;
   if (r && r.index) {
-    const was = S.idx; S.idx = r.index.status; S.tg = r.tg_ready;
+    const was = S.idx; S.idx = r.index.status; S.tg = r.tg_ready; S.stats = { files: r.files, topics: r.topics, bytes: r.bytes, scan: r.scan, allFiles: r.all_files };
     S.interval = r.interval || S.interval; S.minIv = r.min_interval || S.minIv; S.maxIv = r.max_interval || S.maxIv;
     S.lastCheck = r.group ? r.group.last_check : 0; if (r.now) S.skew = r.now - Date.now() / 1000;
     const ver = r.group ? r.group.ver : null;
@@ -2437,12 +2463,16 @@ def api_status():
                  last_new=_last_new.get(gid, 0))
         topics = db_one("SELECT COUNT(*) as c FROM topics WHERE group_id=?", (gid,))["c"]
         files = db_one("SELECT COUNT(*) as c FROM files WHERE group_id=?", (gid,))["c"]
+        size = db_one("SELECT COALESCE(SUM(size), 0) as s FROM files WHERE group_id=?", (gid,))["s"]
     else:
-        topics = files = 0
+        topics = files = size = 0
     return jsonify({
         "index": _index_status,
         "topics": topics,
         "files": files,
+        "bytes": size,
+        "all_files": db_one("SELECT COUNT(*) as c FROM files")["c"],
+        "scan": _scan_progress.get(gid),
         "tg_ready": _tg_ready.is_set(),
         "interval": get_poll_interval(),
         "min_interval": MIN_POLL, "max_interval": MAX_POLL,
