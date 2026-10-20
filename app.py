@@ -171,6 +171,16 @@ def require_auth(f):
         return f(*args, **kwargs)
     return wrapped
 
+def require_api(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        if not session.get("authenticated"):
+            return jsonify({"ok": False, "msg": "login required"}), 401
+        if request.method == "POST" and request.headers.get("X-Requested-With") != "fetch":
+            return jsonify({"ok": False, "msg": "bad request"}), 400
+        return f(*args, **kwargs)
+    return wrapped
+
 # ── Telegram client ──────────────────────────────────────────────────────
 _tg_loop   = None
 _tg_client = None
@@ -998,48 +1008,782 @@ function showToast(msg) {
 def index():
     return redirect(url_for("browse", path=""))
 
+@app.route("/favicon.ico")
+def favicon():
+    return Response(status=204)
+
+EXPLORER_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backup Explorer</title>
+<style>
+:root{--bg:#f3f3f3;--content:#fff;--text:#1b1b1b;--muted:#6b6b6b;--line:#e1e1e1;--hover:#eaf3fb;--sel:#cce8ff;--selb:#99d1ff;--menu:#fff;--shadow:0 8px 24px rgba(0,0,0,.18)}
+@media(prefers-color-scheme:dark){:root{--bg:#202020;--content:#191919;--text:#f1f1f1;--muted:#a0a0a0;--line:#333;--hover:#2a2d31;--sel:#0b3a5e;--selb:#1a6aa8;--menu:#2b2b2b;--shadow:0 8px 24px rgba(0,0,0,.6)}}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{font:14px/1.35 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif;background:var(--bg);color:var(--text);overflow:hidden}
+#app{display:flex;flex-direction:column;height:100vh;height:100dvh}
+.bar{display:flex;align-items:center;gap:4px;padding:6px 10px;background:var(--bg)}
+.ib,.cb{background:none;border:0;color:inherit;border-radius:6px;cursor:pointer;font:inherit}
+.ib{width:32px;height:32px;font-size:16px;flex:none}
+.ib:hover,.cb:hover:not(:disabled){background:rgba(127,127,127,.18)}
+.ib.on{background:rgba(127,127,127,.28)}
+.cb{display:flex;align-items:center;gap:6px;padding:6px 10px;height:34px;white-space:nowrap}
+.cb:disabled{opacity:.38;cursor:default}
+.addr{flex:1;min-width:0;display:flex;align-items:center;height:34px;padding:0 6px;background:var(--content);border:1px solid var(--line);border-radius:6px;overflow-x:auto;white-space:nowrap;scrollbar-width:none}
+.addr a{padding:3px 6px;border-radius:4px;cursor:pointer}
+.addr a:hover{background:var(--hover)}
+.addr .sep{color:var(--muted)}
+#q{width:260px;height:34px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--content);color:inherit;font:inherit}
+.cmd{border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.vsep{width:1px;height:20px;background:var(--line);margin:0 4px;flex:none}
+.sp{flex:1}
+.main{flex:1;display:flex;min-height:0;background:var(--content)}
+#nav{width:240px;overflow:auto;padding:6px;border-right:1px solid var(--line);background:var(--content);flex:none}
+.tn{display:flex;align-items:center;gap:2px;padding:4px 4px 4px calc(4px + var(--d,0) * 14px);border-radius:6px;cursor:pointer;white-space:nowrap}
+.tn:hover{background:var(--hover)}
+.tn.cur{background:var(--sel)}
+.ar{width:18px;text-align:center;color:var(--muted);font-size:11px;flex:none}
+.tl{overflow:hidden;text-overflow:ellipsis}
+.tc[hidden]{display:none}
+#content{flex:1;overflow:auto;padding:8px;outline:0}
+#content.icons{display:flex;flex-wrap:wrap;align-content:flex-start;gap:4px}
+.it{user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;border:1px solid transparent;cursor:default}
+.it:hover{background:var(--hover)}
+.it.sel{background:var(--sel);border-color:var(--selb)}
+.it.cut{opacity:.45}
+.icons .it{width:112px;padding:8px 4px 6px;text-align:center;border-radius:6px}
+.icons .ic{width:64px;height:64px;margin:0 auto 4px}
+.icons .nm{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;font-size:13px}
+.icons .sz,.icons .ty,.icons .hd{display:none}
+.nm small{display:block;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis}
+.ic svg{width:100%;height:100%;display:block}
+.details .hd,.details .it{display:grid;grid-template-columns:28px 1fr 110px 120px;align-items:center;gap:8px;padding:4px 8px;border-radius:4px}
+.details .hd{position:sticky;top:-8px;background:var(--content);border-bottom:1px solid var(--line);color:var(--muted);z-index:2;margin:-8px -8px 4px;padding:8px 16px;border-radius:0}
+.hd div{cursor:pointer}
+.details .ic{width:22px;height:22px}
+.details .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.details .sz,.details .ty{color:var(--muted);font-size:13px}
+.empty{color:var(--muted);padding:30px;text-align:center;width:100%}
+#preview{width:340px;border-left:1px solid var(--line);padding:10px;overflow:auto;flex:none}
+#preview[hidden]{display:none}
+#preview video,#preview img,#preview iframe,#preview audio{width:100%;border:0;border-radius:6px}
+#preview video,#preview iframe{max-height:60vh;background:#000}
+#preview iframe{height:60vh;background:#fff}
+.pvi{margin-top:10px;font-size:13px;color:var(--muted);word-break:break-word}
+.pvi b{color:var(--text);display:block;margin-bottom:2px}
+.status{display:flex;align-items:center;gap:14px;padding:3px 12px;background:var(--content);border-top:1px solid var(--line);color:var(--muted);font-size:12px;height:30px;white-space:nowrap}
+.status .ib{width:26px;height:24px;font-size:14px}
+#menu{position:fixed;z-index:60;min-width:210px;background:var(--menu);border:1px solid var(--line);border-radius:8px;padding:4px;box-shadow:var(--shadow)}
+#menu[hidden]{display:none}
+.mi{padding:7px 12px;border-radius:5px;cursor:pointer;white-space:nowrap}
+.mi:hover{background:var(--hover)}
+.mi.dis{opacity:.4;pointer-events:none}
+.mi.b{font-weight:600}
+.ms{height:1px;background:var(--line);margin:4px 2px}
+dialog{margin:auto;border:1px solid var(--line);border-radius:10px;background:var(--menu);color:var(--text);padding:18px;width:min(92vw,420px);box-shadow:var(--shadow)}
+dialog::backdrop{background:rgba(0,0,0,.35)}
+dialog h3{font-size:16px;margin-bottom:8px}
+dialog p{color:var(--muted);margin-bottom:10px;font-size:13px;word-break:break-word}
+dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--content);color:inherit;font:inherit;margin-bottom:12px}
+.btns{display:flex;flex-direction:row-reverse;gap:8px}
+.btns button{padding:7px 16px;border-radius:6px;border:1px solid var(--line);background:var(--content);color:inherit;font:inherit;cursor:pointer}
+.btns .primary{background:#0067c0;border-color:#0067c0;color:#fff}
+.btns .danger{background:#c42b1c;border-color:#c42b1c;color:#fff}
+#toast{position:fixed;left:50%;bottom:44px;transform:translateX(-50%);background:#323232;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;z-index:80;max-width:90vw;box-shadow:var(--shadow)}
+#toast[hidden]{display:none}
+#toast.err{background:#b3261e}
+#navbtn{display:none}
+@media(max-width:760px){
+  #navbtn{display:inline-block}
+  #nav{position:fixed;left:0;top:96px;bottom:30px;z-index:40;display:none;box-shadow:var(--shadow);width:270px}
+  #nav.open{display:block}
+  #q{width:92px;padding:0 6px}
+  .lbl{display:none}
+  .cb{padding:6px 9px}
+  #preview{display:none!important}
+  .icons .it{width:96px}
+  .details .hd,.details .it{grid-template-columns:28px 1fr 80px}
+  .details .ty,.details .hd div:nth-child(4){display:none}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="bar">
+    <button class="ib" id="navbtn" title="Folders">☰</button>
+    <button class="ib" id="bk" title="Back">←</button>
+    <button class="ib" id="fw" title="Forward">→</button>
+    <button class="ib" id="up" title="Up">↑</button>
+    <button class="ib" id="rf" title="Refresh">⟳</button>
+    <div class="addr" id="addr"></div>
+    <input id="q" type="search" placeholder="Search files…" autocomplete="off">
+  </div>
+  <div class="bar cmd">
+    <button class="cb" id="c-cut"><span>✂</span><span class="lbl">Cut</span></button>
+    <button class="cb" id="c-copy"><span>⧉</span><span class="lbl">Copy</span></button>
+    <button class="cb" id="c-paste"><span>📋</span><span class="lbl">Paste</span></button>
+    <button class="cb" id="c-ren"><span>✎</span><span class="lbl">Rename</span></button>
+    <button class="cb" id="c-tg"><span>📤</span><span class="lbl">Telegram</span></button>
+    <button class="cb" id="c-dl"><span>⬇</span><span class="lbl">Download</span></button>
+    <button class="cb" id="c-del"><span>🗑</span><span class="lbl">Delete</span></button>
+    <span class="vsep"></span>
+    <button class="cb" id="c-sort"><span>⇅</span><span class="lbl">Sort</span></button>
+    <button class="cb" id="c-view"><span>▦</span><span class="lbl">View</span></button>
+    <button class="cb" id="c-more"><span>⋯</span></button>
+    <span class="sp"></span>
+    <button class="cb" id="c-prev"><span>◧</span><span class="lbl">Preview</span></button>
+  </div>
+  <div class="main">
+    <aside id="nav"><div id="tree"></div></aside>
+    <section id="content" class="icons" tabindex="0"></section>
+    <aside id="preview" hidden></aside>
+  </div>
+  <div class="status">
+    <span id="st-n"></span>
+    <span id="st-s"></span>
+    <span class="sp"></span>
+    <span id="st-i"></span>
+    <button class="ib" id="v-d" title="Details">☰</button>
+    <button class="ib" id="v-i" title="Large icons">▦</button>
+  </div>
+</div>
+<div id="menu" hidden></div>
+<div id="toast" hidden></div>
+<dialog id="dlg">
+  <form method="dialog">
+    <h3 id="dt"></h3>
+    <p id="dx"></p>
+    <input id="di" autocomplete="off">
+    <div class="btns">
+      <button id="dok" value="ok" class="primary">OK</button>
+      <button value="cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+(() => {
+'use strict';
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const enc = p => p.split('/').map(encodeURIComponent).join('/');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const fmt = n => { n = +n || 0; for (const u of ['B','KB','MB','GB']) { if (n < 1024) return (u === 'B' ? n : n.toFixed(1)) + ' ' + u; n /= 1024; } return n.toFixed(1) + ' TB'; };
+const COARSE = matchMedia('(pointer: coarse)').matches;
+const store = { get(k, d) { try { return localStorage.getItem(k) || d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
+
+const S = { path: '', search: '', folders: [], files: [], items: [], map: new Map(), topicId: null,
+  sel: new Set(), anchor: null, view: store.get('xview', 'icons'), sort: store.get('xsort', 'name'),
+  desc: store.get('xdesc', '') === '1', clip: null, preview: false, idx: '' };
+
+/* ---------- icons ---------- */
+const FOLDER = '<svg viewBox="0 0 64 64"><path d="M4 14a4 4 0 0 1 4-4h14l6 6h28a4 4 0 0 1 4 4v32a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="#f0b93a"/><path d="M4 24h56v28a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="#fcd462"/></svg>';
+const EC = { pdf:'#d93025', py:'#3572a5', js:'#c9a400', ts:'#2b7489', json:'#6d6d6d', html:'#e34c26', css:'#563d7c', md:'#555', txt:'#777',
+  csv:'#1d7a45', xlsx:'#1d7a45', xls:'#1d7a45', doc:'#2b579a', docx:'#2b579a', ppt:'#d24726', pptx:'#d24726',
+  zip:'#8a6d3b', rar:'#8a6d3b', '7z':'#8a6d3b', apk:'#3ddc84', exe:'#0067c0', sh:'#444', bat:'#444' };
+function colorFor(e) {
+  if (EC[e]) return EC[e];
+  if (/^(mp4|mkv|avi|mov|webm|m4v)$/.test(e)) return '#7b3fe4';
+  if (/^(mp3|wav|m4a|ogg|flac|aac)$/.test(e)) return '#e8710a';
+  if (/^(png|jpe?g|gif|webp|bmp|svg)$/.test(e)) return '#1a9c5b';
+  return '#8a8f98';
+}
+function fileIcon(e) {
+  const t = (e || 'file').toUpperCase().slice(0, 4);
+  return '<svg viewBox="0 0 64 64"><path d="M14 4h26l14 14v38a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4z" fill="#fff" stroke="#c4c4c4" stroke-width="2"/><path d="M40 4v14h14" fill="#e6e6e6" stroke="#c4c4c4" stroke-width="2"/><rect x="5" y="30" width="42" height="18" rx="3" fill="' + colorFor(e) + '"/><text x="26" y="43" font-size="' + (t.length > 3 ? 11 : 13) + '" font-weight="700" fill="#fff" text-anchor="middle" font-family="Arial,sans-serif">' + esc(t) + '</text></svg>';
+}
+function kind(x) {
+  const m = (x.mime || '').toLowerCase(), e = x.ext;
+  if (m.startsWith('video/') || /^(mp4|webm|mov|m4v|mkv)$/.test(e)) return 'video';
+  if (m.startsWith('audio/') || /^(mp3|m4a|wav|ogg|flac|aac)$/.test(e)) return 'audio';
+  if (m.startsWith('image/') || /^(png|jpe?g|gif|webp|bmp)$/.test(e)) return 'image';
+  if (m === 'application/pdf' || e === 'pdf') return 'pdf';
+  return 'text';
+}
+
+/* ---------- api / ui helpers ---------- */
+async function api(url, body) {
+  const o = { headers: { 'X-Requested-With': 'fetch' } };
+  if (body) { o.method = 'POST'; o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(body); }
+  let r;
+  try { r = await fetch(url, o); } catch (e) { return { ok: false, msg: 'network error' }; }
+  if (r.status === 401) { location.href = '/login'; return { ok: false, msg: 'login required' }; }
+  try { return await r.json(); } catch (e) { return { ok: false, msg: 'bad response (' + r.status + ')' }; }
+}
+let toastT;
+function toast(msg, err) {
+  const t = $('#toast'); t.textContent = msg; t.className = err ? 'err' : ''; t.hidden = false;
+  clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, err ? 5000 : 2600);
+}
+function dialog(o) {
+  return new Promise(res => {
+    const d = $('#dlg'), inp = $('#di'), ok = $('#dok');
+    $('#dt').textContent = o.title; $('#dx').textContent = o.text || '';
+    inp.style.display = o.input != null ? '' : 'none'; inp.value = o.input || '';
+    ok.textContent = o.ok || 'OK'; ok.className = o.danger ? 'danger' : 'primary';
+    d.returnValue = '';
+    d.onclose = () => res(d.returnValue === 'ok' ? (o.input != null ? inp.value.trim() : true) : null);
+    d.showModal();
+    if (o.input != null) { inp.focus(); const dot = o.input.lastIndexOf('.'); inp.setSelectionRange(0, dot > 0 ? dot : o.input.length); }
+  });
+}
+
+/* ---------- data ---------- */
+function tag() {
+  S.folders.forEach(f => { f.key = 'd:' + f.path; f.type = 'dir'; });
+  S.files.forEach(f => { f.key = 'f:' + f.id; f.type = 'file'; });
+}
+const cmpName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+function buildItems() {
+  const items = [...S.folders, ...S.files];
+  items.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+    let r;
+    if (S.sort === 'size') r = (a.size || 0) - (b.size || 0) || cmpName(a, b);
+    else if (S.sort === 'type') r = (a.ext || '').localeCompare(b.ext || '') || cmpName(a, b);
+    else r = cmpName(a, b);
+    return S.desc ? -r : r;
+  });
+  return items;
+}
+const selItems = () => [...S.sel].map(k => S.map.get(k)).filter(Boolean);
+const selFiles = () => selItems().filter(i => i.type === 'file');
+
+async function go(path, push = true) {
+  const r = await api('/api/list?path=' + encodeURIComponent(path));
+  if (r.ok === false) { toast('❌ ' + r.msg, true); return; }
+  S.search = ''; $('#q').value = '';
+  S.path = r.path; S.topicId = r.topic_id; S.folders = r.folders; S.files = r.files; tag();
+  S.sel.clear(); S.anchor = null;
+  if (push) history.pushState({ p: S.path }, '', '/browse/' + enc(S.path));
+  document.title = (S.path.split('/').pop() || 'Backup') + ' — Backup Explorer';
+  render(); drawAddr(); revealTree(S.path); closeNav();
+}
+async function runSearch(q) {
+  const r = await api('/api/search?q=' + encodeURIComponent(q));
+  if (r.ok === false) { toast('❌ ' + r.msg, true); return; }
+  S.search = q; S.folders = []; S.files = r.files; S.topicId = null; tag(); S.sel.clear(); S.anchor = null;
+  render(); drawAddr();
+}
+const refresh = () => S.search ? runSearch(S.search) : go(S.path, false);
+const parentOf = p => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+
+/* ---------- render ---------- */
+function itemHtml(i) {
+  const ic = i.type === 'dir' ? FOLDER : fileIcon(i.ext);
+  const cut = S.clip && S.clip.mode === 'cut' && i.type === 'file' && S.clip.set.has(i.id) ? ' cut' : '';
+  const sub = i.type === 'file' && S.search ? '<small>' + esc(i.folder) + '</small>' : '';
+  const size = i.type === 'dir' ? '' : fmt(i.size);
+  const typ = i.type === 'dir' ? 'File folder' : (i.ext ? i.ext.toUpperCase() + ' file' : 'File');
+  return '<div class="it' + (S.sel.has(i.key) ? ' sel' : '') + cut + '" data-key="' + esc(i.key) + '" title="' + esc(i.name) + '">' +
+    '<div class="ic">' + ic + '</div><div class="nm">' + esc(i.name) + sub + '</div><div class="sz">' + size + '</div><div class="ty">' + typ + '</div></div>';
+}
+function render() {
+  S.items = buildItems(); S.map = new Map(S.items.map(i => [i.key, i]));
+  for (const k of [...S.sel]) if (!S.map.has(k)) S.sel.delete(k);
+  const c = $('#content'); c.className = S.view;
+  let h = '';
+  if (S.view === 'details') {
+    const ar = k => S.sort === k ? (S.desc ? ' ▾' : ' ▴') : '';
+    h += '<div class="hd"><div></div><div data-sort="name">Name' + ar('name') + '</div><div data-sort="size">Size' + ar('size') + '</div><div data-sort="type">Type' + ar('type') + '</div></div>';
+  }
+  for (const i of S.items) h += itemHtml(i);
+  if (!S.items.length) h += '<div class="empty">' + (S.search ? 'No files found.' : 'This folder is empty.') + '</div>';
+  c.innerHTML = h;
+  $('#v-d').classList.toggle('on', S.view === 'details'); $('#v-i').classList.toggle('on', S.view === 'icons');
+  $('#c-prev').classList.toggle('on', S.preview);
+  updateBar();
+}
+function paintSel() { $$('#content .it').forEach(el => el.classList.toggle('sel', S.sel.has(el.dataset.key))); }
+function updateBar() {
+  const f = selFiles(), n = S.sel.size;
+  $('#c-cut').disabled = $('#c-copy').disabled = $('#c-del').disabled = $('#c-tg').disabled = $('#c-dl').disabled = !f.length;
+  $('#c-ren').disabled = !(n === 1 && f.length === 1);
+  $('#c-paste').disabled = !canPaste();
+  $('#st-n').textContent = S.items.length + ' item' + (S.items.length === 1 ? '' : 's');
+  $('#st-s').textContent = n ? n + ' selected' + (f.length ? '  ·  ' + fmt(f.reduce((a, x) => a + (x.size || 0), 0)) : '') : '';
+  drawPreview();
+}
+function drawAddr() {
+  const a = $('#addr'); let h = '<a data-p="">🏠 Backup</a>';
+  if (S.search) h += '<span class="sep">›</span><span style="padding:3px 6px">Search: ' + esc(S.search) + '</span>';
+  else { let acc = ''; for (const p of (S.path ? S.path.split('/') : [])) { acc = acc ? acc + '/' + p : p; h += '<span class="sep">›</span><a data-p="' + esc(acc) + '">' + esc(p) + '</a>'; } }
+  a.innerHTML = h; a.scrollLeft = a.scrollWidth;
+}
+function drawIdx() {
+  const s = S.idx;
+  $('#st-i').textContent = !s || s === 'idle' ? '' : s === 'done' ? '✓ indexed' : '⟳ ' + s;
+}
+
+/* ---------- selection / open ---------- */
+function select(key, e) {
+  const keys = S.items.map(i => i.key);
+  if (e.shiftKey && S.anchor && S.map.has(S.anchor)) {
+    const a = keys.indexOf(S.anchor), b = keys.indexOf(key), lo = Math.min(a, b), hi = Math.max(a, b);
+    S.sel = new Set(keys.slice(lo, hi + 1));
+  } else if (e.ctrlKey || e.metaKey) { S.sel.has(key) ? S.sel.delete(key) : S.sel.add(key); S.anchor = key; }
+  else { S.sel = new Set([key]); S.anchor = key; }
+  paintSel(); updateBar();
+}
+const clearSel = () => { S.sel.clear(); S.anchor = null; paintSel(); updateBar(); };
+function openItem(i) {
+  if (!i) return;
+  if (i.type === 'dir') return go(i.path);
+  if (i.view) window.open('/stream/' + i.id + '/' + encodeURIComponent(i.name), '_blank', 'noopener');
+  else downloadFiles([i]);
+}
+
+/* ---------- actions ---------- */
+function downloadFiles(files) {
+  files.forEach((f, n) => setTimeout(() => {
+    const a = document.createElement('a');
+    a.href = '/download/' + f.id + '/' + encodeURIComponent(f.name); a.download = f.name;
+    document.body.appendChild(a); a.click(); a.remove();
+  }, n * 700));
+}
+async function sendTG(files) {
+  let ok = 0;
+  for (const f of files) {
+    const r = await api('/sendtobot/' + f.id);
+    if (r.ok) ok++; else toast('❌ ' + (r.msg || 'failed'), true);
+    await sleep(350);
+  }
+  if (ok) toast('✅ ' + ok + ' file(s) Telegram वर पाठवल्या');
+}
+async function delFiles(files) {
+  if (!files.length) return;
+  const yes = await dialog({ title: 'Delete ' + files.length + ' file' + (files.length > 1 ? 's' : '') + '?',
+    text: 'Telegram group मधून कायमच्या delete होतील. हे परत करता येणार नाही.', ok: 'Delete', danger: true });
+  if (!yes) return;
+  const ids = files.map(f => f.id); let gone = 0;
+  for (let i = 0; i < ids.length; i += 50) {
+    const b = ids.slice(i, i + 50), r = await api('/api/delete', { ids: b });
+    if (!r.ok) { toast('❌ ' + r.msg, true); break; }
+    const dead = new Set(r.deleted || b); gone += dead.size;
+    S.files = S.files.filter(f => !dead.has(f.id));
+  }
+  S.sel.clear(); render();
+  if (gone) toast('🗑 ' + gone + ' deleted');
+}
+async function renameSel() {
+  const f = selFiles(); if (S.sel.size !== 1 || f.length !== 1) return;
+  const nm = await dialog({ title: 'Rename', text: 'फक्त या browser मधलं नाव बदलतं. Telegram मधलं मूळ नाव तसंच राहतं.', input: f[0].name, ok: 'Rename' });
+  if (!nm || nm === f[0].name) return;
+  const r = await api('/api/rename', { id: f[0].id, name: nm });
+  if (r.ok) { f[0].name = r.name; f[0].ext = r.ext; render(); toast('✎ Renamed'); } else toast('❌ ' + r.msg, true);
+}
+function setClip(mode) {
+  const f = selFiles(); if (!f.length) return;
+  S.clip = { mode, ids: f.map(x => x.id), set: new Set(f.map(x => x.id)) };
+  render(); toast((mode === 'cut' ? '✂ Cut: ' : '⧉ Copied: ') + f.length + ' — folder उघडून Paste कर');
+}
+const canPaste = () => !!(S.clip && S.topicId != null && !S.search);
+async function paste() {
+  if (!S.clip) return;
+  if (!canPaste()) { toast('इथे paste करता येत नाही — हा topic folder नाही', true); return; }
+  const { mode, ids } = S.clip; let done = 0;
+  toast((mode === 'cut' ? 'Moving ' : 'Copying ') + ids.length + ' file(s)…');
+  for (let i = 0; i < ids.length; i += 15) {
+    const r = await api('/api/paste', { ids: ids.slice(i, i + 15), topic_id: S.topicId, mode: mode === 'cut' ? 'move' : 'copy' });
+    if (!r.results) { toast('❌ ' + r.msg, true); break; }
+    r.results.forEach(x => { if (x.ok) done++; else toast('❌ ' + x.msg, true); });
+  }
+  if (mode === 'cut') S.clip = null;
+  await refresh(); toast('✅ ' + done + ' file(s) ' + (mode === 'cut' ? 'moved' : 'copied'));
+}
+function setView(v) { S.view = v; store.set('xview', v); render(); }
+function sortBy(k) { if (S.sort === k) S.desc = !S.desc; else { S.sort = k; S.desc = false; } store.set('xsort', S.sort); store.set('xdesc', S.desc ? '1' : ''); render(); }
+async function reindex() {
+  const yes = await dialog({ title: 'Re-index everything?', text: 'Index साफ होऊन Telegram group पुन्हा पूर्ण scan होईल (वेळ लागतो). Rename केलेली नावं जातील.', ok: 'Re-index', danger: true });
+  if (!yes) return;
+  const r = await api('/api/reindex', {});
+  toast(r.ok ? '⟳ Re-index सुरू' : '❌ ' + r.msg, !r.ok); if (r.ok) { S.idx = 'scanning'; drawIdx(); }
+}
+
+/* ---------- menus ---------- */
+const menu = $('#menu');
+function hideMenu() { menu.hidden = true; }
+function drawMenu(x, y, items) {
+  menu.innerHTML = items.map((m, n) => m === '-' ? '<div class="ms"></div>' : '<div class="mi' + (m[2] ? ' dis' : '') + (m[3] ? ' b' : '') + '" data-n="' + n + '">' + esc(m[0]) + '</div>').join('');
+  menu.hidden = false;
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(4, Math.min(x, innerWidth - w - 4)) + 'px';
+  menu.style.top = Math.max(4, Math.min(y, innerHeight - h - 4)) + 'px';
+  menu.onclick = e => { const el = e.target.closest('.mi'); if (!el) return; const it = items[+el.dataset.n]; hideMenu(); it[1](); };
+}
+function showMenu(x, y, kind) {
+  const f = selFiles(), it = selItems()[0], one = S.sel.size === 1; let m = [];
+  if (kind === 'item') {
+    if (one && it.type === 'dir') m = [['Open', () => go(it.path), 0, 1]];
+    else if (f.length) {
+      if (one) m.push([f[0].view ? 'Open' : 'Download', () => openItem(f[0]), 0, 1]);
+      if (one && S.search) m.push(['📂 Open file location', () => go(f[0].folder)]);
+      m.push(['⬇ Download', () => downloadFiles(f)], ['📤 Send to Telegram', () => sendTG(f)], '-',
+        ['✂ Cut', () => setClip('cut')], ['⧉ Copy', () => setClip('copy')], '-');
+      if (one) m.push(['✎ Rename', renameSel]);
+      m.push(['🗑 Delete', () => delFiles(f)]);
+    }
+  } else {
+    m = [['📋 Paste', paste, !canPaste()], ['⟳ Refresh', refresh], '-', ['▦ Large icons', () => setView('icons')], ['☰ Details', () => setView('details')]];
+  }
+  if (m.length) drawMenu(x, y, m);
+}
+function btnMenu(btn, items) { const r = btn.getBoundingClientRect(); drawMenu(r.left, r.bottom + 4, items); }
+
+/* ---------- tree ---------- */
+const treeCache = new Map();
+async function kids(path) {
+  if (treeCache.has(path)) return treeCache.get(path);
+  const r = await api('/api/list?dirs=1&path=' + encodeURIComponent(path));
+  const k = r.folders || []; treeCache.set(path, k); return k;
+}
+const nodeHtml = (f, d) => '<div class="tn" data-path="' + esc(f.path) + '" style="--d:' + d + '"><span class="ar" data-ar>▸</span><span class="tl">📁 ' + esc(f.name) + '</span></div><div class="tc" hidden></div>';
+async function openNode(tn) {
+  const box = tn.nextElementSibling;
+  if (!box.dataset.loaded) {
+    const k = await kids(tn.dataset.path), d = (+tn.style.getPropertyValue('--d') || 0) + 1;
+    box.innerHTML = k.map(x => nodeHtml(x, d)).join(''); box.dataset.loaded = '1';
+    if (!k.length) tn.querySelector('.ar').textContent = '';
+  }
+  if (box.innerHTML) { box.hidden = false; tn.querySelector('.ar').textContent = '▾'; }
+}
+async function toggleNode(tn) {
+  const box = tn.nextElementSibling;
+  if (box.dataset.loaded && !box.hidden) { box.hidden = true; tn.querySelector('.ar').textContent = '▸'; } else await openNode(tn);
+}
+async function revealTree(path) {
+  $$('#tree .tn.cur').forEach(n => n.classList.remove('cur'));
+  let cur = $('#tree .tn'); let acc = '';
+  if (!cur) return;
+  for (const p of (path ? path.split('/') : [])) {
+    acc = acc ? acc + '/' + p : p;
+    await openNode(cur);
+    const next = [...cur.nextElementSibling.children].find(n => n.classList.contains('tn') && n.dataset.path === acc);
+    if (!next) break; cur = next;
+  }
+  if (S.path === path) { $$('#tree .tn.cur').forEach(n => n.classList.remove('cur')); cur.classList.add('cur'); cur.scrollIntoView({ block: 'nearest' }); }
+}
+async function initTree() {
+  $('#tree').innerHTML = '<div class="tn" data-path="" style="--d:0"><span class="ar">▾</span><span class="tl">🏠 Backup</span></div><div class="tc"></div>';
+  const root = $('#tree .tn'); await openNode(root);
+}
+const closeNav = () => $('#nav').classList.remove('open');
+
+/* ---------- preview ---------- */
+function drawPreview() {
+  const p = $('#preview'); p.hidden = !S.preview;
+  p.querySelectorAll('video,audio').forEach(v => { v.pause(); v.removeAttribute('src'); v.load(); });
+  if (!S.preview) { p.innerHTML = ''; return; }
+  const f = selFiles();
+  if (S.sel.size !== 1 || f.length !== 1) { p.innerHTML = '<div class="empty">Select a file to preview</div>'; return; }
+  const x = f[0], url = '/stream/' + x.id + '/' + encodeURIComponent(x.name), k = kind(x);
+  let body = '';
+  if (!x.view) body = '<div class="empty">Preview उपलब्ध नाही — Download वापर</div>';
+  else if (k === 'video') body = '<video controls preload="metadata" src="' + url + '"></video>';
+  else if (k === 'audio') body = '<audio controls preload="metadata" src="' + url + '"></audio>';
+  else if (k === 'image') body = '<img alt="" src="' + url + '">';
+  else body = '<iframe src="' + url + '"></iframe>';
+  p.innerHTML = body + '<div class="pvi"><b>' + esc(x.name) + '</b>' + fmt(x.size) + (x.ext ? ' · ' + esc(x.ext.toUpperCase()) : '') + '</div>';
+}
+
+/* ---------- events ---------- */
+let swallow = false, lp = null;
+const content = $('#content');
+content.addEventListener('click', e => {
+  const sh = e.target.closest('[data-sort]'); if (sh) { sortBy(sh.dataset.sort); return; }
+  const el = e.target.closest('.it');
+  if (swallow) { swallow = false; return; }
+  if (!el) { if (!(e.ctrlKey || e.metaKey)) clearSel(); return; }
+  if (COARSE && !e.ctrlKey && !e.shiftKey) { openItem(S.map.get(el.dataset.key)); return; }
+  select(el.dataset.key, e);
+});
+content.addEventListener('dblclick', e => { const el = e.target.closest('.it'); if (el && !COARSE) openItem(S.map.get(el.dataset.key)); });
+content.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const el = e.target.closest('.it');
+  if (el) { const k = el.dataset.key; if (!S.sel.has(k)) { S.sel = new Set([k]); S.anchor = k; paintSel(); updateBar(); } } else clearSel();
+  showMenu(e.clientX, e.clientY, el ? 'item' : 'blank');
+});
+content.addEventListener('touchstart', e => {
+  const t = e.touches[0], el = e.target.closest('.it');
+  lp = setTimeout(() => {
+    lp = null; swallow = true; setTimeout(() => { swallow = false; }, 900);
+    if (el) { const k = el.dataset.key; if (!S.sel.has(k)) { S.sel = new Set([k]); S.anchor = k; paintSel(); updateBar(); } }
+    showMenu(t.clientX, t.clientY, el ? 'item' : 'blank');
+  }, 550);
+}, { passive: true });
+['touchend', 'touchmove', 'touchcancel'].forEach(ev => content.addEventListener(ev, () => { if (lp) { clearTimeout(lp); lp = null; } }, { passive: true }));
+
+document.addEventListener('click', e => { if (!e.target.closest('#menu')) hideMenu(); });
+document.addEventListener('scroll', hideMenu, true);
+window.addEventListener('resize', hideMenu);
+$('#addr').addEventListener('click', e => { const a = e.target.closest('a[data-p]'); if (a) go(a.dataset.p); });
+$('#tree').addEventListener('click', e => {
+  const tn = e.target.closest('.tn'); if (!tn) return;
+  if (e.target.closest('.ar')) toggleNode(tn); else { go(tn.dataset.path); openNode(tn); }
+});
+$('#navbtn').onclick = e => { e.stopPropagation(); $('#nav').classList.toggle('open'); };
+$('#bk').onclick = () => history.back();
+$('#fw').onclick = () => history.forward();
+$('#up').onclick = () => { if (S.search) go(S.path, false); else if (S.path) go(parentOf(S.path)); };
+$('#rf').onclick = refresh;
+$('#c-cut').onclick = () => setClip('cut');
+$('#c-copy').onclick = () => setClip('copy');
+$('#c-paste').onclick = paste;
+$('#c-ren').onclick = renameSel;
+$('#c-tg').onclick = () => sendTG(selFiles());
+$('#c-dl').onclick = () => downloadFiles(selFiles());
+$('#c-del').onclick = () => delFiles(selFiles());
+$('#c-prev').onclick = () => { S.preview = !S.preview; $('#c-prev').classList.toggle('on', S.preview); drawPreview(); };
+$('#v-d').onclick = () => setView('details');
+$('#v-i').onclick = () => setView('icons');
+$('#c-view').onclick = e => { e.stopPropagation(); btnMenu(e.currentTarget, [[(S.view === 'icons' ? '✓ ' : '') + 'Large icons', () => setView('icons')], [(S.view === 'details' ? '✓ ' : '') + 'Details', () => setView('details')]]); };
+$('#c-sort').onclick = e => {
+  e.stopPropagation();
+  const c = (k, l) => [(S.sort === k ? '✓ ' : '') + l, () => { S.sort = k; store.set('xsort', k); render(); }];
+  btnMenu(e.currentTarget, [c('name', 'Name'), c('size', 'Size'), c('type', 'Type'), '-',
+    [(!S.desc ? '✓ ' : '') + 'Ascending', () => { S.desc = false; store.set('xdesc', ''); render(); }],
+    [(S.desc ? '✓ ' : '') + 'Descending', () => { S.desc = true; store.set('xdesc', '1'); render(); }]]);
+};
+$('#c-more').onclick = e => {
+  e.stopPropagation();
+  btnMenu(e.currentTarget, [['Select all', () => { S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }], ['Re-index', reindex], '-', ['Logout', () => { location.href = '/logout'; }]]);
+};
+$('#q').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { const q = e.target.value.trim(); if (q) runSearch(q); else go(S.path, false); }
+  else if (e.key === 'Escape') { e.target.value = ''; if (S.search) go(S.path, false); }
+});
+window.addEventListener('popstate', e => go(e.state && e.state.p != null ? e.state.p : pathFromUrl(), false));
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input,textarea,dialog')) return;
+  const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+  if (k === 'delete') delFiles(selFiles());
+  else if (k === 'f2') renameSel();
+  else if (k === 'enter') { const i = selItems(); if (i.length === 1) openItem(i[0]); }
+  else if (k === 'escape') { hideMenu(); clearSel(); }
+  else if (k === 'backspace' || (e.altKey && k === 'arrowup')) { e.preventDefault(); if (S.path && !S.search) go(parentOf(S.path)); }
+  else if (mod && k === 'a') { e.preventDefault(); S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }
+  else if (mod && k === 'c') { if (selFiles().length) { e.preventDefault(); setClip('copy'); } }
+  else if (mod && k === 'x') { if (selFiles().length) { e.preventDefault(); setClip('cut'); } }
+  else if (mod && k === 'v') { e.preventDefault(); paste(); }
+});
+
+/* ---------- index status ---------- */
+async function pollStatus() {
+  const r = await api('/api/status');
+  if (r && r.index) {
+    const was = S.idx; S.idx = r.index.status; drawIdx();
+    if (was && was !== S.idx && S.idx === 'done' && !S.search) refresh();
+  }
+  setTimeout(pollStatus, S.idx === 'done' ? 30000 : 4000);
+}
+
+/* ---------- init ---------- */
+function pathFromUrl() {
+  const m = location.pathname.match(/^\/browse\/(.*)$/);
+  try { return m ? decodeURIComponent(m[1]).replace(/^\/+|\/+$/g, '') : ''; } catch (e) { return ''; }
+}
+(async function init() {
+  const p = pathFromUrl();
+  history.replaceState({ p }, '');
+  await initTree();
+  await go(p, false);
+  pollStatus();
+})();
+})();
+</script>
+</body>
+</html>
+"""
+
 @app.route("/browse/", defaults={"path": ""})
 @app.route("/browse/<path:path>")
 @require_auth
 def browse(path):
-    path = path.strip("/")
-    folders, files = build_tree(path)
-    crumbs = breadcrumbs(path)
-    parent_url = ("/" if not path else
-                  "/browse/" + "/".join(path.split("/")[:-1]) if "/" in path else "/")
-    total_files = db_one("SELECT COUNT(*) as c FROM files")["c"]
-    return render_template_string(
-        BROWSER_HTML,
-        path=path, folders=folders, files=files,
-        crumbs=crumbs, parent_url=parent_url,
-        search_mode=False, q="",
-        fmt_size=fmt_size,
-        can_view=can_view,
-        idx_status=_index_status["status"],
-        total_files=total_files,
-    )
+    return Response(EXPLORER_HTML, mimetype="text/html")
 
 @app.route("/search")
 @require_auth
 def search():
-    q = request.args.get("q", "").strip()
+    return redirect("/browse/")
+
+def _file_json(r):
+    name = r["filename"]
+    ext = os.path.splitext(name)[1].lstrip(".").lower()
+    return {
+        "id": r["msg_id"], "name": name, "ext": ext,
+        "size": r["size"] or 0, "mime": r["mime_type"] or "",
+        "folder": r["folder_path"],
+        "view": _view_mime(name, r["mime_type"] or "") is not None,
+    }
+
+@app.route("/api/list")
+@require_api
+def api_list():
+    path = (request.args.get("path", "") or "").strip("/")
+    dirs_only = request.args.get("dirs") == "1"
+    prefix = f"{path}/" if path else ""
+    children = {}
+    for t in db_many("SELECT path, msg_count FROM topics"):
+        p = t["path"]
+        if not p.startswith(prefix) or p == path:
+            continue
+        child = p[len(prefix):].split("/")[0]
+        if child:
+            children[child] = children.get(child, 0) + (t["msg_count"] or 0)
+    folders = [{"name": n, "path": prefix + n, "count": c}
+               for n, c in sorted(children.items(), key=lambda x: x[0].lower())]
+    if dirs_only:
+        return jsonify({"ok": True, "folders": folders})
+    topic = db_one("SELECT topic_id FROM topics WHERE path=?", (path,)) if path else None
     files = []
-    if q:
-        files = db_many(
-            "SELECT * FROM files WHERE filename LIKE ? ORDER BY filename COLLATE NOCASE LIMIT 300",
-            (f"%{q}%",)
-        )
-    total_files = db_one("SELECT COUNT(*) as c FROM files")["c"]
-    return render_template_string(
-        BROWSER_HTML,
-        path="", folders=[], files=files,
-        crumbs=[], parent_url="/",
-        search_mode=True, q=q,
-        fmt_size=fmt_size,
-        can_view=can_view,
-        idx_status=_index_status["status"],
-        total_files=total_files,
-    )
+    if path:
+        files = [_file_json(r) for r in db_many(
+            "SELECT * FROM files WHERE folder_path=? ORDER BY filename COLLATE NOCASE", (path,))]
+    return jsonify({"ok": True, "path": path,
+                    "topic_id": topic["topic_id"] if topic else None,
+                    "folders": folders, "files": files})
+
+@app.route("/api/search")
+@require_api
+def api_search():
+    q = (request.args.get("q", "") or "").strip()
+    if not q:
+        return jsonify({"ok": True, "files": []})
+    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    rows = db_many(
+        "SELECT * FROM files WHERE filename LIKE ? ESCAPE '\\' "
+        "ORDER BY filename COLLATE NOCASE LIMIT 300", (like,))
+    return jsonify({"ok": True, "files": [_file_json(r) for r in rows]})
+
+def _ids(data, limit=100):
+    ids = data.get("ids") or []
+    if not isinstance(ids, list) or not ids or len(ids) > limit:
+        return None
+    try:
+        return [int(i) for i in ids]
+    except Exception:
+        return None
+
+def _recount(topic_ids):
+    for tid in set(topic_ids):
+        db_exec("UPDATE topics SET msg_count=(SELECT COUNT(*) FROM files WHERE topic_id=?) "
+                "WHERE topic_id=?", (tid, tid))
+
+@app.route("/api/delete", methods=["POST"])
+@require_api
+def api_delete():
+    global _snapshot_dirty
+    ids = _ids(request.get_json(silent=True) or {})
+    if not ids:
+        return jsonify({"ok": False, "msg": "no files selected"}), 400
+    rows = [r for r in (db_one("SELECT msg_id, topic_id FROM files WHERE msg_id=?", (i,)) for i in ids) if r]
+    if not rows:
+        return jsonify({"ok": False, "msg": "files not found in index"}), 404
+
+    async def _del():
+        return await _tg_client.delete_messages(BACKUP_GROUP_ID, [r["msg_id"] for r in rows])
+    try:
+        tg(_del(), timeout=60)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"Telegram delete failed: {e} "
+                        "(bot ला group मध्ये 'Delete messages' admin right हवा)"}), 500
+    for r in rows:
+        db_exec("DELETE FROM files WHERE msg_id=?", (r["msg_id"],))
+    _recount([r["topic_id"] for r in rows])
+    _snapshot_dirty = True
+    return jsonify({"ok": True, "deleted": [r["msg_id"] for r in rows]})
+
+@app.route("/api/rename", methods=["POST"])
+@require_api
+def api_rename():
+    global _snapshot_dirty
+    d = request.get_json(silent=True) or {}
+    try:
+        mid = int(d.get("id"))
+    except Exception:
+        return jsonify({"ok": False, "msg": "bad id"}), 400
+    name = str(d.get("name", "")).strip()
+    if not name or len(name) > 255 or any(c in name for c in '/\\\0'):
+        return jsonify({"ok": False, "msg": "invalid name"}), 400
+    if not db_one("SELECT 1 FROM files WHERE msg_id=?", (mid,)):
+        return jsonify({"ok": False, "msg": "file not found"}), 404
+    db_exec("UPDATE files SET filename=? WHERE msg_id=?", (name, mid))
+    _snapshot_dirty = True
+    return jsonify({"ok": True, "name": name,
+                    "ext": os.path.splitext(name)[1].lstrip(".").lower()})
+
+@app.route("/api/paste", methods=["POST"])
+@require_api
+def api_paste():
+    """Copy / move files into another topic folder (server-side copy on Telegram,
+    no download/upload through this server)."""
+    global _snapshot_dirty
+    d = request.get_json(silent=True) or {}
+    ids = _ids(d, 20)
+    mode = d.get("mode")
+    try:
+        tid = int(d.get("topic_id"))
+    except Exception:
+        return jsonify({"ok": False, "msg": "bad target folder"}), 400
+    if not ids or mode not in ("copy", "move"):
+        return jsonify({"ok": False, "msg": "bad request"}), 400
+    target = db_one("SELECT topic_id, path FROM topics WHERE topic_id=?", (tid,))
+    if not target:
+        return jsonify({"ok": False, "msg": "target folder not found"}), 404
+
+    async def _copy(mid):
+        m = await _tg_client.copy_message(chat_id=BACKUP_GROUP_ID, from_chat_id=BACKUP_GROUP_ID,
+                                          message_id=mid, message_thread_id=tid)
+        return m.id
+
+    async def _rm(mid):
+        await _tg_client.delete_messages(BACKUP_GROUP_ID, mid)
+
+    results, touched = [], [tid]
+    for mid in ids:
+        row = db_one("SELECT * FROM files WHERE msg_id=?", (mid,))
+        if not row:
+            results.append({"id": mid, "ok": False, "msg": "file not in index"}); continue
+        if mode == "move" and row["topic_id"] == tid:
+            results.append({"id": mid, "ok": True, "new_id": mid}); continue
+        try:
+            new_id = tg(_copy(mid), timeout=60)
+        except Exception as e:
+            results.append({"id": mid, "ok": False, "msg": f"{row['filename']}: {e}"}); continue
+        db_exec("""INSERT OR IGNORE INTO files (msg_id, topic_id, folder_path, filename, size, mime_type)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (new_id, tid, target["path"], row["filename"], row["size"], row["mime_type"]))
+        if mode == "move":
+            try:
+                tg(_rm(mid), timeout=30)
+                db_exec("DELETE FROM files WHERE msg_id=?", (mid,))
+                touched.append(row["topic_id"])
+            except Exception as e:
+                results.append({"id": mid, "ok": False,
+                                "msg": f"copied, but original not deleted: {e}"}); continue
+        results.append({"id": mid, "ok": True, "new_id": new_id})
+        time.sleep(0.4)
+    _recount(touched)
+    _snapshot_dirty = True
+    return jsonify({"ok": True, "results": results})
+
+@app.route("/api/reindex", methods=["POST"])
+@require_api
+def api_reindex():
+    db_exec("DELETE FROM files")
+    db_exec("DELETE FROM topics")
+    meta_set("scan_cursor", 0)
+    _topics.clear()
+    _index_status["status"] = "idle"
+    threading.Thread(
+        target=lambda: asyncio.run_coroutine_threadsafe(_full_index(), _tg_loop).result(timeout=7200),
+        daemon=True).start()
+    return jsonify({"ok": True})
 
 @app.route("/download/<int:msg_id>/<path:filename>")
 @require_auth
@@ -1299,7 +2043,7 @@ def logout():
     return redirect("/login")
 
 @app.route("/api/status")
-@require_auth
+@require_api
 def api_status():
     return jsonify({
         "index": _index_status,
