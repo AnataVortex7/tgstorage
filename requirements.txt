@@ -1,4 +1,5 @@
 flask>=3.0.0
+waitress>=3.0.0
 pyrofork>=2.3.0
 TgCrypto>=1.2.5
 pymongo>=4.6

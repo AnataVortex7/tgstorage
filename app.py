@@ -88,6 +88,19 @@ os.makedirs(TMP_DIR,  exist_ok=True)
 
 # ── Flask ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+
+# ── Quiet logs: hide health-check / polling noise (GET /, /login, /healthz, /api/status, favicon) ──
+import logging
+class _QuietAccess(logging.Filter):
+    _NOISE = ('"GET / HTTP', '"GET /login HTTP', '"GET /healthz', '"GET /favicon.ico', '"GET /api/status')
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        return not any(n in msg for n in self._NOISE)
+logging.getLogger("werkzeug").addFilter(_QuietAccess())
+logging.getLogger("waitress").setLevel(logging.WARNING)
 app.secret_key = SECRET_KEY
 app.permanent_session_lifetime = timedelta(days=7)
 app.config.update(
@@ -126,6 +139,7 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 def db_exec(sql, params=()):
@@ -1150,6 +1164,8 @@ _index_status = {"status": "idle", "progress": "", "last_run": 0}
 _scan_epoch = 0              # bumped when the reading client changes (user login) -> running scans restart
 _scanning = set()            # gids currently doing a full catch-up scan
 _scan_progress = {}          # gid -> {"done": last scanned msg id, "total": newest msg id}
+_scan_lock = None            # asyncio.Lock (created on the TG loop): only ONE group scans at a time
+_queued = set()              # gids waiting for their turn
 _snapshot_dirty = False
 _dbg = {"topic_create": 0, "empty": 0, "other_service": 0, "no_media": 0,
         "media_not_document": 0, "doc_unknown_topic": 0, "doc_indexed": 0, "doc_dup": 0}
@@ -1267,6 +1283,19 @@ def _handle_raw_message(gid, m):
 async def _on_raw_update(client, update, users, chats):
     """Live indexing: new group messages arrive as updates — zero API calls."""
     try:
+        if isinstance(update, tg_raw.types.UpdateDeleteChannelMessages):
+            gid = _chan_to_gid.get(update.channel_id)
+            if gid is not None and update.messages:
+                tids = set()
+                for mid in update.messages:
+                    r = db_one("SELECT topic_id FROM files WHERE group_id=? AND msg_id=?", (gid, mid))
+                    if r:
+                        tids.add(r["topic_id"])
+                        db_exec("DELETE FROM files WHERE group_id=? AND msg_id=?", (gid, mid))
+                if tids:
+                    _recount(gid, tids)
+                    _changed(gid)
+            return
         if not isinstance(update, tg_raw.types.UpdateNewChannelMessage):
             return
         m = update.message
@@ -1448,23 +1477,38 @@ async def _scan_group(gid):
         _scan_progress.pop(gid, None)
 
 async def _full_index(gid):
-    if gid in _scanning:
+    """Queue a catch-up scan. Scans of different groups run strictly one after another
+    (same Telegram account = shared flood limit), duplicates are ignored."""
+    global _scan_lock
+    if gid in _scanning or gid in _queued:
         return
-    _index_status["status"] = "scanning..."
+    if _scan_lock is None:
+        _scan_lock = asyncio.Lock()
+    _queued.add(gid)
     try:
-        await _scan_group(gid)
-        _index_status["status"] = "done"
-        _index_status["last_run"] = time.time()
-        _last_check[gid] = time.time()
-    except Exception as e:
-        _index_status["status"] = f"error: {e}"
-        print(f"[index] {gid} Error: {e}", flush=True)
+        async with _scan_lock:
+            _queued.discard(gid)
+            if not db_one("SELECT 1 FROM groups WHERE group_id=?", (gid,)):
+                return                      # group was removed while waiting
+            _index_status["status"] = "scanning..."
+            try:
+                await _scan_group(gid)
+                _index_status["status"] = "done"
+                _index_status["last_run"] = time.time()
+                _last_check[gid] = time.time()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                _index_status["status"] = f"error: {type(e).__name__}: {e}"
+                print(f"[index] {gid} Error: {type(e).__name__}: {e}", flush=True)
+    finally:
+        _queued.discard(gid)
 
 async def _poll_group(gid):
     """Cheap 'anything new?' check: ask Telegram for the 100 message ids after
     our cursor. Existing ones are indexed; empty ones mean nothing new yet."""
-    if gid in _scanning:
-        return 0
+    if gid in _scanning or gid in _queued or (_scan_lock is not None and _scan_lock.locked()):
+        return 0                         # a scan is running -> it will catch up anyway
     cursor = meta_get(f"cursor_{gid}", 0)
     if cursor <= 0:
         # never scanned (first scan failed / group empty) -> retry the full scan
@@ -1503,9 +1547,10 @@ def run_poller():
         next_at = time.time() + get_poll_interval()
         for r in list_groups():
             try:
-                asyncio.run_coroutine_threadsafe(_poll_group(r["group_id"]), _tg_loop).result(timeout=180)
+                asyncio.run_coroutine_threadsafe(
+                    asyncio.wait_for(_poll_group(r["group_id"]), 150), _tg_loop).result(timeout=160)
             except Exception as e:
-                print(f"[poll] {r['group_id']}: {e}", flush=True)
+                print(f"[poll] {r['group_id']}: {type(e).__name__} {e}", flush=True)
 
 async def _fill_titles():
     for r in list_groups():
@@ -1533,7 +1578,7 @@ def run_indexer():
         print(f"[groups] {e}", flush=True)
     for g in list_groups():
         try:
-            asyncio.run_coroutine_threadsafe(_full_index(g["group_id"]), _tg_loop).result(timeout=7200)
+            asyncio.run_coroutine_threadsafe(_full_index(g["group_id"]), _tg_loop)   # queued, runs one by one
         except Exception as e:
             _index_status["status"] = f"error: {e}"
             print(f"[index] Error: {e}", flush=True)
@@ -2514,9 +2559,7 @@ def api_group_add():
     refresh_chan_map()
     _topics.setdefault(gid, {})
     _changed(gid)
-    threading.Thread(
-        target=lambda: asyncio.run_coroutine_threadsafe(_full_index(gid), _tg_loop).result(timeout=7200),
-        daemon=True).start()
+    asyncio.run_coroutine_threadsafe(_full_index(gid), _tg_loop)
     return jsonify({"ok": True, "group": {"id": gid, "title": title or f"Group {gid}"}})
 
 @app.route("/api/groups/remove", methods=["POST"])
@@ -2565,12 +2608,15 @@ def api_checknow():
     gid = req_group()
     if gid is None:
         return _no_group()
-    if gid in _scanning:
+    if gid in _scanning or gid in _queued:
         return jsonify({"ok": True, "found": 0, "scanning": True})
     try:
-        found = tg(_poll_group(gid), timeout=90)
+        found = tg(asyncio.wait_for(_poll_group(gid), 60), timeout=70)
+    except (asyncio.TimeoutError, TimeoutError):
+        return jsonify({"ok": True, "found": 0, "busy": True,
+                        "msg": "Telegram flood-wait चालू आहे, थोड्या वेळाने आपोआप check होईल"})
     except Exception as e:
-        return jsonify({"ok": False, "msg": f"check failed: {e}"}), 500
+        return jsonify({"ok": False, "msg": f"check failed: {type(e).__name__}: {e}"}), 500
     return jsonify({"ok": True, "found": found})
 
 # ── File API ────────────────────────────────────────────────────────────
@@ -2751,17 +2797,15 @@ def api_reindex():
     gid = req_group()
     if gid is None:
         return _no_group()
-    if gid in _scanning:
-        return jsonify({"ok": False, "msg": "scan आधीच चालू आहे"}), 409
+    if gid in _scanning or gid in _queued:
+        return jsonify({"ok": False, "msg": "scan आधीच चालू/queue मध्ये आहे"}), 409
     db_exec("DELETE FROM files  WHERE group_id=?", (gid,))
     db_exec("DELETE FROM topics WHERE group_id=?", (gid,))
     meta_set(f"cursor_{gid}", 0)
     _topics[gid] = {}
     _changed(gid)
     _index_status["status"] = "idle"
-    threading.Thread(
-        target=lambda: asyncio.run_coroutine_threadsafe(_full_index(gid), _tg_loop).result(timeout=7200),
-        daemon=True).start()
+    asyncio.run_coroutine_threadsafe(_full_index(gid), _tg_loop)
     return jsonify({"ok": True})
 
 # ── Download / stream ───────────────────────────────────────────────────
@@ -3071,6 +3115,8 @@ def api_status():
         "bytes": size,
         "all_files": db_one("SELECT COUNT(*) as c FROM files")["c"],
         "scan": _scan_progress.get(gid),
+        "queued": gid in _queued,
+        "queue_len": len(_queued),
         "tg_ready": _tg_ready.is_set(),
         "user_ready": _user_status["ready"], "user_error": _user_status["error"],
         "interval": get_poll_interval(),
@@ -3095,4 +3141,6 @@ if __name__ == "__main__":
     threading.Thread(target=run_indexer,  daemon=True, name="indexer").start()
     threading.Thread(target=run_poller,   daemon=True, name="poller").start()
     threading.Thread(target=run_snapshotter, daemon=True, name="snapshotter").start()
-    app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)
+    from waitress import serve          # production WSGI server (no dev-server warning, no per-request log spam)
+    serve(app, host="0.0.0.0", port=8080, threads=24, connection_limit=200,
+          channel_timeout=300, cleanup_interval=30, ident="tgstorage")
