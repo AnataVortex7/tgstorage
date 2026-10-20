@@ -615,6 +615,9 @@ _index_status = {"status": "idle", "progress": "", "last_run": 0}
 _scanning = set()            # gids currently doing a full catch-up scan
 _scan_progress = {}          # gid -> {"done": last scanned msg id, "total": newest msg id}
 _snapshot_dirty = False
+_dbg = {"topic_create": 0, "empty": 0, "other_service": 0, "no_media": 0,
+        "media_not_document": 0, "doc_unknown_topic": 0, "doc_indexed": 0, "doc_dup": 0}
+_dbg_samples = []            # a few examples of documents that were skipped
 
 def meta_get(key, default=0):
     row = db_one("SELECT value FROM meta WHERE key=?", (key,))
@@ -668,26 +671,41 @@ def _topic_id_of(m):
 def _handle_raw_message(gid, m):
     """Index one raw Telegram message (topic service msg or document).
     Returns True when a NEW file was added to the index."""
+    if isinstance(m, tg_raw.types.MessageEmpty):
+        _dbg["empty"] += 1
+        return False
     if isinstance(m, tg_raw.types.MessageService):
         act = m.action
         if isinstance(act, tg_raw.types.MessageActionTopicCreate):
+            _dbg["topic_create"] += 1
             _save_topic(gid, m.id, act.title)
         elif isinstance(act, tg_raw.types.MessageActionTopicEdit):
             new_title = getattr(act, "title", None)
             tid = _topic_id_of(m)
             if new_title and tid:
                 _save_topic(gid, tid, new_title)
+        else:
+            _dbg["other_service"] += 1
         return False
 
     media = getattr(m, "media", None)
+    if media is None:
+        _dbg["no_media"] += 1
+        return False
     if not isinstance(media, tg_raw.types.MessageMediaDocument):
+        _dbg["media_not_document"] += 1
         return False
     doc = media.document
     if doc is None or not hasattr(doc, "attributes"):
+        _dbg["media_not_document"] += 1
         return False
     tid = _topic_id_of(m)
     topics = _topics.get(gid, {})
     if tid not in topics:
+        _dbg["doc_unknown_topic"] += 1
+        if len(_dbg_samples) < 5:
+            _dbg_samples.append({"msg_id": m.id, "topic_id_guess": tid,
+                                 "reply_to": repr(getattr(m, "reply_to", None))[:300]})
         return False
     filename = f"file_{m.id}"
     for attr in doc.attributes:
@@ -702,7 +720,9 @@ def _handle_raw_message(gid, m):
           getattr(doc, "size", 0) or 0,
           getattr(doc, "mime_type", "") or ""))
     if not n:
+        _dbg["doc_dup"] += 1
         return False
+    _dbg["doc_indexed"] += 1
     db_exec("UPDATE topics SET msg_count=(SELECT COUNT(*) FROM files WHERE group_id=? AND topic_id=?) "
             "WHERE group_id=? AND topic_id=?", (gid, tid, gid, tid))
     _changed(gid)
@@ -862,8 +882,9 @@ async def _scan_group(gid):
                     found += 1
             meta_set(f"cursor_{gid}", hi - 1)
             _scan_progress[gid] = {"done": hi - 1, "total": latest}
-            await asyncio.sleep(2.0)      # gentle pace, avoids FloodWait
+            await asyncio.sleep(0.6)      # faster catch-up; FloodWait is handled by _invoke_safe
         _snapshot_dirty = True
+        print(f"[index] {gid}: DEBUG counters={_dbg} samples={_dbg_samples}", flush=True)
         print(f"[index] {gid}: scan done up to msg {latest}: +{found} files, "
               f"{len(_topics.get(gid, {}))} topics", flush=True)
     finally:
@@ -890,7 +911,10 @@ async def _poll_group(gid):
         return 0
     cursor = meta_get(f"cursor_{gid}", 0)
     if cursor <= 0:
-        return 0                      # never scanned — the full scan handles it
+        # never scanned (first scan failed / group empty) -> retry the full scan
+        # instead of silently doing nothing forever
+        await _full_index(gid)
+        return 0
     ch = await _input_channel(gid)
     found = 0
     for _ in range(10):               # at most 1000 ids per check
@@ -2479,6 +2503,12 @@ def api_status():
         "group": g,
         "now": time.time(),
     })
+
+@app.route("/api/debug")
+@require_api
+def api_debug():
+    return jsonify({"counters": _dbg, "samples": _dbg_samples,
+                    "known_topics": {str(g): len(t) for g, t in _topics.items()}})
 
 # ── Jinja filter ─────────────────────────────────────────────────────────
 app.jinja_env.filters["urlencode"] = lambda s: urlquote(str(s), safe="")
