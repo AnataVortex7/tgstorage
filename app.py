@@ -982,6 +982,12 @@ async def _start_user(sess):
 
 async def _reindex_all():
     """After a (new) user login: wipe + rescan every group with the user account."""
+    global _scan_epoch
+    _scan_epoch += 1                       # tells running (bot) scans to stop
+    for _ in range(120):                   # wait (max ~2 min) until they really stopped
+        if not _scanning:
+            break
+        await asyncio.sleep(1)
     for r in list_groups():
         gid = r["group_id"]
         if gid in _scanning:
@@ -1141,6 +1147,7 @@ async def _login_step(msg):
 #   5. The browser polls /api/status and reloads the folder when the group's
 #      version counter changes.
 _index_status = {"status": "idle", "progress": "", "last_run": 0}
+_scan_epoch = 0              # bumped when the reading client changes (user login) -> running scans restart
 _scanning = set()            # gids currently doing a full catch-up scan
 _scan_progress = {}          # gid -> {"done": last scanned msg id, "total": newest msg id}
 _snapshot_dirty = False
@@ -1361,39 +1368,44 @@ def run_snapshotter():
                 print(f"[snapshot] save failed: {e}", flush=True)
 
 # ── Catch-up scan + periodic check ───────────────────────────────────────
-async def _invoke_safe(req):
-    """invoke() that waits out FloodWait instead of failing."""
+async def _invoke_safe(req, cl=None):
+    """invoke() that waits out FloodWait instead of failing.
+    `cl` pins the client: access hashes are PER ACCOUNT, so a scan must use the same
+    client for resolving the channel and for every GetMessages call."""
+    cl = cl or _rd()
     while True:
         try:
-            return await _rd().invoke(req)
+            return await cl.invoke(req)
         except FloodWait as e:
             wait = int(getattr(e, "value", 30)) + 2
             _index_status["status"] = f"scanning (flood wait {wait}s)"
             print(f"[index] FloodWait {wait}s", flush=True)
             await asyncio.sleep(wait)
 
-async def _input_channel(gid):
+async def _input_channel(gid, cl=None):
+    cl = cl or _rd()
     try:
-        peer = await _rd().resolve_peer(gid)
+        peer = await cl.resolve_peer(gid)
     except Exception:
-        if not _tg_user:
+        if cl is not _tg_user:
             raise
         await _warm()
-        peer = await _rd().resolve_peer(gid)
+        peer = await cl.resolve_peer(gid)
     return tg_raw.types.InputChannel(channel_id=peer.channel_id, access_hash=peer.access_hash)
 
-async def _latest_msg_id(gid):
-    """Bots can't read history, so post a temp message to learn the newest id.
-    (Only used for the startup / new-group / re-index scan — NOT for the periodic check.)"""
-    if _tg_user:                      # user account can read history: no temp message needed
+async def _latest_msg_id(gid, cl=None):
+    """User account: read the newest id from history. Bot: post a temp message to learn it
+    (bots can't read history). Only used for the startup / new-group / re-index scan."""
+    cl = cl or _rd()
+    if cl is _tg_user and _tg_user is not None:
         await _warm()
-        async for hm in _tg_user.get_chat_history(gid, limit=1):
+        async for hm in cl.get_chat_history(gid, limit=1):
             return hm.id
         return 0
-    m = await _tg_client.send_message(gid, "⏳ indexing…")
+    m = await cl.send_message(gid, "⏳ indexing…")
     mid = m.id
     try:
-        await _tg_client.delete_messages(gid, mid)
+        await cl.delete_messages(gid, mid)
     except Exception:
         pass
     return mid
@@ -1401,10 +1413,11 @@ async def _latest_msg_id(gid):
 async def _scan_group(gid):
     global _snapshot_dirty
     _scanning.add(gid)
+    cl, ep = _rd(), _scan_epoch          # pin client for the whole scan
     try:
-        ch = await _input_channel(gid)
+        ch = await _input_channel(gid, cl)
         start = meta_get(f"cursor_{gid}", 0) + 1
-        latest = await _latest_msg_id(gid)
+        latest = await _latest_msg_id(gid, cl)
         if start >= latest:
             print(f"[index] {gid}: up to date, nothing to scan", flush=True)
             return
@@ -1412,11 +1425,14 @@ async def _scan_group(gid):
         found = 0
         _scan_progress[gid] = {"done": start - 1, "total": latest}
         for lo in range(start, latest + 1, BATCH):
+            if _scan_epoch != ep:        # reading client changed (user login) -> stop, caller restarts
+                print(f"[index] {gid}: scan aborted (client changed)", flush=True)
+                return
             hi = min(lo + BATCH, latest + 1)
             _index_status["status"] = f"scanning {lo}/{latest}"
             ids = [tg_raw.types.InputMessageID(id=i) for i in range(lo, hi)]
             r = await _invoke_safe(
-                tg_raw.functions.channels.GetMessages(channel=ch, id=ids))
+                tg_raw.functions.channels.GetMessages(channel=ch, id=ids), cl)
             for m in r.messages:
                 if _handle_raw_message(gid, m):
                     found += 1
@@ -1455,11 +1471,12 @@ async def _poll_group(gid):
         # instead of silently doing nothing forever
         await _full_index(gid)
         return 0
-    ch = await _input_channel(gid)
+    cl = _rd()
+    ch = await _input_channel(gid, cl)
     found = 0
     for _ in range(10):               # at most 1000 ids per check
         ids = [tg_raw.types.InputMessageID(id=i) for i in range(cursor + 1, cursor + 101)]
-        r = await _invoke_safe(tg_raw.functions.channels.GetMessages(channel=ch, id=ids))
+        r = await _invoke_safe(tg_raw.functions.channels.GetMessages(channel=ch, id=ids), cl)
         real = [m for m in r.messages if not isinstance(m, tg_raw.types.MessageEmpty)]
         if not real:
             break
