@@ -6,7 +6,7 @@ v2: multiple groups (add / switch from the UI), periodic "anything new?" check
     (interval changeable from the browser), and a security hardening pass.
 """
 
-import os, sys, re, sqlite3, hashlib, hmac, secrets, time, threading, asyncio, mimetypes, ipaddress
+import os, sys, re, signal, sqlite3, hashlib, hmac, secrets, time, threading, asyncio, mimetypes, ipaddress
 from datetime import timedelta
 from functools import wraps
 from urllib.parse import quote as urlquote
@@ -391,6 +391,91 @@ def _save_session(session_string):
     except Exception as e:
         print(f"[session] save failed: {e}", flush=True)
 
+# ── One Telegram session user at a time (rolling deploys) ────────────────
+# On Koyeb the NEW instance starts (and is "healthy" for the web) while the OLD
+# one is still running for a while. Using the same Telegram session in both gives
+# AUTH_KEY_DUPLICATED. So: a lease in MongoDB. The old instance keeps refreshing it
+# (every 10s) and releases it on SIGTERM; the new instance waits until the lease is
+# free (or stale) BEFORE it connects to Telegram. The web UI keeps working meanwhile.
+INSTANCE_ID = secrets.token_hex(6)
+LOCK_STALE = 35               # seconds without heartbeat -> old instance is dead
+_lock_started = False
+
+def _lock_coll():
+    from pymongo import MongoClient
+    return MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]["lock"]
+
+def _acquire_lock(max_wait=420):
+    global _lock_started
+    if not MONGO_URI:
+        return
+    try:
+        coll = _lock_coll()
+        t0 = time.time()
+        while True:
+            doc = coll.find_one({"_id": "tg"})
+            age = time.time() - (doc or {}).get("ts", 0)
+            if not doc or doc.get("owner") == INSTANCE_ID or age > LOCK_STALE:
+                break
+            if time.time() - t0 > max_wait:
+                print("[lock] old instance still alive after waiting — continuing anyway", flush=True)
+                break
+            _index_status["status"] = f"waiting for old instance to stop ({int(time.time() - t0)}s)"
+            time.sleep(3)
+        coll.replace_one({"_id": "tg"}, {"_id": "tg", "owner": INSTANCE_ID, "ts": time.time()}, upsert=True)
+        print(f"[lock] acquired by {INSTANCE_ID} after {int(time.time() - t0)}s", flush=True)
+    except Exception as e:
+        print(f"[lock] unavailable ({e}) — continuing without it", flush=True)
+        return
+    if not _lock_started:
+        _lock_started = True
+        threading.Thread(target=_lock_heartbeat, daemon=True, name="lock_hb").start()
+
+def _lock_heartbeat():
+    while True:
+        time.sleep(10)
+        try:
+            _lock_coll().update_one({"_id": "tg", "owner": INSTANCE_ID}, {"$set": {"ts": time.time()}})
+        except Exception as e:
+            print(f"[lock] heartbeat failed: {e}", flush=True)
+
+def _release_lock():
+    if not MONGO_URI:
+        return
+    try:
+        _lock_coll().delete_one({"_id": "tg", "owner": INSTANCE_ID})
+    except Exception:
+        pass
+
+def _on_sigterm(signum, frame):
+    """Deploy/stop: log out of Telegram cleanly and free the lease so the NEW instance can start at once."""
+    print("[shutdown] SIGTERM — stopping Telegram clients, releasing lock", flush=True)
+    try:
+        if _tg_loop:
+            for c in (_tg_user, _tg_client):
+                if c is not None:
+                    try:
+                        asyncio.run_coroutine_threadsafe(c.stop(), _tg_loop).result(timeout=4)
+                    except Exception:
+                        pass
+        if _snapshot_dirty and MONGO_URI:
+            snapshot_save()
+    except Exception as e:
+        print(f"[shutdown] {e}", flush=True)
+    _release_lock()
+    os._exit(0)
+
+def _delete_session():
+    """Forget the saved bot session (Mongo) so the next start logs in fresh with BOT_TOKEN."""
+    if not MONGO_URI:
+        return
+    try:
+        from pymongo import MongoClient
+        MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]["session"].delete_one({"_id": "bot"})
+        print("[session] bad bot session deleted from MongoDB", flush=True)
+    except Exception as e:
+        print(f"[session] delete failed: {e}", flush=True)
+
 async def _send_magic_link(msg):
     """Owner sent /start or /login to the bot -> reply with a one-time login button.
     (validated=2 marks a 'magic' token; opening the link logs that browser in.)"""
@@ -430,6 +515,7 @@ def run_telegram():
         from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
         _loop = asyncio.get_running_loop()
+        await _loop.run_in_executor(None, _acquire_lock)      # wait for the OLD instance to stop
         sess = await _loop.run_in_executor(None, _load_session)
         print(f"[session] using saved session: {bool(sess)}", flush=True)
 
@@ -608,10 +694,56 @@ def run_telegram():
         from pyrogram.handlers import RawUpdateHandler
         # group=-1 so it runs alongside (not instead of) the command handlers
         _tg_client.add_handler(RawUpdateHandler(_on_raw_update), group=-1)
+        from pyrogram.errors import AuthKeyDuplicated, AuthKeyUnregistered
+        resets = 0
+        dups = 0
         while True:
             try:
                 await _tg_client.start()
                 break
+            except AuthKeyDuplicated as e:
+                # Probably the old instance is still shutting down: just wait and retry
+                # (keep the session). Only after ~2 minutes treat it as dead.
+                dups += 1
+                if dups <= 12:
+                    _index_status["status"] = f"telegram: session busy, retry {dups}/12"
+                    print(f"[tg] session in use elsewhere (old instance still stopping?) — "
+                          f"retry {dups}/12 in 10s", flush=True)
+                    try:
+                        await _tg_client.disconnect()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(10)
+                    continue
+                resets += 1
+                print("[tg] session still busy after 2 min — discarding it", flush=True)
+                try:
+                    await _tg_client.disconnect()
+                except Exception:
+                    pass
+                await _loop.run_in_executor(None, _delete_session)
+                from pyrogram.storage import MemoryStorage
+                _tg_client.storage = MemoryStorage("tg_browser")
+                sess = ""
+                await asyncio.sleep(3)
+            except AuthKeyUnregistered as e:
+                # Saved session was revoked: throw it away, log in again with BOT_TOKEN.
+                resets += 1
+                if resets > 2:
+                    raise
+                print(f"[tg] saved bot session rejected ({type(e).__name__}) — "
+                      f"logging in fresh with BOT_TOKEN. Make sure only ONE instance runs, "
+                      f"and that SESSION_STRING env is not set.", flush=True)
+                _index_status["status"] = "telegram: re-login with bot token"
+                try:
+                    await _tg_client.disconnect()
+                except Exception:
+                    pass
+                await _loop.run_in_executor(None, _delete_session)
+                from pyrogram.storage import MemoryStorage
+                _tg_client.storage = MemoryStorage("tg_browser")
+                sess = ""
+                await asyncio.sleep(3)
             except FloodWait as e:
                 wait = int(getattr(e, "value", 60)) + 5
                 _index_status["status"] = f"telegram login flood wait {wait}s"
@@ -629,12 +761,19 @@ def run_telegram():
                 print(f"[session] export failed: {e}", flush=True)
         usess = await _loop.run_in_executor(None, _load_user_session)
         if usess:
-            try:
-                await _start_user(usess)
-                print(f"[tg] user client ready as {_user_status['me']} (reads the group)", flush=True)
-            except Exception as e:
-                _user_status.update(ready=False, error=f"{type(e).__name__}: {e}")
-                print(f"[tg] user session failed: {e} — send /userlogin to the bot", flush=True)
+            for attempt in range(1, 13):
+                try:
+                    await _start_user(usess)
+                    print(f"[tg] user client ready as {_user_status['me']} (reads the group)", flush=True)
+                    break
+                except AuthKeyDuplicated:
+                    print(f"[tg] user session in use elsewhere — retry {attempt}/12 in 10s", flush=True)
+                    _user_status.update(ready=False, error="session busy (old instance stopping)")
+                    await asyncio.sleep(10)
+                except Exception as e:
+                    _user_status.update(ready=False, error=f"{type(e).__name__}: {e}")
+                    print(f"[tg] user session failed: {e} — send /userlogin to the bot", flush=True)
+                    break
         asyncio.create_task(_bridge_sweeper())
         _tg_ready.set()
         print("[tg] Client ready", flush=True)
@@ -2934,6 +3073,7 @@ app.jinja_env.filters["urlencode"] = lambda s: urlquote(str(s), safe="")
 
 # ── Main ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _on_sigterm)
     threading.Thread(target=run_telegram, daemon=True, name="tg_client").start()
     threading.Thread(target=run_indexer,  daemon=True, name="indexer").start()
     threading.Thread(target=run_poller,   daemon=True, name="poller").start()
