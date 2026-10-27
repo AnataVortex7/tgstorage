@@ -41,7 +41,7 @@ USER_SESSION    = os.environ.get("USER_SESSION", "").strip()
 # Extra groups that are always present (comma separated). Groups can also be
 # added later from the web UI (they are stored in SQLite / the Mongo snapshot).
 ENV_GROUP_IDS = []
-for _x in [str(BACKUP_GROUP_ID)] + os.environ.get("BACKUP_GROUP_IDS", "").split(","):
+for _x in [str(BACKUP_GROUP_ID)] + os.environ.get("BACKUP_GROUP_IDS", "").split(",") + [os.environ.get("BACKUP_GROUP", "")]:   # BACKUP_GROUP is always kept, UI can not remove it
     try:
         _g = int(_x.strip())
     except ValueError:
