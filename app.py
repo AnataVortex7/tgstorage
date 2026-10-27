@@ -2814,14 +2814,155 @@ def _content_disposition(kind, name):
     ascii_name = re.sub(r'[^\x20-\x7e]', "_", name).replace('"', "_").replace("\\", "_")
     return f"{kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{urlquote(name, safe='')}"
 
+# ── Disk cache (fast delivery; Telegram stays the permanent store) ──────────
+# The cache is DISPOSABLE: if the disk is wiped (Render free restarts/redeploys),
+# nothing is lost — a file is simply fetched from Telegram again on next use.
+CACHE_DIR       = os.environ.get("CACHE_DIR", "/var/tmp/tg_cache")
+CACHE_MAX_BYTES = int(float(os.environ.get("CACHE_MAX_GB", "8")) * 1024 ** 3)
+CACHE_MAX_FILE  = int(float(os.environ.get("CACHE_MAX_FILE_MB", "1024")) * 1024 ** 2)
+CACHE_ENABLED   = os.environ.get("CACHE_ENABLED", "1") != "0"
+CACHE_MIN_FREE  = 300 * 1024 ** 2          # always keep this much of the disk free
+try:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+except OSError as _e:
+    print(f"[cache] cannot create {CACHE_DIR}: {_e} — cache disabled", flush=True)
+    CACHE_ENABLED = False
+
+_cache_mutex = threading.Lock()
+_cache_keylocks = {}                        # key -> Lock (one Telegram fetch per file at a time)
+_cache_stats = {"hits": 0, "misses": 0}
+
+def _cache_path(gid, msg_id):
+    return os.path.join(CACHE_DIR, f"{abs(gid)}_{msg_id}")
+
+def cache_get(gid, msg_id, size):
+    """Path of a complete cached copy, or None."""
+    if not CACHE_ENABLED:
+        return None
+    p = _cache_path(gid, msg_id)
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    if size and st.st_size != size:
+        return None
+    try:
+        os.utime(p, None)                   # mark as recently used (LRU)
+    except OSError:
+        pass
+    return p
+
+def _cache_make_room(need):
+    """Delete least-recently-used files until `need` bytes fit. False if impossible."""
+    import shutil
+    with _cache_mutex:
+        files = []
+        for n in os.listdir(CACHE_DIR):
+            p = os.path.join(CACHE_DIR, n)
+            try:
+                st = os.stat(p)
+                files.append([st.st_mtime, st.st_size, p, n.endswith(".part")])
+            except OSError:
+                pass
+        now = time.time()
+        for f in files:                     # stale half-downloads
+            if f[3] and now - f[0] > 7200:
+                try: os.unlink(f[2])
+                except OSError: pass
+                f[1] = 0
+        total = sum(f[1] for f in files)
+        files.sort(key=lambda f: f[0])
+        def free_ok():
+            return shutil.disk_usage(CACHE_DIR).free >= need + CACHE_MIN_FREE
+        while files and (total + need > CACHE_MAX_BYTES or not free_ok()):
+            f = files.pop(0)
+            if f[3] and now - f[0] <= 7200:
+                continue                    # a download in progress — do not touch
+            try:
+                os.unlink(f[2]); total -= f[1]
+            except OSError:
+                pass
+        return total + need <= CACHE_MAX_BYTES and free_ok()
+
+def cache_fill(gid, msg_id, size, timeout=3600):
+    """Download the file from Telegram into the cache. -> path or None.
+    Only one fetch per file at a time; others wait and then hit the cache."""
+    if not CACHE_ENABLED or not size or size > CACHE_MAX_FILE:
+        return None
+    key = (gid, msg_id)
+    with _cache_mutex:
+        lk = _cache_keylocks.setdefault(key, threading.Lock())
+    with lk:
+        hit = cache_get(gid, msg_id, size)
+        if hit:
+            return hit
+        if not _cache_make_room(size):
+            print(f"[cache] no room for {size} bytes — serving without cache", flush=True)
+            return None
+        final = _cache_path(gid, msg_id)
+        part = final + ".part"
+        async def _dl():
+            cl, msg = await _resolve_msg(gid, msg_id)
+            if not msg:
+                return False
+            _bridge_touch(gid, msg_id, hold=3600)
+            try:
+                return bool(await cl.download_media(msg, file_name=part))
+            finally:
+                _bridge_release(gid, msg_id)
+        try:
+            ok = tg(_dl(), timeout=timeout)
+            if ok and os.path.exists(part) and os.path.getsize(part) == size:
+                os.replace(part, final)
+                _cache_stats["misses"] += 1
+                return final
+        except Exception as e:
+            print(f"[cache] fill failed for {msg_id}: {e}", flush=True)
+        try: os.unlink(part)
+        except OSError: pass
+        return None
+    # (lock dict entries are tiny; they are left in place on purpose)
+
+def cache_fill_bg(gid, msg_id, size):
+    """Start a background fill unless already cached / running."""
+    if not CACHE_ENABLED or not size or size > CACHE_MAX_FILE or cache_get(gid, msg_id, size):
+        return
+    with _cache_mutex:
+        lk = _cache_keylocks.setdefault((gid, msg_id), threading.Lock())
+    if lk.locked():
+        return
+    threading.Thread(target=cache_fill, args=(gid, msg_id, size), daemon=True, name="cache_fill").start()
+
+@app.route("/api/cache")
+@require_api
+def api_cache():
+    used = n = 0
+    if CACHE_ENABLED:
+        for f in os.listdir(CACHE_DIR):
+            try:
+                used += os.path.getsize(os.path.join(CACHE_DIR, f)); n += 1
+            except OSError:
+                pass
+    return jsonify({"enabled": CACHE_ENABLED, "files": n, "bytes": used,
+                    "max_bytes": CACHE_MAX_BYTES, **_cache_stats})
+
 @app.route("/download/<int:msg_id>/<path:filename>")
 @require_auth
 def download(msg_id, filename):
-    """Download a file by streaming it from Telegram through a temp file."""
+    """Download a file: from the disk cache if present, else fetch from Telegram (and cache it)."""
     gid = req_group()
-    row = db_one("SELECT filename FROM files WHERE group_id=? AND msg_id=?", (gid, msg_id)) if gid else None
+    row = db_one("SELECT filename, size FROM files WHERE group_id=? AND msg_id=?", (gid, msg_id)) if gid else None
     if not row:
         return jsonify({"error": "file not found in index"}), 404
+    from flask import send_file
+    hit = cache_get(gid, msg_id, row["size"])
+    if hit:
+        _cache_stats["hits"] += 1
+    else:
+        hit = cache_fill(gid, msg_id, row["size"])
+    if hit:
+        return send_file(hit, mimetype="application/octet-stream", as_attachment=True,
+                         download_name=row["filename"], conditional=True, max_age=0)
     tmp_path = os.path.join(TMP_DIR, f"{msg_id}_{secrets.token_hex(4)}")
 
     async def _dl():
@@ -2947,6 +3088,13 @@ def stream(msg_id, filename):
         return jsonify({"error": "preview not supported for this file — use Download"}), 415
 
     size = row["size"]
+    hit = cache_get(gid, msg_id, size)
+    if hit:                                  # served from disk: fast, no Telegram request
+        from flask import send_file
+        _cache_stats["hits"] += 1
+        return send_file(hit, mimetype=ctype.split(";")[0], conditional=True, max_age=3600,
+                         download_name=row["filename"], as_attachment=False)
+    cache_fill_bg(gid, msg_id, size)         # first view: stream now, cache in background
     rng = _parse_range(request.headers.get("Range"), size)
     if rng == "bad":
         return Response(status=416, headers={"Content-Range": f"bytes */{size}"})
@@ -3131,6 +3279,180 @@ def api_debug():
     return jsonify({"counters": _dbg, "samples": _dbg_samples,
                     "known_topics": {str(g): len(t) for g, t in _topics.items()}})
 
+# ── Backup API (for Hermes on Render, token auth, NOT the web login) ──────
+# POST /hapi/backup/<name>   body = .tar.gz  -> uploaded to Telegram (topic folder BACKUP_TOPIC)
+# GET  /hapi/backup/<name>   -> newest backup of <name>  (404 = none yet, 503 = index not ready)
+# GET  /hapi/backups         -> JSON list
+# Telegram holds the data, so a Koyeb/Render restart can never lose a backup.
+BACKUP_TOKEN  = os.environ.get("BACKUP_TOKEN", "").strip()
+BACKUP_TOPIC  = os.environ.get("BACKUP_TOPIC", "hermes-backup")
+BACKUP_KEEP   = max(1, _env_int("BACKUP_KEEP", 5))
+BACKUP_MAX_MB = _env_int("BACKUP_MAX_MB", 200)
+BACKUP_GID    = _env_int("BACKUP_GROUP", 0) or LEGACY_GID
+_BK_NAME      = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_backup_lock  = threading.Lock()
+
+def _bk_auth():
+    """None if the bearer token is valid, else an error response."""
+    if len(BACKUP_TOKEN) < 24:
+        return jsonify({"ok": False, "msg": "backup API disabled (set BACKUP_TOKEN, 24+ chars)"}), 503
+    h = request.headers.get("Authorization", "")
+    tok = h[7:].strip() if h.startswith("Bearer ") else ""
+    a = hashlib.sha256(tok.encode()).digest()
+    b = hashlib.sha256(BACKUP_TOKEN.encode()).digest()
+    if not hmac.compare_digest(a, b):
+        time.sleep(1.5)                       # slow down guessing
+        return jsonify({"ok": False, "msg": "unauthorized"}), 401
+    return None
+
+def _bk_rows(gid, name):
+    """Backups of <name>, newest first."""
+    rx = re.compile(rf"^{re.escape(name)}-\d{{8}}-\d{{6}}\.tar\.gz$")
+    rows = db_many("SELECT msg_id, filename, size, topic_id FROM files WHERE group_id=? "
+                   "AND topic_id=(SELECT topic_id FROM topics WHERE group_id=? AND name=? LIMIT 1) "
+                   "ORDER BY msg_id DESC", (gid, gid, BACKUP_TOPIC))
+    return [r for r in rows if rx.match(r["filename"])]
+
+def _bk_topic(gid):
+    """topic_id of the backup folder; creates the forum topic if it is missing."""
+    r = db_one("SELECT topic_id FROM topics WHERE group_id=? AND name=?", (gid, BACKUP_TOPIC))
+    if r:
+        return r["topic_id"]
+    async def _mk():
+        res = await _tg_client.invoke(tg_raw.functions.messages.CreateForumTopic(
+            channel=await _tg_client.resolve_peer(gid), title=BACKUP_TOPIC,
+            random_id=_tg_client.rnd_id()))
+        for u in res.updates:
+            m = getattr(u, "message", None)
+            if m is not None and getattr(m, "id", None):
+                return m.id
+        raise RuntimeError("topic created but its id was not returned")
+    tid = tg(_mk(), timeout=30)
+    _save_topic(gid, tid, BACKUP_TOPIC)
+    return tid
+
+def _bk_ready():
+    if not _tg_ready.is_set():
+        return jsonify({"ok": False, "msg": "telegram not connected yet"}), 503
+    if not BACKUP_GID or not db_one("SELECT 1 FROM groups WHERE group_id=?", (BACKUP_GID,)):
+        return jsonify({"ok": False, "msg": "backup group not configured"}), 503
+    return None
+
+@app.route("/hapi/backup/<name>", methods=["POST", "PUT"])
+def hapi_backup_put(name):
+    bad = _bk_auth() or _bk_ready()
+    if bad:
+        return bad
+    if not _BK_NAME.match(name):
+        return jsonify({"ok": False, "msg": "bad name (A-Z a-z 0-9 _ -, max 40)"}), 400
+    if not _index_status.get("last_run"):
+        return jsonify({"ok": False, "msg": "index not ready yet — retry later"}), 503
+    try:
+        length = int(request.headers.get("Content-Length", "0"))
+    except ValueError:
+        length = 0
+    if length <= 0:
+        return jsonify({"ok": False, "msg": "Content-Length required"}), 411
+    if length > BACKUP_MAX_MB * 1024 * 1024:
+        return jsonify({"ok": False, "msg": f"too large (max {BACKUP_MAX_MB} MB)"}), 413
+    gid = BACKUP_GID
+    fname = f"{name}-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}.tar.gz"
+    tmp = os.path.join(TMP_DIR, f"up_{secrets.token_hex(6)}")
+    inp, left = request.environ["wsgi.input"], length     # MAX_CONTENT_LENGTH (1 MB) only guards normal requests
+    try:
+        with open(tmp, "wb") as f:
+            while left > 0:
+                chunk = inp.read(min(1 << 20, left))
+                if not chunk:
+                    break
+                f.write(chunk); left -= len(chunk)
+        with open(tmp, "rb") as f:
+            magic = f.read(2)
+        if left or magic != b"\x1f\x8b":
+            return jsonify({"ok": False, "msg": "upload incomplete or not a .tar.gz"}), 400
+        with _backup_lock:
+            tid = _bk_topic(gid)
+            async def _up():
+                m = await _tg_client.send_document(gid, tmp, file_name=fname, force_document=True,
+                                                   caption=f"backup {fname}", message_thread_id=tid)
+                return m.id
+            mid = tg(_up(), timeout=900)
+            trow = db_one("SELECT path FROM topics WHERE group_id=? AND topic_id=?", (gid, tid))
+            db_exec("""INSERT OR IGNORE INTO files (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
+                       VALUES (?, ?, ?, ?, ?, ?, 'application/gzip')""",
+                    (gid, mid, tid, trow["path"] if trow else BACKUP_TOPIC, fname, length))
+            old = [r["msg_id"] for r in _bk_rows(gid, name)[BACKUP_KEEP:]]
+            if old:                                           # keep only the newest BACKUP_KEEP
+                try:
+                    tg(_tg_client.delete_messages(gid, old), timeout=60)
+                    for i in old:
+                        db_exec("DELETE FROM files WHERE group_id=? AND msg_id=?", (gid, i))
+                except Exception as e:
+                    print(f"[backup] prune failed: {e}", flush=True)
+            _recount(gid, [tid]); _changed(gid)
+        print(f"[backup] stored {fname} ({length} bytes) msg={mid}", flush=True)
+        return jsonify({"ok": True, "file": fname, "size": length, "msg_id": mid})
+    except Exception as e:
+        print(f"[backup] upload failed: {e}", flush=True)
+        return jsonify({"ok": False, "msg": f"{type(e).__name__}: {e}"}), 500
+    finally:
+        try: os.unlink(tmp)
+        except OSError: pass
+
+@app.route("/hapi/backup/<name>", methods=["GET"])
+def hapi_backup_get(name):
+    bad = _bk_auth() or _bk_ready()
+    if bad:
+        return bad
+    if not _BK_NAME.match(name):
+        return jsonify({"ok": False, "msg": "bad name"}), 400
+    if not _index_status.get("last_run"):          # never answer "none" while the index is still loading
+        return jsonify({"ok": False, "msg": "index not ready yet — retry later"}), 503
+    rows = _bk_rows(BACKUP_GID, name)
+    if not rows:
+        return jsonify({"ok": False, "msg": "no backup yet"}), 404
+    r = rows[0]
+    from flask import send_file
+    path = cache_fill(BACKUP_GID, r["msg_id"], r["size"])
+    if path:
+        return send_file(path, mimetype="application/gzip", as_attachment=True,
+                         download_name=r["filename"], max_age=0)
+    tmp = os.path.join(TMP_DIR, f"bk_{secrets.token_hex(6)}")
+    async def _dl():
+        cl, msg = await _resolve_msg(BACKUP_GID, r["msg_id"])
+        return bool(msg) and bool(await cl.download_media(msg, file_name=tmp))
+    try:
+        ok = tg(_dl(), timeout=600)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+    if not ok or not os.path.exists(tmp):
+        return jsonify({"ok": False, "msg": "backup message not readable"}), 502
+    def _gen():
+        try:
+            with open(tmp, "rb") as f:
+                while True:
+                    c = f.read(65536)
+                    if not c:
+                        break
+                    yield c
+        finally:
+            try: os.unlink(tmp)
+            except OSError: pass
+    return Response(stream_with_context(_gen()), headers={
+        "Content-Type": "application/gzip", "Content-Length": str(os.path.getsize(tmp)),
+        "Content-Disposition": _content_disposition("attachment", r["filename"])})
+
+@app.route("/hapi/backups")
+def hapi_backups():
+    bad = _bk_auth() or _bk_ready()
+    if bad:
+        return bad
+    rows = db_many("SELECT msg_id, filename, size FROM files WHERE group_id=? AND topic_id="
+                   "(SELECT topic_id FROM topics WHERE group_id=? AND name=? LIMIT 1) ORDER BY msg_id DESC",
+                   (BACKUP_GID, BACKUP_GID, BACKUP_TOPIC))
+    return jsonify({"ok": True, "index_ready": bool(_index_status.get("last_run")),
+                    "backups": [dict(r) for r in rows]})
+
 # ── Jinja filter ─────────────────────────────────────────────────────────
 app.jinja_env.filters["urlencode"] = lambda s: urlquote(str(s), safe="")
 
@@ -3142,5 +3464,5 @@ if __name__ == "__main__":
     threading.Thread(target=run_poller,   daemon=True, name="poller").start()
     threading.Thread(target=run_snapshotter, daemon=True, name="snapshotter").start()
     from waitress import serve          # production WSGI server (no dev-server warning, no per-request log spam)
-    serve(app, host="0.0.0.0", port=8080, threads=24, connection_limit=200,
+    serve(app, host="0.0.0.0", port=_env_int("PORT", 8080), threads=24, connection_limit=200,
           channel_timeout=300, cleanup_interval=30, ident="tgstorage")
