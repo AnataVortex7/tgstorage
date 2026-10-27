@@ -3319,9 +3319,11 @@ def _bk_topic(gid):
     if r:
         return r["topic_id"]
     async def _mk():
-        res = await _tg_client.invoke(tg_raw.functions.messages.CreateForumTopic(
-            channel=await _tg_client.resolve_peer(gid), title=BACKUP_TOPIC,
-            random_id=_tg_client.rnd_id()))
+        import inspect                       # the raw field is `channel` in older layers, `peer` in newer ones
+        _p = inspect.signature(tg_raw.functions.messages.CreateForumTopic.__init__).parameters
+        _kw = {("peer" if "peer" in _p else "channel"): await _tg_client.resolve_peer(gid),
+               "title": BACKUP_TOPIC, "random_id": _tg_client.rnd_id()}
+        res = await _tg_client.invoke(tg_raw.functions.messages.CreateForumTopic(**_kw))
         for u in res.updates:
             m = getattr(u, "message", None)
             if m is not None and getattr(m, "id", None):
