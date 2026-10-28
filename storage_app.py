@@ -3517,12 +3517,29 @@ def bot_api_claims(u):
     except Exception:
         return False
 
+def _ram_text():
+    try:
+        rss = int([l for l in open("/proc/self/status") if l.startswith("VmRSS")][0].split()[1]) // 1024
+    except Exception:
+        return "?"
+    lim = ""
+    for f in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            v = int(open(f).read().strip())
+            if 0 < v < 1 << 40:
+                lim = f" / {v // 1048576} MB"
+                break
+        except Exception:
+            pass
+    return f"{rss} MB{lim}"
+
 def status_text():
     topics_count = db_one("SELECT COUNT(*) as c FROM topics")["c"]
     files_count  = db_one("SELECT COUNT(*) as c FROM files")["c"]
     groups_count = db_one("SELECT COUNT(*) as c FROM groups")["c"]
     return (f"👥 Groups: {groups_count}\n🗂 Topics indexed: {topics_count}\n📄 Files indexed: {files_count}\n"
             f"👤 User session: {'ON ' + _user_status['me'] if _user_status['ready'] else 'OFF'}\n"
+            f"🧠 RAM: {_ram_text()}\n"
             f"🔄 Indexer: {_index_status['status']}\n⏱ Check every: {get_poll_interval()}s\n🌐 {WEB_URL}")
 
 # ── Jinja filter ─────────────────────────────────────────────────────────

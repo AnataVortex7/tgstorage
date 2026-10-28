@@ -135,6 +135,18 @@ def tg(method, **p):
         r = urllib.request.urlopen(urllib.request.Request(
             f'https://api.telegram.org/bot{TG_TOKEN}/{method}', data=data), timeout=45)
         return json.loads(r.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:                 # Telegram's own explanation (e.g. 409 reason) is kept
+        try:
+            body = json.loads(e.read().decode('utf-8'))
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        body['ok'] = False
+        body.setdefault('error_code', e.code)
+        if 'not modified' not in str(body.get('description', '')):
+            print(f"tg {method} failed: HTTP {e.code} {body.get('description', '')}")
+        return body
     except Exception as e:
         if 'not modified' not in str(e):
             print(f'tg {method} failed: {e}')
@@ -764,12 +776,25 @@ def handle_update(u):
             AUTH.handle_stranger(m)
 
 def bot_loop():
-    tg('deleteWebhook')
-    offset = 0
+    offset, cleared, warned = 0, False, 0
     while True:
+        if not cleared:                                   # retry until the webhook is really gone
+            cleared = bool(tg('deleteWebhook').get('ok'))
+            if not cleared:
+                time.sleep(5)
+                continue
         r = tg('getUpdates', offset=offset, timeout=30, allowed_updates=['message', 'callback_query'])
         if not r.get('ok'):
-            time.sleep(5)
+            if r.get('error_code') == 409:
+                if 'webhook' in str(r.get('description', '')).lower():
+                    cleared = False
+                elif time.time() - warned > 300:
+                    warned = time.time()
+                    print('⚠️ 409: दुसरा instance त्याच BOT_TOKEN वर getUpdates चालवतोय (जुना Render/Koyeb Worker Hub?) '
+                          '— तो बंद करा. Redeploy वेळी काही सेकंद हे normal आहे.')
+                time.sleep(10)
+            else:
+                time.sleep(5)
             continue
         for u in r['result']:
             offset = u['update_id'] + 1

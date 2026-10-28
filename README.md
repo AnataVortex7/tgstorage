@@ -62,3 +62,11 @@ Secret बनवण्याच्या commands:
 * एका वेळी एकच instance (Telegram sessions / Mongo lease) — redeploy वेळी जुना बंद होईपर्यंत नवा थांबतो.
 * RAM: Backup Browser + Telegram accounts (प्रत्येकी ~30-50 MB). Free 512 MB वर `MAX_ACCOUNTS` कमी ठेवा.
 * Free tier ची disk ephemeral आहे — म्हणूनच Mongo आवश्यक.
+
+## Koyeb / 512 MB — troubleshooting
+* **Port सुरुवातीलाच उघडतो** (`/healthz` लगेच `ok`), मग Mongo/Telegram भाग हळूहळू सुरू होतात. Boot वेळी बाकी paths `503 starting` देतात.
+* **`getUpdates failed: HTTP 409`** = दुसरा instance त्याच `BOT_TOKEN` वर bot चालवतोय (जुना Render Worker Hub!) किंवा webhook लागलेला.
+  जुना Render service **Suspend/Delete** करा. Redeploy वेळी काही सेकंद 409 येणं normal आहे.
+* **`Waiting for N seconds (channels.GetMessages)`** = पहिल्या वेळचं index scan (Telegram flood-limit). Snapshot save झाल्यावर पुढच्या start ला फक्त नवीन files scan होतात (Mongo आवश्यक).
+* 512 MB ओळखलं तर defaults आपोआप: `MAX_ACCOUNTS=3`, `DISK_CACHE_GB=1`. Outbound limit नसल्याने `BW_LIMIT_GB=100000`. सगळे env ने बदलता येतात.
+* Bot → 📦 Storage मध्ये 🧠 RAM वापर दिसतो. 400 MB च्या वर गेला तर `MAX_ACCOUNTS` कमी करा.
