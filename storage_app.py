@@ -243,7 +243,8 @@ def init_db():
                 group_id  INTEGER PRIMARY KEY,
                 title     TEXT DEFAULT '',
                 source    TEXT DEFAULT 'ui',
-                added_at  REAL DEFAULT 0
+                added_at  REAL DEFAULT 0,
+                is_forum  INTEGER DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS topics (
                 group_id    INTEGER NOT NULL,
@@ -305,6 +306,9 @@ def init_db():
                 conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
                              (f"cursor_{LEGACY_GID}", old[0]))
             print(f"[db] migrated single-group database -> group {LEGACY_GID}", flush=True)
+        gcols = {r[1] for r in conn.execute("PRAGMA table_info(groups)")}
+        if "is_forum" not in gcols:
+            conn.execute("ALTER TABLE groups ADD COLUMN is_forum INTEGER DEFAULT 1")
         lcols = {r[1] for r in conn.execute("PRAGMA table_info(login_tokens)")}
         for col in ("ip", "ua"):
             if col not in lcols:
@@ -331,12 +335,18 @@ def chan_id(gid):
 def list_groups():
     return db_many("SELECT group_id, title, source FROM groups ORDER BY added_at, group_id")
 
+_forum = {}             # gid -> True if the chat has Topics (folders); False = channel / normal group (ONE folder)
+
+def _is_forum(gid):
+    return _forum.get(gid, True)
+
 def refresh_chan_map():
     _chan_to_gid.clear()
-    for r in list_groups():
+    for r in db_many("SELECT group_id, is_forum FROM groups"):
         c = chan_id(r["group_id"])
         if c:
             _chan_to_gid[c] = r["group_id"]
+        _forum[r["group_id"]] = bool(r["is_forum"] if r["is_forum"] is not None else 1)
 
 refresh_chan_map()
 
@@ -1353,33 +1363,48 @@ def _handle_raw_message(gid, m):
     if media is None:
         _dbg["no_media"] += 1
         return False
-    if not isinstance(media, tg_raw.types.MessageMediaDocument):
+    size, mime, filename = 0, "", f"file_{m.id}"
+    if isinstance(media, tg_raw.types.MessageMediaDocument):
+        doc = media.document
+        if doc is None or not hasattr(doc, "attributes"):
+            _dbg["media_not_document"] += 1
+            return False
+        size = getattr(doc, "size", 0) or 0
+        mime = getattr(doc, "mime_type", "") or ""
+        filename += (mimetypes.guess_extension(mime) or "")
+        for attr in doc.attributes:
+            if isinstance(attr, tg_raw.types.DocumentAttributeFilename):
+                filename = attr.file_name
+                break
+    elif isinstance(media, tg_raw.types.MessageMediaPhoto) and getattr(media, "photo", None) is not None \
+            and hasattr(media.photo, "sizes"):
+        best = 0
+        for sz in media.photo.sizes:
+            if hasattr(sz, "sizes") and sz.sizes:
+                best = max(best, max(sz.sizes))
+            elif isinstance(getattr(sz, "size", None), int):
+                best = max(best, sz.size)
+        size, mime, filename = best, "image/jpeg", f"photo_{m.id}.jpg"
+    else:
         _dbg["media_not_document"] += 1
         return False
-    doc = media.document
-    if doc is None or not hasattr(doc, "attributes"):
-        _dbg["media_not_document"] += 1
-        return False
-    tid = _topic_id_of(m)
-    topics = _topics.get(gid, {})
-    if tid not in topics:
-        _dbg["doc_unknown_topic"] += 1
-        if len(_dbg_samples) < 5:
-            _dbg_samples.append({"msg_id": m.id, "topic_id_guess": tid,
-                                 "reply_to": repr(getattr(m, "reply_to", None))[:300]})
-        return False
-    filename = f"file_{m.id}" + (mimetypes.guess_extension(getattr(doc, "mime_type", "") or "") or "")
-    for attr in doc.attributes:
-        if isinstance(attr, tg_raw.types.DocumentAttributeFilename):
-            filename = attr.file_name
-            break
+    topics = _topics.setdefault(gid, {})
+    if _is_forum(gid):
+        tid = _topic_id_of(m)
+        if tid not in topics:                  # General topic / unknown or deleted topic
+            tid = 0
+            _dbg["doc_unknown_topic"] += 1
+            if len(_dbg_samples) < 5:
+                _dbg_samples.append({"msg_id": m.id, "reply_to": repr(getattr(m, "reply_to", None))[:300]})
+    else:
+        tid = 0                                # channel / normal group: everything in ONE folder
+    if tid == 0 and 0 not in topics:
+        _save_topic(gid, 0, "General" if _is_forum(gid) else "All files")
     n = db_exec("""
         INSERT OR IGNORE INTO files
             (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (gid, m.id, tid, topics[tid], filename,
-          getattr(doc, "size", 0) or 0,
-          getattr(doc, "mime_type", "") or ""))
+    """, (gid, m.id, tid, topics[tid], filename, size, mime))
     if not n:
         _dbg["doc_dup"] += 1
         return False
@@ -1434,6 +1459,8 @@ def snapshot_save():
               for r in db_many("SELECT * FROM topics")]
     groups = [{"group_id": r["group_id"], "title": r["title"], "source": r["source"]}
               for r in list_groups()]
+    for g in groups:
+        g["is_forum"] = 1 if _is_forum(g["group_id"]) else 0
     cursors = {str(g["group_id"]): meta_get(f"cursor_{g['group_id']}", 0) for g in groups}
     rows = [[r["group_id"], r["msg_id"], r["topic_id"], r["folder_path"], r["filename"],
              r["size"], r["mime_type"]]
@@ -1463,8 +1490,8 @@ def snapshot_load():
         print("[snapshot] no snapshot yet", flush=True)
         return
     for g in meta.get("groups", []):
-        db_exec("INSERT OR IGNORE INTO groups (group_id, title, source, added_at) VALUES (?, ?, ?, ?)",
-                (g["group_id"], g.get("title", ""), g.get("source", "ui"), time.time()))
+        db_exec("INSERT OR IGNORE INTO groups (group_id, title, source, added_at, is_forum) VALUES (?, ?, ?, ?, ?)",
+                (g["group_id"], g.get("title", ""), g.get("source", "ui"), time.time(), g.get("is_forum", 1)))
     refresh_chan_map()
     if db_one("SELECT COUNT(*) AS c FROM topics")["c"] > 0:
         return
@@ -1542,7 +1569,7 @@ async def _latest_msg_id(gid, cl=None):
         async for hm in cl.get_chat_history(gid, limit=1):
             return hm.id
         return 0
-    m = await cl.send_message(gid, "⏳ indexing…")
+    m = await cl.send_message(gid, "⏳ indexing…", disable_notification=True)
     mid = m.id
     try:
         await cl.delete_messages(gid, mid)
@@ -1674,12 +1701,11 @@ def run_poller():
 
 async def _fill_titles():
     for r in list_groups():
-        if r["title"]:
-            continue
         try:
             chat = await _get_chat(r["group_id"])
-            db_exec("UPDATE groups SET title=? WHERE group_id=?",
-                    (chat.title or "", r["group_id"]))
+            db_exec("UPDATE groups SET title=?, is_forum=? WHERE group_id=?",
+                    (chat.title or r["title"] or "", 1 if getattr(chat, "is_forum", False) else 0, r["group_id"]))
+            _forum[r["group_id"]] = bool(getattr(chat, "is_forum", False))
         except Exception as e:
             print(f"[groups] title for {r['group_id']}: {e}", flush=True)
 
@@ -2637,11 +2663,11 @@ async function switchGroup(id) {
   pollStatus();
 }
 async function addGroup() {
-  const v = await dialog({ title: 'Add group', text: 'Telegram group चा ID (उदा. -1001234567890). Bot त्या group मध्ये admin असावा आणि group मध्ये Topics ON असावेत.', input: '', ok: 'Add' });
+  const v = await dialog({ title: 'Add group', text: 'Channel किंवा group चा ID (उदा. -1001234567890). Bot तिथे admin असावा. Topics ON असतील तर folder-wise दिसेल, नसतील तर सगळ्या files एका "All files" folder मध्ये.', input: '', ok: 'Add' });
   if (!v) return;
   const r = await api('/api/groups', { group_id: v });
   if (!r.ok) { toast('❌ ' + r.msg, true); return; }
-  toast('✅ ' + r.group.title + ' add झाला — index होत आहे');
+  toast('✅ ' + r.group.title + ' add झाला (' + (r.group.forum ? 'topics → folders' : 'सगळ्या files एका folder मध्ये') + ') — index होत आहे');
   const l = await api('/api/groups'); S.groups = l.groups || [];
   await switchGroup(r.group.id);
 }
@@ -2764,12 +2790,12 @@ def _file_json(r):
 @require_api
 def api_groups():
     rows = db_many("""
-        SELECT g.group_id, g.title, g.source,
+        SELECT g.group_id, g.title, g.source, g.is_forum,
                (SELECT COUNT(*) FROM files f WHERE f.group_id = g.group_id) AS files
         FROM groups g ORDER BY g.added_at, g.group_id""")
     return jsonify({"ok": True, "groups": [
         {"id": r["group_id"], "title": r["title"] or f"Group {r['group_id']}",
-         "source": r["source"], "files": r["files"]} for r in rows]})
+         "source": r["source"], "files": r["files"], "forum": bool(r["is_forum"])} for r in rows]})
 
 @app.route("/api/groups", methods=["POST"])
 @require_api
@@ -2780,7 +2806,7 @@ def api_group_add():
     except ValueError:
         return jsonify({"ok": False, "msg": "Group ID number हवा (उदा. -1001234567890)"}), 400
     if gid >= -1000000000000:
-        return jsonify({"ok": False, "msg": "Supergroup ID -100… ने सुरू होतो"}), 400
+        return jsonify({"ok": False, "msg": "Channel / supergroup ID -100… ने सुरू होतो (साधा छोटा group चालत नाही)"}), 400
     if db_one("SELECT 1 FROM groups WHERE group_id=?", (gid,)):
         return jsonify({"ok": False, "msg": "हा group आधीच add आहे"}), 409
     if db_one("SELECT COUNT(*) AS c FROM groups")["c"] >= MAX_GROUPS:
@@ -2795,17 +2821,15 @@ def api_group_add():
     except Exception as e:
         return jsonify({"ok": False, "msg": f"Bot ला हा group दिसत नाही — bot group मध्ये "
                                             f"admin add केला आहे का? ({type(e).__name__})"}), 400
-    if getattr(chat, "is_forum", None) is False:
-        return jsonify({"ok": False, "msg": "या group मध्ये Topics (Forum) ON नाहीत — "
-                                            "folders topics वरून बनतात"}), 400
     title = (getattr(chat, "title", "") or "")[:100]
-    db_exec("INSERT OR IGNORE INTO groups (group_id, title, source, added_at) VALUES (?, ?, 'ui', ?)",
-            (gid, title, time.time()))
+    forum = 1 if getattr(chat, "is_forum", False) else 0     # Topics ON -> folders; else everything in one folder
+    db_exec("INSERT OR IGNORE INTO groups (group_id, title, source, added_at, is_forum) VALUES (?, ?, 'ui', ?, ?)",
+            (gid, title, time.time(), forum))
     refresh_chan_map()
     _topics.setdefault(gid, {})
     _changed(gid)
     asyncio.run_coroutine_threadsafe(_full_index(gid), _tg_loop)
-    return jsonify({"ok": True, "group": {"id": gid, "title": title or f"Group {gid}"}})
+    return jsonify({"ok": True, "group": {"id": gid, "title": title or f"Group {gid}", "forum": bool(forum)}})
 
 @app.route("/api/groups/remove", methods=["POST"])
 @require_api
@@ -3011,8 +3035,8 @@ def api_paste():
         return jsonify({"ok": False, "msg": "target folder not found"}), 404
 
     async def _copy(mid):
-        m = await _rd().copy_message(chat_id=gid, from_chat_id=gid,
-                                          message_id=mid, message_thread_id=tid)
+        m = await _rd().copy_message(chat_id=gid, from_chat_id=gid, message_id=mid,
+                                     message_thread_id=(tid if _is_forum(gid) and tid else None))
         return m.id
 
     async def _rm(mid):
