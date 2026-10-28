@@ -108,14 +108,23 @@ if __name__ == "__main__":
     import threading, time, traceback
     signal.signal(signal.SIGTERM, _on_sigterm)
     from waitress import create_server
-    port = int(os.environ.get("PORT", "8080"))
+    # Koyeb/Render may inject PORT=8000 while the service's health check is set to 8080 (or the other way round).
+    # So listen on PORT *and* the usual 8080 / 8000 — whichever the platform checks, it gets an answer.
+    ports = []
+    for _p in (os.environ.get("PORT", "").strip(), "8080", "8000"):
+        if _p.isdigit() and _p not in ports:
+            ports.append(_p)
+    opts = dict(threads=int(os.environ.get("WEB_THREADS", "32")),   # every worker PC holds one long-poll connection
+                connection_limit=300, channel_timeout=300, cleanup_interval=30, send_bytes=1, ident="web")
     # 1) open the port FIRST — the platform's TCP health check passes immediately,
     #    even if Mongo / Telegram are slow on a small 512 MB instance.
-    server = create_server(application, host="0.0.0.0", port=port,
-                           threads=int(os.environ.get("WEB_THREADS", "32")),   # every worker PC holds one long-poll connection
-                           connection_limit=300, channel_timeout=300, cleanup_interval=30,
-                           send_bytes=1, ident="web")
-    print(f"[web] listening on 0.0.0.0:{port} | RAM limit: {_mem or '?'} MB", flush=True)
+    try:
+        server = create_server(application, listen=" ".join(f"0.0.0.0:{p}" for p in ports), **opts)
+    except OSError as e:                              # an extra port is taken -> main PORT only
+        print(f"[web] extra ports failed ({e}); using {ports[0]} only", flush=True)
+        ports = ports[:1]
+        server = create_server(application, listen=f"0.0.0.0:{ports[0]}", **opts)
+    print(f"[web] listening on ports {', '.join(ports)} | RAM limit: {_mem or '?'} MB", flush=True)
 
     # 2) then load the app and start the heavy parts one by one
     def _boot():
