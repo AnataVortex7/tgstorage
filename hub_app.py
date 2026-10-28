@@ -128,29 +128,92 @@ app.register_error_handler(500, lambda e: ('', 500))
 
 
 # ───────────────────────── Telegram ─────────────────────────
+import http.client, socket, ssl
+
+class _V4Conn(http.client.HTTPSConnection):
+    """HTTPS connection that uses IPv4 ONLY and a short connect timeout.
+    Root cause of the 45-90 s delays: api.telegram.org resolves to IPv6 first; the container has no working
+    IPv6 route, so every NEW connection sat in sock.connect() until the OS gave up, and only then fell back."""
+    def connect(self):
+        last = None
+        for fam, typ, proto, _, addr in socket.getaddrinfo(self.host, self.port, socket.AF_INET, socket.SOCK_STREAM):
+            sock = None
+            try:
+                sock = socket.socket(fam, typ, proto)
+                sock.settimeout(5)                      # connect timeout
+                sock.connect(addr)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+                self.sock.settimeout(self.timeout)
+                return
+            except OSError as e:
+                last = e
+                if sock:
+                    sock.close()
+        raise last or OSError('no IPv4 address for ' + str(self.host))
+
+_TL = threading.local()
+_CTX = ssl.create_default_context()
+
+def _conn(timeout):
+    c = getattr(_TL, 'c', None)
+    if c is None:
+        c = _TL.c = _V4Conn('api.telegram.org', 443, timeout=timeout, context=_CTX)
+    c.timeout = timeout
+    if c.sock is not None:
+        c.sock.settimeout(timeout)
+    return c
+
+def _drop():
+    c = getattr(_TL, 'c', None)
+    _TL.c = None
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
+
 def tg(method, **p):
+    """Bot API call. Keep-alive connection per thread (no new TCP+TLS handshake per call), IPv4 only,
+    5 s connect timeout, automatic retry on a stale / broken connection."""
     data = urllib.parse.urlencode(
         {k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in p.items()}).encode()
-    try:
-        r = urllib.request.urlopen(urllib.request.Request(
-            f'https://api.telegram.org/bot{TG_TOKEN}/{method}', data=data), timeout=45)
-        return json.loads(r.read().decode('utf-8'))
-    except urllib.error.HTTPError as e:                 # Telegram's own explanation (e.g. 409 reason) is kept
+    rto = 45 if method == 'getUpdates' else 20
+    hdr = {'Content-Type': 'application/x-www-form-urlencoded', 'Connection': 'keep-alive'}
+    last = None
+    for attempt in range(3):
         try:
-            body = json.loads(e.read().decode('utf-8'))
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
-        body['ok'] = False
-        body.setdefault('error_code', e.code)
-        if 'not modified' not in str(body.get('description', '')):
-            print(f"tg {method} failed: HTTP {e.code} {body.get('description', '')}")
-        return body
-    except Exception as e:
-        if 'not modified' not in str(e):
-            print(f'tg {method} failed: {e}')
-        return {}
+            c = _conn(rto)
+            c.request('POST', f'/bot{TG_TOKEN}/{method}', body=data, headers=hdr)
+            r = c.getresponse()
+            raw = r.read()
+            if r.status == 200:
+                return json.loads(raw.decode('utf-8'))
+            try:
+                body = json.loads(raw.decode('utf-8'))
+            except Exception:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            body['ok'] = False
+            body.setdefault('error_code', r.status)
+            if 'not modified' not in str(body.get('description', '')):
+                print(f"tg {method} failed: HTTP {r.status} {body.get('description', '')}", flush=True)
+            return body
+        except (ConnectionError, http.client.HTTPException, socket.timeout, ssl.SSLError, OSError) as e:
+            last = e
+            _drop()                                   # broken / stale connection -> new one next time
+            if method == 'getUpdates' and isinstance(e, socket.timeout):
+                return {}                             # long-poll simply timed out
+            time.sleep(0.3 * (attempt + 1))
+        except Exception as e:
+            _drop()
+            print(f'tg {method} failed: {e}', flush=True)
+            return {}
+    if 'not modified' not in str(last):
+        print(f'tg {method} failed: {last}', flush=True)
+    return {}
 
 def notify(text, kb=None):
     def go(chat):
