@@ -806,23 +806,33 @@ def shutdown_notice():
            text=f"🔴 <b>{esc(_bot_label())}</b> बंद होतोय ({ist} IST) — redeploy/restart.")
 
 from concurrent.futures import ThreadPoolExecutor
-_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix='upd')
-_UID_LOCKS = {}
+_POOL = ThreadPoolExecutor(max_workers=12, thread_name_prefix='upd')
+
+def _dump_stack(tid, label):
+    """Called by a watchdog when an update is still running after 6s: prints WHERE it is stuck."""
+    import sys, traceback
+    fr = sys._current_frames().get(tid)
+    if fr:
+        print(f"[hub] ⏳ {label} अजून चालू आहे (6s+) — अडकलेली जागा:\n" + ''.join(traceback.format_stack(fr)[-8:]), flush=True)
 
 def _run_update(u):
-    """One update, in a worker thread: a slow handler (Mongo / DB lock / Telegram timeout) can no longer
-    freeze the polling loop. Updates of the same user still run strictly in order."""
+    """One update, in its own worker thread: a slow handler can no longer freeze the polling loop,
+    and updates do NOT queue behind each other any more."""
     who = ((u.get('message') or {}).get('from') or (u.get('callback_query') or {}).get('from') or {}).get('id', 0)
     kind = 'cb' if 'callback_query' in u else ('msg' if 'message' in u else '?')
+    label = f"{kind} from {who}" + (f" data={u['callback_query'].get('data')}" if kind == 'cb' else '')
     t0 = time.time()
-    with _UID_LOCKS.setdefault(who, threading.Lock()):
-        try:
-            handle_update(u)
-        except Exception as e:
-            print('update error:', repr(e), flush=True)
+    wd = threading.Timer(6, _dump_stack, args=(threading.get_ident(), label))
+    wd.daemon = True
+    wd.start()
+    try:
+        handle_update(u)
+    except Exception as e:
+        print('update error:', repr(e), flush=True)
+    finally:
+        wd.cancel()
     dt = time.time() - t0
-    # never log message text (it can be a password / 2FA code)
-    print(f"[hub] {kind} from {who} handled in {dt:.1f}s" + (" ⚠️ SLOW" if dt > 5 else ''), flush=True)
+    print(f"[hub] {label} handled in {dt:.1f}s" + (" ⚠️ SLOW" if dt > 5 else ''), flush=True)
 
 def bot_loop():
     offset, cleared, last409, n409 = 0, False, 0, 0

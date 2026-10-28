@@ -125,6 +125,7 @@ def _on_sigterm(signum, frame):
 if __name__ == "__main__":
     import threading, time, traceback
     signal.signal(signal.SIGTERM, _on_sigterm)
+    sys.setswitchinterval(0.002)          # switch threads more often -> bot / web replies never wait behind a busy thread
     from waitress import create_server
     # Koyeb/Render may inject PORT=8000 while the service's health check is set to 8080 (or the other way round).
     # So listen on PORT *and* the usual 8080 / 8000 — whichever the platform checks, it gets an answer.

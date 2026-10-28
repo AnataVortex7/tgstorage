@@ -167,29 +167,63 @@ def get_db():
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
+_shared = [None]
+
+def _conn():
+    """One long-lived connection for the hot helpers (used only while holding _db_lock).
+    Before, every single query opened a new connection + PRAGMAs + closed it — thousands of times during a scan."""
+    if _shared[0] is None:
+        _shared[0] = get_db()
+    return _shared[0]
+
 def db_exec(sql, params=()):
     """Runs a write; returns the number of rows affected."""
     with _db_lock:
-        conn = get_db()
-        cur = conn.execute(sql, params)
-        conn.commit()
-        n = cur.rowcount
-        conn.close()
-        return n
+        conn = _conn()
+        try:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount
+        except Exception:
+            _shared[0] = None
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
 
 def db_many(sql, params=()):
     with _db_lock:
-        conn = get_db()
-        rows = conn.execute(sql, params).fetchall()
-        conn.close()
-        return rows
+        conn = _conn()
+        try:
+            return conn.execute(sql, params).fetchall()
+        except Exception:
+            _shared[0] = None
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
 
 def db_one(sql, params=()):
     with _db_lock:
-        conn = get_db()
-        row = conn.execute(sql, params).fetchone()
-        conn.close()
-        return row
+        conn = _conn()
+        try:
+            return conn.execute(sql, params).fetchone()
+        except Exception:
+            _shared[0] = None
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+
+def _low_priority():
+    """Background threads (indexer, snapshots) get a lower OS priority than the bot / web threads."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+    except Exception:
+        pass
 
 def init_db():
     with _db_lock:
@@ -1369,6 +1403,7 @@ def snapshot_save():
         coll.replace_one({"_id": f"files_{n}"},
                          {"_id": f"files_{n}", "rows": rows[i:i + CHUNK]}, upsert=True)
         n += 1
+        time.sleep(0.5)          # don't hog the CPU / GIL while the bot is answering
     coll.delete_many({"_id": {"$in": [f"files_{k}" for k in range(n, n + 50)]}})
     coll.replace_one({"_id": "meta"},
                      {"_id": "meta", "cursors": cursors, "groups": groups, "topics": topics,
@@ -1421,8 +1456,9 @@ def snapshot_load():
 def run_snapshotter():
     """Saves the snapshot at most every 2 minutes, only when something changed."""
     global _snapshot_dirty
+    _low_priority()
     while True:
-        time.sleep(120)
+        time.sleep(300)
         if _snapshot_dirty and MONGO_URI:
             _snapshot_dirty = False
             try:
@@ -1474,6 +1510,18 @@ async def _latest_msg_id(gid, cl=None):
         pass
     return mid
 
+SCAN_PAUSE = float(os.environ.get("SCAN_PAUSE", "1.5"))
+
+def _index_batch(gid, messages, cursor):
+    """Runs in a worker thread at low priority: index one GetMessages batch, then move the cursor."""
+    _low_priority()
+    n = 0
+    for m in messages:
+        if _handle_raw_message(gid, m):
+            n += 1
+    meta_set(f"cursor_{gid}", cursor)
+    return n
+
 async def _scan_group(gid):
     global _snapshot_dirty
     _scanning.add(gid)
@@ -1497,12 +1545,9 @@ async def _scan_group(gid):
             ids = [tg_raw.types.InputMessageID(id=i) for i in range(lo, hi)]
             r = await _invoke_safe(
                 tg_raw.functions.channels.GetMessages(channel=ch, id=ids), cl)
-            for m in r.messages:
-                if _handle_raw_message(gid, m):
-                    found += 1
-            meta_set(f"cursor_{gid}", hi - 1)
+            found += await asyncio.get_running_loop().run_in_executor(None, _index_batch, gid, r.messages, hi - 1)
             _scan_progress[gid] = {"done": hi - 1, "total": latest}
-            await asyncio.sleep(0.6)      # faster catch-up; FloodWait is handled by _invoke_safe
+            await asyncio.sleep(SCAN_PAUSE)   # leave CPU for the bot / web; FloodWait is handled by _invoke_safe
         _snapshot_dirty = True
         print(f"[index] {gid}: DEBUG counters={_dbg} samples={_dbg_samples}", flush=True)
         print(f"[index] {gid}: scan done up to msg {latest}: +{found} files, "
