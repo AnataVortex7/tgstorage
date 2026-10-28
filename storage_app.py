@@ -471,7 +471,7 @@ def _save_session(session_string):
 # (every 10s) and releases it on SIGTERM; the new instance waits until the lease is
 # free (or stale) BEFORE it connects to Telegram. The web UI keeps working meanwhile.
 INSTANCE_ID = secrets.token_hex(6)
-LOCK_STALE = 35               # seconds without heartbeat -> old instance is dead
+LOCK_STALE = 25               # seconds without heartbeat -> old instance is dead
 _lock_started = False
 
 def _lock_coll():
@@ -521,21 +521,29 @@ def _release_lock():
         pass
 
 def _on_sigterm(signum, frame):
-    """Deploy/stop: log out of Telegram cleanly and free the lease so the NEW instance can start at once."""
+    """Deploy/stop: log out of Telegram cleanly and free the lease so the NEW instance can start at once.
+    Order matters: stop clients -> RELEASE THE LOCK -> only then the slow stuff (snapshot). Before, the snapshot
+    ran first, the platform killed us before the lock was freed, and the new instance waited 60-90 s
+    (files / commands dead during that time)."""
     print("[shutdown] SIGTERM — stopping Telegram clients, releasing lock", flush=True)
     try:
         if _tg_loop:
             for c in (_tg_user, _tg_client):
                 if c is not None:
                     try:
-                        asyncio.run_coroutine_threadsafe(c.stop(), _tg_loop).result(timeout=4)
+                        asyncio.run_coroutine_threadsafe(c.stop(), _tg_loop).result(timeout=3)
                     except Exception:
                         pass
-        if _snapshot_dirty and MONGO_URI:
-            snapshot_save()
     except Exception as e:
         print(f"[shutdown] {e}", flush=True)
     _release_lock()
+    try:
+        if _snapshot_dirty and MONGO_URI:
+            t = threading.Thread(target=snapshot_save, daemon=True)
+            t.start()
+            t.join(5)
+    except Exception as e:
+        print(f"[shutdown] {e}", flush=True)
     os._exit(0)
 
 def _delete_session():

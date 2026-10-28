@@ -822,6 +822,9 @@ def handle_update(u):
             return                               # अनोळखी → काहीच उत्तर नाही
         AUTH.touch(uid)
         if STORAGE is not None and STORAGE.bot_api_claims(u):
+            if not STORAGE._tg_ready.is_set():     # Pyrogram side still starting (old instance stopping) -> say so
+                tg('answerCallbackQuery', callback_query_id=cb['id'], show_alert='true',
+                   text='⏳ Telegram client अजून सुरू होतोय (redeploy नंतर 1–2 मिनिटं). थोड्या वेळाने पुन्हा दाबा.')
             return                               # storage (Pyrogram side) answers this button
         msg = cb.get('message') or {}
         on_callback(cb['id'], uid, msg.get('chat', {}).get('id'), msg.get('message_id'), cb.get('data', ''))
@@ -833,6 +836,9 @@ def handle_update(u):
         if AUTH.is_admin(uid):
             AUTH.touch(uid)
             if STORAGE is not None and STORAGE.bot_api_claims(u):
+                if not STORAGE._tg_ready.is_set():
+                    tg('sendMessage', chat_id=m['chat']['id'],
+                       text='⏳ Telegram client अजून सुरू होतोय (redeploy नंतर 1–2 मिनिटं). थोड्या वेळाने पुन्हा पाठवा.')
                 return                           # storage command / user-login conversation
             on_message(uid, m['chat']['id'], (m.get('text') or '').strip(), m.get('message_id'))
         else:

@@ -105,21 +105,25 @@ def application(environ, start_response):
 def _on_sigterm(signum, frame):
     if not _loaded:
         os._exit(0)
-    try:
-        hub_app.shutdown_notice()
-    except Exception as e:
-        print(f"[shutdown] notice: {e}", flush=True)
-    try:
-        import tgweb
-        if tgweb.M:
-            try:
-                tgweb.M.call(tgweb.M.stop_all(), timeout=5)
-            except Exception:
-                pass
-            tgweb.M._release()
-    except Exception as e:
-        print(f"[shutdown] hub: {e}", flush=True)
-    storage_app._on_sigterm(signum, frame)      # stops Pyrogram, saves index snapshot, frees lock, exits
+    import threading
+
+    def _hub_side():                       # runs in parallel with the Telegram shutdown, never blocks it
+        try:
+            hub_app.shutdown_notice()
+        except Exception as e:
+            print(f"[shutdown] notice: {e}", flush=True)
+        try:
+            import tgweb
+            if tgweb.M:
+                try:
+                    tgweb.M.call(tgweb.M.stop_all(), timeout=5)
+                except Exception:
+                    pass
+                tgweb.M._release()
+        except Exception as e:
+            print(f"[shutdown] hub: {e}", flush=True)
+    threading.Thread(target=_hub_side, daemon=True).start()
+    storage_app._on_sigterm(signum, frame)      # stops Pyrogram, FREES THE LOCK, saves snapshot, exits
 
 
 if __name__ == "__main__":
