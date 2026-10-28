@@ -451,6 +451,18 @@ def _load_session():
         print(f"[session] load failed: {e}", flush=True)
         return ""
 
+def _session_user_id(sess):
+    """Telegram user/bot id stored inside a Pyrogram session string (None if it can not be read)."""
+    import base64, struct
+    try:
+        raw = base64.urlsafe_b64decode(sess + "=" * (-len(sess) % 4))
+        for fmt in (">BI?256sQ?", ">B?256sQ?"):
+            if struct.calcsize(fmt) == len(raw):
+                return struct.unpack(fmt, raw)[-2]
+    except Exception:
+        pass
+    return None
+
 def _save_session(session_string):
     if not MONGO_URI or not session_string:
         return
@@ -602,6 +614,17 @@ def run_telegram():
         _loop = asyncio.get_running_loop()
         await _loop.run_in_executor(None, _acquire_lock)      # wait for the OLD instance to stop
         sess = await _loop.run_in_executor(None, _load_session)
+        # A saved session that belongs to ANOTHER bot (BOT_TOKEN was changed) would silently keep running the OLD bot:
+        # "Send to Telegram" then arrives from the old bot and the Hub's user-login messages never reach us.
+        want = BOT_TOKEN.split(":", 1)[0].strip()
+        sid = _session_user_id(sess) if sess else None
+        if sess and sid is not None and str(sid) != want:
+            print(f"[session] saved session belongs to bot {sid}, but BOT_TOKEN is bot {want} — "
+                  f"discarding it and logging in with BOT_TOKEN"
+                  + (" (remove the SESSION_STRING env variable!)" if os.environ.get("SESSION_STRING", "").strip() else ""),
+                  flush=True)
+            await _loop.run_in_executor(None, _delete_session)
+            sess = ""
         print(f"[session] using saved session: {bool(sess)}", flush=True)
 
         _tg_client = Client(
@@ -850,6 +873,14 @@ def run_telegram():
                 await _loop.run_in_executor(None, _save_session, new_sess)
             except Exception as e:
                 print(f"[session] export failed: {e}", flush=True)
+        try:
+            me_bot = await _tg_client.get_me()
+            print(f"[tg] bot client = @{me_bot.username} ({me_bot.id})", flush=True)
+            _bot_info.update(id=me_bot.id, username=me_bot.username or "")
+            if str(me_bot.id) != want:
+                print(f"[tg] WARNING: Pyrogram runs as bot {me_bot.id} but BOT_TOKEN is bot {want}", flush=True)
+        except Exception as e:
+            print(f"[tg] get_me failed: {e}", flush=True)
         usess = await _loop.run_in_executor(None, _load_user_session)
         if usess:
             for attempt in range(1, 13):
@@ -1008,6 +1039,7 @@ async def _bridge_sweeper():
 # phone number / OTP / password. The user's messages with OTP / password are
 # deleted from the chat right after they are read.
 _user_status = {"ready": False, "me": "", "error": ""}
+_bot_info = {"id": 0, "username": ""}
 _login_state = {}            # owner id -> {"step", "client", "phone", "hash", "tries", "ts"}
 LOGIN_TTL = 600
 
@@ -1336,7 +1368,7 @@ def _handle_raw_message(gid, m):
             _dbg_samples.append({"msg_id": m.id, "topic_id_guess": tid,
                                  "reply_to": repr(getattr(m, "reply_to", None))[:300]})
         return False
-    filename = f"file_{m.id}"
+    filename = f"file_{m.id}" + (mimetypes.guess_extension(getattr(doc, "mime_type", "") or "") or "")
     for attr in doc.attributes:
         if isinstance(attr, tg_raw.types.DocumentAttributeFilename):
             filename = attr.file_name
@@ -1688,14 +1720,17 @@ LOGIN_HTML = r"""<!DOCTYPE html>
 <title>Backup Browser — Login</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif;
-  min-height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:#161b22;border:1px solid #30363d;border-radius:12px;
+body{background:radial-gradient(1200px 600px at 50% -10%,#16314f 0,#0d1117 60%);color:#e6edf3;font-family:system-ui,sans-serif;
+  min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.45);
   padding:2rem 2.5rem;width:100%;max-width:380px}
 .logo{text-align:center;font-size:2.5rem;margin-bottom:.5rem}
+.pw{position:relative}.pw input{padding-right:2.8rem!important}
+.eye{position:absolute;right:.4rem;top:.35rem;background:none;border:0;color:#8b949e;font-size:1.1rem;cursor:pointer;padding:.3rem}
+.btn:disabled{opacity:.6;cursor:wait}
 h2{text-align:center;font-size:1.3rem;color:#58a6ff;margin-bottom:1.5rem}
 label{font-size:.85rem;color:#8b949e;display:block;margin-bottom:.4rem}
-input[type=password]{width:100%;padding:.7rem 1rem;background:#0d1117;
+input[type=password],input[type=text]{width:100%;padding:.7rem 1rem;background:#0d1117;
   border:1px solid #30363d;border-radius:8px;color:#e6edf3;font-size:1rem;
   outline:none;margin-bottom:1rem}
 input:focus{border-color:#58a6ff}
@@ -1734,9 +1769,12 @@ input:focus{border-color:#58a6ff}
   {% endif %}
   {% else %}
     {% if error %}<div class="err">{{ error }}</div>{% endif %}
-    <form method="POST" action="/login">
-      <label>Password</label>
-      <input type="password" name="password" placeholder="Enter password" autofocus>
+    <form method="POST" action="/login" onsubmit="var b=this.querySelector('.btn');b.disabled=true;b.textContent='⏳ Checking…'">
+      <label for="pw">Password</label>
+      <div class="pw">
+        <input id="pw" type="password" name="password" placeholder="Enter password" autocomplete="current-password" autofocus required>
+        <button type="button" class="eye" title="Show / hide" onclick="var i=document.getElementById('pw');i.type=i.type==='password'?'text':'password'">👁</button>
+      </div>
       <button class="btn btn-pw" type="submit">🔑 Login</button>
     </form>
     {% if auth_bot_name %}
@@ -1829,10 +1867,13 @@ EXPLORER_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Backup Explorer</title>
 <style>
-:root{--bg:#f3f3f3;--content:#fff;--text:#1b1b1b;--muted:#6b6b6b;--line:#e1e1e1;--hover:#eaf3fb;--sel:#cce8ff;--selb:#99d1ff;--menu:#fff;--shadow:0 8px 24px rgba(0,0,0,.18)}
-@media(prefers-color-scheme:dark){:root{--bg:#202020;--content:#191919;--text:#f1f1f1;--muted:#a0a0a0;--line:#333;--hover:#2a2d31;--sel:#0b3a5e;--selb:#1a6aa8;--menu:#2b2b2b;--shadow:0 8px 24px rgba(0,0,0,.6)}}
+:root{--bg:#f3f3f3;--content:#fff;--text:#1b1b1b;--muted:#6b6b6b;--line:#e1e1e1;--hover:#eaf3fb;--sel:#cce8ff;--selb:#99d1ff;--menu:#fff;--shadow:0 8px 24px rgba(0,0,0,.18);--acc:#0067c0}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#202020;--content:#191919;--text:#f1f1f1;--muted:#a0a0a0;--line:#333;--hover:#2a2d31;--sel:#0b3a5e;--selb:#1a6aa8;--menu:#2b2b2b;--shadow:0 8px 24px rgba(0,0,0,.6)}}
+:root[data-theme=dark]{--bg:#202020;--content:#191919;--text:#f1f1f1;--muted:#a0a0a0;--line:#333;--hover:#2a2d31;--sel:#0b3a5e;--selb:#1a6aa8;--menu:#2b2b2b;--shadow:0 8px 24px rgba(0,0,0,.6)}
 *{box-sizing:border-box;margin:0}
 html,body{height:100%}
+:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.ib,.cb,.it,.tn,.mi,.chip{transition:background .12s,opacity .12s}
 body{font:14px/1.35 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif;background:var(--bg);color:var(--text);overflow:hidden}
 #app{display:flex;flex-direction:column;height:100vh;height:100dvh}
 .bar{display:flex;align-items:center;gap:4px;padding:6px 10px;background:var(--bg)}
@@ -1877,7 +1918,26 @@ body{font:14px/1.35 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif;backgro
 .details .ic{width:22px;height:22px}
 .details .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .details .sz,.details .ty{color:var(--muted);font-size:13px}
-.empty{color:var(--muted);padding:30px;text-align:center;width:100%}
+.empty{color:var(--muted);padding:48px 30px;text-align:center;width:100%}
+.empty b{display:block;font-size:42px;margin-bottom:6px;font-weight:400}
+#content.loading{opacity:.55;transition:opacity .15s}
+.chips{display:flex;gap:6px;padding:6px 12px;overflow-x:auto;scrollbar-width:none;background:var(--content);border-bottom:1px solid var(--line)}
+.chip{flex:none;padding:3px 12px;border-radius:14px;border:1px solid var(--line);background:none;color:inherit;font:inherit;font-size:13px;cursor:pointer}
+.chip:hover{background:var(--hover)}
+.chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.selmode .it{position:relative}
+.selmode .it::after{content:'';position:absolute;top:6px;left:6px;width:18px;height:18px;border-radius:50%;border:2px solid var(--muted);background:var(--content)}
+.selmode .it.sel::after{content:'✓';background:var(--acc);border-color:var(--acc);color:#fff;font-size:12px;line-height:14px;text-align:center}
+.selmode.details .it::after{top:50%;transform:translateY(-50%);left:auto;right:8px}
+#dx{white-space:pre-line}
+#viewer .nv{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:64px;font-size:26px;z-index:2;background:rgba(0,0,0,.35);justify-content:center}
+#viewer #vp{left:8px}#viewer #vn{right:8px}
+#vc{color:#bbb;font-size:12px;margin-left:8px;white-space:nowrap}
+#vbody img{cursor:zoom-in;transition:transform .15s}
+#vbody img.z{max-width:none;max-height:none;cursor:zoom-out}
+#vbody{overflow:auto}
+.skel{height:14px;border-radius:4px;background:linear-gradient(90deg,var(--line),var(--hover),var(--line));background-size:200% 100%;animation:sk 1.2s infinite}
+@keyframes sk{to{background-position:-200% 0}}
 #preview{width:340px;border-left:1px solid var(--line);padding:10px;overflow:auto;flex:none}
 #preview[hidden]{display:none}
 #preview video,#preview img,#preview iframe,#preview audio{width:100%;border:0;border-radius:6px}
@@ -1901,7 +1961,7 @@ dialog p{color:var(--muted);margin-bottom:10px;font-size:13px;word-break:break-w
 dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--content);color:inherit;font:inherit;margin-bottom:12px}
 .btns{display:flex;flex-direction:row-reverse;gap:8px}
 .btns button{padding:7px 16px;border-radius:6px;border:1px solid var(--line);background:var(--content);color:inherit;font:inherit;cursor:pointer}
-.btns .primary{background:#0067c0;border-color:#0067c0;color:#fff}
+.btns .primary{background:var(--acc);border-color:var(--acc);color:#fff}
 .btns .danger{background:#c42b1c;border-color:#c42b1c;color:#fff}
 #toast{position:fixed;left:50%;bottom:44px;transform:translateX(-50%);background:#323232;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;z-index:80;max-width:90vw;box-shadow:var(--shadow)}
 #toast[hidden]{display:none}
@@ -1917,7 +1977,12 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
 #vbody iframe{width:100%;height:100%;border:0;background:#fff;border-radius:6px}
 #st-i{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 #navbtn{display:none}
+.btns .primary,.chip.on{background:var(--acc)}
 @media(max-width:760px){
+  .cmd .cb{padding:6px 8px}
+  #fw,#gadd{display:none}
+  .addr{min-width:70px}
+  #viewer .nv{width:36px;height:52px}
   #navbtn{display:inline-block}
   #nav{position:fixed;left:0;top:96px;bottom:30px;z-index:40;display:none;box-shadow:var(--shadow);width:270px}
   #nav.open{display:block}
@@ -1943,6 +2008,7 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
     <select id="grp" title="Group"></select>
     <button class="ib" id="gadd" title="Add group">＋</button>
     <div class="addr" id="addr"></div>
+    <button class="ib" id="th" title="Theme: auto / light / dark">🌓</button>
     <button class="ib" id="lo" title="Logout">⏻</button>
     <input id="q" type="search" placeholder="Search files…" autocomplete="off">
   </div>
@@ -1955,12 +2021,14 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
     <button class="cb" id="c-dl"><span>⬇</span><span class="lbl">Download</span></button>
     <button class="cb" id="c-del"><span>🗑</span><span class="lbl">Delete</span></button>
     <span class="vsep"></span>
+    <button class="cb" id="c-sel"><span>☑</span><span class="lbl">Select</span></button>
     <button class="cb" id="c-sort"><span>⇅</span><span class="lbl">Sort</span></button>
     <button class="cb" id="c-view"><span>▦</span><span class="lbl">View</span></button>
     <button class="cb" id="c-more"><span>⋯</span></button>
     <span class="sp"></span>
     <button class="cb" id="c-prev"><span>◧</span><span class="lbl">Preview</span></button>
   </div>
+  <div class="chips" id="chips"></div>
   <div class="main">
     <aside id="nav"><div id="tree"></div></aside>
     <section id="content" class="icons" tabindex="0"></section>
@@ -1976,9 +2044,10 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
   </div>
 </div>
 <div id="viewer" hidden>
-  <div class="vh"><span id="vt"></span><span class="sp"></span>
+  <div class="vh"><span id="vt"></span><span id="vc"></span><span class="sp"></span>
     <button class="cb" id="vdl">⬇ <span class="lbl">Download</span></button>
     <button class="cb" id="vx">✕ <span class="lbl">Close</span></button></div>
+  <button class="cb nv" id="vp" title="Previous (←)">‹</button><button class="cb nv" id="vn" title="Next (→)">›</button>
   <div id="vbody"></div>
 </div>
 <div id="menu" hidden></div>
@@ -2008,9 +2077,12 @@ const COARSE = matchMedia('(pointer: coarse)').matches;
 const store = { get(k, d) { try { return localStorage.getItem(k) || d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
 
 const S = { path: '', search: '', folders: [], files: [], items: [], map: new Map(), topicId: null,
-  sel: new Set(), anchor: null, view: store.get('xview', 'icons'), sort: store.get('xsort', 'name'),
+  sel: new Set(), anchor: null, filter: 'all', selMode: false, recent: false, pvKey: '', view: store.get('xview', 'icons'), sort: store.get('xsort', 'name'),
   desc: store.get('xdesc', '') === '1', clip: null, preview: false, idx: '',
   group: null, groups: [], ver: null, topics: null, interval: 60, lastCheck: 0, minIv: 10, maxIv: 3600 };
+const THEMES = ['auto', 'light', 'dark'];
+function applyTheme() { const t = store.get('xtheme', 'auto'); if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = t; const b = $('#th'); if (b) b.title = 'Theme: ' + t; }
+applyTheme();
 const gq = () => '?g=' + encodeURIComponent(S.group);
 
 /* ---------- icons ---------- */
@@ -2073,12 +2145,28 @@ function tag() {
   S.files.forEach(f => { f.key = 'f:' + f.id; f.type = 'file'; });
 }
 const cmpName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+const CATS = [['all', 'All'], ['video', '🎬 Videos'], ['image', '🖼 Images'], ['audio', '🎵 Audio'], ['doc', '📄 Documents'], ['archive', '🗜 Archives']];
+function cat(x) {
+  const e = x.ext || '', m = (x.mime || '').toLowerCase();
+  if (m.startsWith('video/') || /^(mp4|mkv|avi|mov|webm|m4v)$/.test(e)) return 'video';
+  if (m.startsWith('image/') || /^(png|jpe?g|gif|webp|bmp|svg)$/.test(e)) return 'image';
+  if (m.startsWith('audio/') || /^(mp3|wav|m4a|ogg|flac|aac)$/.test(e)) return 'audio';
+  if (/^(zip|rar|7z|tar|gz|tgz|bz2|xz)$/.test(e)) return 'archive';
+  if (/^(pdf|docx?|xlsx?|pptx?|txt|md|csv|json|html?|odt|rtf)$/.test(e)) return 'doc';
+  return 'other';
+}
+function drawChips() {
+  const n = {}; S.files.forEach(f => { const c = cat(f); n[c] = (n[c] || 0) + 1; });
+  const box = $('#chips'); box.hidden = !S.files.length;
+  box.innerHTML = CATS.filter(([k]) => k === 'all' || n[k]).map(([k, l]) => '<button class="chip' + (S.filter === k ? ' on' : '') + '" data-f="' + k + '">' + l + (k !== 'all' ? ' ' + n[k] : '') + '</button>').join('');
+}
 function buildItems() {
-  const items = [...S.folders, ...S.files];
+  const items = [...S.folders, ...S.files.filter(f => S.filter === 'all' || cat(f) === S.filter)];
   items.sort((a, b) => {
     if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
     let r;
-    if (S.sort === 'size') r = (a.size || 0) - (b.size || 0) || cmpName(a, b);
+    if (S.sort === 'new') r = ((b.id || 0) - (a.id || 0)) || cmpName(a, b);
+    else if (S.sort === 'size') r = (a.size || 0) - (b.size || 0) || cmpName(a, b);
     else if (S.sort === 'type') r = (a.ext || '').localeCompare(b.ext || '') || cmpName(a, b);
     else r = cmpName(a, b);
     return S.desc ? -r : r;
@@ -2088,10 +2176,14 @@ function buildItems() {
 const selItems = () => [...S.sel].map(k => S.map.get(k)).filter(Boolean);
 const selFiles = () => selItems().filter(i => i.type === 'file');
 
+let navSeq = 0;
 async function go(path, push = true) {
+  const my = ++navSeq; $('#content').classList.add('loading');
   const r = await api('/api/list?path=' + encodeURIComponent(path));
+  if (my !== navSeq) return;
+  $('#content').classList.remove('loading');
   if (r.ok === false) { toast('❌ ' + r.msg, true); return; }
-  S.search = ''; $('#q').value = '';
+  S.search = ''; S.recent = false; S.filter = 'all'; $('#q').value = '';
   S.path = r.path; S.topicId = r.topic_id; S.folders = r.folders; S.files = r.files; tag();
   S.sel.clear(); S.anchor = null;
   if (push) history.pushState({ p: S.path }, '', '/browse/' + enc(S.path) + gq());
@@ -2099,19 +2191,29 @@ async function go(path, push = true) {
   render(); drawAddr(); revealTree(S.path); closeNav();
 }
 async function runSearch(q) {
+  const my = ++navSeq;
   const r = await api('/api/search?q=' + encodeURIComponent(q));
+  if (my !== navSeq) return;
   if (r.ok === false) { toast('❌ ' + r.msg, true); return; }
-  S.search = q; S.folders = []; S.files = r.files; S.topicId = null; tag(); S.sel.clear(); S.anchor = null;
+  if (r.truncated) toast('⚠ पहिले ' + r.files.length + ' results — search अजून नेमका कर');
+  S.search = q; S.recent = false; S.filter = 'all'; S.folders = []; S.files = r.files; S.topicId = null; tag(); S.sel.clear(); S.anchor = null;
   render(); drawAddr();
 }
-const refresh = () => S.search ? runSearch(S.search) : go(S.path, false);
+async function showRecent() {
+  const my = ++navSeq; const r = await api('/api/recent');
+  if (my !== navSeq) return;
+  if (r.ok === false) { toast('❌ ' + r.msg, true); return; }
+  S.search = ''; S.recent = true; S.filter = 'all'; $('#q').value = ''; S.folders = []; S.files = r.files; S.topicId = null; tag(); S.sel.clear(); S.anchor = null;
+  render(); drawAddr();
+}
+const refresh = () => S.search ? runSearch(S.search) : S.recent ? showRecent() : go(S.path, false);
 const parentOf = p => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
 
 /* ---------- render ---------- */
 function itemHtml(i) {
   const ic = i.type === 'dir' ? FOLDER : fileIcon(i.ext);
   const cut = S.clip && S.clip.mode === 'cut' && i.type === 'file' && S.clip.set.has(i.id) ? ' cut' : '';
-  const sub = i.type === 'file' && S.search ? '<small>' + esc(i.folder) + '</small>' : '';
+  const sub = i.type === 'file' && (S.search || S.recent) ? '<small>' + esc(i.folder) + '</small>' : '';
   const size = i.type === 'dir' ? '' : fmt(i.size);
   const typ = i.type === 'dir' ? 'File folder' : (i.ext ? i.ext.toUpperCase() + ' file' : 'File');
   return '<div class="it' + (S.sel.has(i.key) ? ' sel' : '') + cut + '" data-key="' + esc(i.key) + '" title="' + esc(i.name) + '">' +
@@ -2120,17 +2222,19 @@ function itemHtml(i) {
 function render() {
   S.items = buildItems(); S.map = new Map(S.items.map(i => [i.key, i]));
   for (const k of [...S.sel]) if (!S.map.has(k)) S.sel.delete(k);
-  const c = $('#content'); c.className = S.view;
+  drawChips();
+  const c = $('#content'); c.className = S.view + (S.selMode ? ' selmode' : '');
   let h = '';
   if (S.view === 'details') {
     const ar = k => S.sort === k ? (S.desc ? ' ▾' : ' ▴') : '';
     h += '<div class="hd"><div></div><div data-sort="name">Name' + ar('name') + '</div><div data-sort="size">Size' + ar('size') + '</div><div data-sort="type">Type' + ar('type') + '</div></div>';
   }
   for (const i of S.items) h += itemHtml(i);
-  if (!S.items.length) h += '<div class="empty">' + (S.search ? 'No files found.' : 'This folder is empty.') + '</div>';
+  if (!S.items.length) h += '<div class="empty"><b>' + (S.search ? '🔍' : '📂') + '</b>' + (S.search ? 'No files found.' : S.filter !== 'all' ? 'या प्रकारच्या files नाहीत.' : 'This folder is empty.') + '</div>';
   c.innerHTML = h;
   $('#v-d').classList.toggle('on', S.view === 'details'); $('#v-i').classList.toggle('on', S.view === 'icons');
   $('#c-prev').classList.toggle('on', S.preview);
+  $('#c-sel').classList.toggle('on', S.selMode);
   updateBar();
 }
 function paintSel() { $$('#content .it').forEach(el => el.classList.toggle('sel', S.sel.has(el.dataset.key))); }
@@ -2146,7 +2250,8 @@ function updateBar() {
 }
 function drawAddr() {
   const a = $('#addr'); let h = '<a data-p="">🏠 Backup</a>';
-  if (S.search) h += '<span class="sep">›</span><span style="padding:3px 6px">Search: ' + esc(S.search) + '</span>';
+  if (S.recent) h += '<span class="sep">›</span><span style="padding:3px 6px">🕘 Recent files</span>';
+  else if (S.search) h += '<span class="sep">›</span><span style="padding:3px 6px">Search: ' + esc(S.search) + '</span>';
   else { let acc = ''; for (const p of (S.path ? S.path.split('/') : [])) { acc = acc ? acc + '/' + p : p; h += '<span class="sep">›</span><a data-p="' + esc(acc) + '">' + esc(p) + '</a>'; } }
   a.innerHTML = h; a.scrollLeft = a.scrollWidth;
 }
@@ -2157,7 +2262,7 @@ function drawIdx() {
   if (S.tg === false && !/telegram/.test(s || '')) parts.push('⚠ Telegram connect होत आहे…');
   if (S.user === false) parts.push('⚠ User login नाही — files दिसणार नाहीत; bot ला /userlogin पाठव');
   // this folder
-  if (S.search) parts.push('🔎 ' + plural(S.files.length, 'result'));
+  if (S.search || S.recent) parts.push((S.recent ? '🕘 ' : '🔎 ') + plural(S.files.length, S.recent ? 'file' : 'result'));
   else if (S.path) {
     const sub = S.folders.reduce((a, f) => a + (f.count || 0), 0);
     parts.push('📁 ' + plural(S.files.length, 'file') + (sub ? ' (+' + n(sub) + ' in subfolders)' : ''));
@@ -2199,7 +2304,8 @@ function openItem(i) {
 
 /* ---------- viewer (same tab, Close button, Back/Esc also closes) ---------- */
 const viewer = $('#viewer');
-function openViewer(i) {
+function viewList() { return S.items.filter(x => x.type === 'file' && x.view); }
+function showViewer(i) {
   const url = '/stream/' + i.id + '/' + encodeURIComponent(i.name) + gq(), k = kind(i);
   const body = k === 'video' ? '<video controls autoplay playsinline src="' + url + '"></video>'
     : k === 'audio' ? '<audio controls autoplay src="' + url + '"></audio>'
@@ -2208,7 +2314,19 @@ function openViewer(i) {
   $('#vt').textContent = i.name;
   $('#vdl').onclick = () => downloadFiles([i]);
   $('#vbody').innerHTML = body;
-  viewer.hidden = false;
+  const L = viewList(), n = L.findIndex(x => x.key === i.key);
+  S.vcur = i.key;
+  $('#vc').textContent = L.length > 1 && n >= 0 ? (n + 1) + ' / ' + L.length : '';
+  $('#vp').hidden = $('#vn').hidden = L.length < 2;
+  const img = $('#vbody img'); if (img) img.onclick = () => img.classList.toggle('z');
+}
+function stepViewer(d) {
+  const L = viewList(); if (L.length < 2) return;
+  const n = L.findIndex(x => x.key === S.vcur);
+  showViewer(L[(n + d + L.length) % L.length]);
+}
+function openViewer(i) {
+  showViewer(i); viewer.hidden = false;
   history.pushState({ p: S.path, viewer: true }, '');
 }
 function closeViewer(fromPop) {
@@ -2217,6 +2335,8 @@ function closeViewer(fromPop) {
   $('#vbody').innerHTML = '';                 // stops video/audio
   if (!fromPop && history.state && history.state.viewer) { S.closing = true; history.back(); }
 }
+$('#vp').onclick = () => stepViewer(-1);
+$('#vn').onclick = () => stepViewer(1);
 $('#vx').onclick = () => closeViewer(false);
 
 /* ---------- actions ---------- */
@@ -2263,7 +2383,7 @@ function setClip(mode) {
   S.clip = { mode, ids: f.map(x => x.id), set: new Set(f.map(x => x.id)) };
   render(); toast((mode === 'cut' ? '✂ Cut: ' : '⧉ Copied: ') + f.length + ' — folder उघडून Paste कर');
 }
-const canPaste = () => !!(S.clip && S.topicId != null && !S.search);
+const canPaste = () => !!(S.clip && S.topicId != null && !S.search && !S.recent);
 async function paste() {
   if (!S.clip) return;
   if (!canPaste()) { toast('इथे paste करता येत नाही — हा topic folder नाही', true); return; }
@@ -2277,6 +2397,13 @@ async function paste() {
   if (mode === 'cut') S.clip = null;
   await refresh(); toast('✅ ' + done + ' file(s) ' + (mode === 'cut' ? 'moved' : 'copied'));
 }
+function props() {
+  const it = selItems(); if (it.length !== 1) return; const x = it[0];
+  const t = x.type === 'dir' ? ['Folder: ' + x.name, 'Path: ' + x.path, 'Files (incl. subfolders): ' + (x.count || 0)]
+    : ['Name: ' + x.name, 'Size: ' + fmt(x.size) + ' (' + (x.size || 0).toLocaleString() + ' bytes)', 'Type: ' + (x.mime || x.ext || '—'), 'Folder: ' + (x.folder || '/'), 'Telegram message id: ' + x.id];
+  dialog({ title: 'Properties', text: t.join('\n'), ok: 'Close' });
+}
+function setSelMode(on) { S.selMode = on; if (!on) { S.sel.clear(); S.anchor = null; } render(); }
 function setView(v) { S.view = v; store.set('xview', v); render(); }
 function sortBy(k) { if (S.sort === k) S.desc = !S.desc; else { S.sort = k; S.desc = false; } store.set('xsort', S.sort); store.set('xdesc', S.desc ? '1' : ''); render(); }
 async function reindex() {
@@ -2300,17 +2427,18 @@ function drawMenu(x, y, items) {
 function showMenu(x, y, kind) {
   const f = selFiles(), it = selItems()[0], one = S.sel.size === 1; let m = [];
   if (kind === 'item') {
-    if (one && it.type === 'dir') m = [['Open', () => go(it.path), 0, 1]];
+    if (!S.selMode) m.push(['☑ Select', () => setSelMode(true)]);
+    if (one && it.type === 'dir') m.push(['Open', () => go(it.path), 0, 1], ['ℹ Properties', props]);
     else if (f.length) {
       if (one) m.push([f[0].view ? 'Open' : 'Download', () => openItem(f[0]), 0, 1]);
       if (one && S.search) m.push(['📂 Open file location', () => go(f[0].folder)]);
-      m.push(['⬇ Download', () => downloadFiles(f)], ['📤 Send to Telegram', () => sendTG(f)], '-',
+      m.push(['⬇ Download', () => downloadFiles(f)], ['📤 Send to Telegram', () => sendTG(f)], ['ℹ Properties', props], '-',
         ['✂ Cut', () => setClip('cut')], ['⧉ Copy', () => setClip('copy')], '-');
       if (one) m.push(['✎ Rename', renameSel]);
       m.push(['🗑 Delete', () => delFiles(f)]);
     }
   } else {
-    m = [['📋 Paste', paste, !canPaste()], ['⟳ Refresh', refresh], '-', ['▦ Large icons', () => setView('icons')], ['☰ Details', () => setView('details')]];
+    m = [['📋 Paste', paste, !canPaste()], ['⟳ Refresh', refresh], ['🕘 Recent files', showRecent], '-', ['▦ Large icons', () => setView('icons')], ['☰ Details', () => setView('details')]];
   }
   if (m.length) drawMenu(x, y, m);
 }
@@ -2321,7 +2449,7 @@ const treeCache = new Map();
 async function kids(path) {
   if (treeCache.has(path)) return treeCache.get(path);
   const r = await api('/api/list?dirs=1&path=' + encodeURIComponent(path));
-  const k = r.folders || []; treeCache.set(path, k); return k;
+  const k = r.folders || []; if (r.ok !== false) treeCache.set(path, k); return k;
 }
 const nodeHtml = (f, d) => '<div class="tn" data-path="' + esc(f.path) + '" style="--d:' + d + '"><span class="ar" data-ar>▸</span><span class="tl">📁 ' + esc(f.name) + '</span></div><div class="tc" hidden></div>';
 async function openNode(tn) {
@@ -2358,10 +2486,12 @@ const closeNav = () => $('#nav').classList.remove('open');
 /* ---------- preview ---------- */
 function drawPreview() {
   const p = $('#preview'); p.hidden = !S.preview;
+  const f = selFiles(), key = S.preview && S.sel.size === 1 && f.length === 1 ? f[0].id + '|' + f[0].name : '';
+  if (key && key === S.pvKey && p.firstChild) return;      // same file still selected: do not restart the video
+  S.pvKey = key;
   p.querySelectorAll('video,audio').forEach(v => { v.pause(); v.removeAttribute('src'); v.load(); });
   if (!S.preview) { p.innerHTML = ''; return; }
-  const f = selFiles();
-  if (S.sel.size !== 1 || f.length !== 1) { p.innerHTML = '<div class="empty">Select a file to preview</div>'; return; }
+  if (!key) { p.innerHTML = '<div class="empty"><b>👆</b>Select a file to preview</div>'; return; }
   const x = f[0], url = '/stream/' + x.id + '/' + encodeURIComponent(x.name) + gq(), k = kind(x);
   let body = '';
   if (!x.view) body = '<div class="empty">Preview उपलब्ध नाही — Download वापर</div>';
@@ -2380,10 +2510,11 @@ content.addEventListener('click', e => {
   const el = e.target.closest('.it');
   if (swallow) { swallow = false; return; }
   if (!el) { if (!(e.ctrlKey || e.metaKey)) clearSel(); return; }
+  if (S.selMode) { select(el.dataset.key, { ctrlKey: true }); return; }
   if (COARSE && !e.ctrlKey && !e.shiftKey) { openItem(S.map.get(el.dataset.key)); return; }
   select(el.dataset.key, e);
 });
-content.addEventListener('dblclick', e => { const el = e.target.closest('.it'); if (el && !COARSE) openItem(S.map.get(el.dataset.key)); });
+content.addEventListener('dblclick', e => { if (S.selMode) return; const el = e.target.closest('.it'); if (el && !COARSE) openItem(S.map.get(el.dataset.key)); });
 content.addEventListener('contextmenu', e => {
   e.preventDefault();
   const el = e.target.closest('.it');
@@ -2411,7 +2542,7 @@ $('#tree').addEventListener('click', e => {
 $('#navbtn').onclick = e => { e.stopPropagation(); $('#nav').classList.toggle('open'); };
 $('#bk').onclick = () => history.back();
 $('#fw').onclick = () => history.forward();
-$('#up').onclick = () => { if (S.search) go(S.path, false); else if (S.path) go(parentOf(S.path)); };
+$('#up').onclick = () => { if (S.search || S.recent) go(S.path, false); else if (S.path) go(parentOf(S.path)); };
 $('#rf').onclick = checkNow;
 $('#c-cut').onclick = () => setClip('cut');
 $('#c-copy').onclick = () => setClip('copy');
@@ -2421,20 +2552,28 @@ $('#c-tg').onclick = () => sendTG(selFiles());
 $('#c-dl').onclick = () => downloadFiles(selFiles());
 $('#c-del').onclick = () => delFiles(selFiles());
 $('#c-prev').onclick = () => { S.preview = !S.preview; $('#c-prev').classList.toggle('on', S.preview); drawPreview(); };
+$('#c-sel').onclick = () => setSelMode(!S.selMode);
+$('#chips').addEventListener('click', e => { const b = e.target.closest('[data-f]'); if (b) { S.filter = b.dataset.f; render(); } });
+$('#th').onclick = () => { const t = store.get('xtheme', 'auto'); store.set('xtheme', THEMES[(THEMES.indexOf(t) + 1) % 3]); applyTheme(); toast('◐ Theme: ' + store.get('xtheme', 'auto')); };
 $('#v-d').onclick = () => setView('details');
 $('#v-i').onclick = () => setView('icons');
 $('#c-view').onclick = e => { e.stopPropagation(); btnMenu(e.currentTarget, [[(S.view === 'icons' ? '✓ ' : '') + 'Large icons', () => setView('icons')], [(S.view === 'details' ? '✓ ' : '') + 'Details', () => setView('details')]]); };
 $('#c-sort').onclick = e => {
   e.stopPropagation();
   const c = (k, l) => [(S.sort === k ? '✓ ' : '') + l, () => { S.sort = k; store.set('xsort', k); render(); }];
-  btnMenu(e.currentTarget, [c('name', 'Name'), c('size', 'Size'), c('type', 'Type'), '-',
+  btnMenu(e.currentTarget, [c('name', 'Name'), c('size', 'Size'), c('type', 'Type'), c('new', 'Newest first'), '-',
     [(!S.desc ? '✓ ' : '') + 'Ascending', () => { S.desc = false; store.set('xdesc', ''); render(); }],
     [(S.desc ? '✓ ' : '') + 'Descending', () => { S.desc = true; store.set('xdesc', '1'); render(); }]]);
 };
 $('#c-more').onclick = e => {
   e.stopPropagation();
-  btnMenu(e.currentTarget, [['Select all', () => { S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }], ['Check for new files now', checkNow], ['⏱ Check interval…', setIntervalDlg], '-', ['➕ Add group…', addGroup], ['➖ Remove this group', removeGroup], '-', ['Re-index this group', reindex], '-', ['Logout', () => { location.href = '/logout'; }]]);
+  btnMenu(e.currentTarget, [['🕘 Recent files', showRecent], ['Select all', () => { S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }], ['Check for new files now', checkNow], ['⏱ Check interval…', setIntervalDlg], '-', ['➕ Add group…', addGroup], ['➖ Remove this group', removeGroup], '-', ['Re-index this group', reindex], '-', ['Logout', () => { location.href = '/logout'; }]]);
 };
+let qT;
+$('#q').addEventListener('input', e => {
+  clearTimeout(qT); const q = e.target.value.trim();
+  qT = setTimeout(() => { if (q.length >= 2) runSearch(q); else if (!q && S.search) go(S.path, false); }, 400);
+});
 $('#q').addEventListener('keydown', e => {
   if (e.key === 'Enter') { const q = e.target.value.trim(); if (q) runSearch(q); else go(S.path, false); }
   else if (e.key === 'Escape') { e.target.value = ''; if (S.search) go(S.path, false); }
@@ -2445,13 +2584,29 @@ window.addEventListener('popstate', e => {
   go(e.state && e.state.p != null ? e.state.p : pathFromUrl(), false);
 });
 document.addEventListener('keydown', e => {
-  if (!viewer.hidden) { if (e.key === 'Escape') closeViewer(false); return; }
+  if (!viewer.hidden) {
+    if (e.key === 'Escape') closeViewer(false);
+    else if (e.key === 'ArrowLeft') stepViewer(-1);
+    else if (e.key === 'ArrowRight') stepViewer(1);
+    return;
+  }
   if (e.target.closest('input,textarea,dialog')) return;
   const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
-  if (k === 'delete') delFiles(selFiles());
+  if (/^arrow(left|right|up|down)$/.test(k) && S.items.length) {
+    e.preventDefault();
+    const els = $$('#content .it'), cols = S.view === 'icons' && els.length ? els.filter(x => x.offsetTop === els[0].offsetTop).length || 1 : 1;
+    const keys = S.items.map(i => i.key); let cur = S.anchor && S.map.has(S.anchor) ? keys.indexOf(S.anchor) : -1;
+    const step = k === 'arrowright' ? 1 : k === 'arrowleft' ? -1 : k === 'arrowdown' ? cols : -cols;
+    const nx = Math.max(0, Math.min(keys.length - 1, cur < 0 ? 0 : cur + step));
+    if (e.shiftKey && cur >= 0) { const lo = Math.min(cur, nx), hi = Math.max(cur, nx); S.sel = new Set(keys.slice(lo, hi + 1)); }
+    else { S.sel = new Set([keys[nx]]); S.anchor = keys[nx]; }
+    paintSel(); updateBar();
+    const el = els.find(x => x.dataset.key === keys[nx]); if (el) el.scrollIntoView({ block: 'nearest' });
+  }
+  else if (k === 'delete') delFiles(selFiles());
   else if (k === 'f2') renameSel();
   else if (k === 'enter') { const i = selItems(); if (i.length === 1) openItem(i[0]); }
-  else if (k === 'escape') { hideMenu(); clearSel(); }
+  else if (k === 'escape') { hideMenu(); if (S.selMode) setSelMode(false); else clearSel(); }
   else if (k === 'backspace' || (e.altKey && k === 'arrowup')) { e.preventDefault(); if (S.path && !S.search) go(parentOf(S.path)); }
   else if (mod && k === 'a') { e.preventDefault(); S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }
   else if (mod && k === 'c') { if (selFiles().length) { e.preventDefault(); setClip('copy'); } }
@@ -2517,10 +2672,10 @@ async function setIntervalDlg() {
 }
 async function softRefresh(announce) {
   const before = new Set(S.files.map(f => f.id));
-  const url = S.search ? '/api/search?q=' + encodeURIComponent(S.search) : '/api/list?path=' + encodeURIComponent(S.path);
+  const url = S.search ? '/api/search?q=' + encodeURIComponent(S.search) : S.recent ? '/api/recent' : '/api/list?path=' + encodeURIComponent(S.path);
   const r = await api(url);
   if (r.ok === false) return;
-  if (S.search) { S.folders = []; S.files = r.files; }
+  if (S.search || S.recent) { S.folders = []; S.files = r.files; }
   else { S.topicId = r.topic_id; S.folders = r.folders; S.files = r.files; }
   tag(); render();
   if (announce) {
@@ -2537,8 +2692,10 @@ async function checkNow() {
   await pollStatus();
 }
 let pollT;
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollStatus(); });
 async function pollStatus() {
   clearTimeout(pollT);
+  if (document.hidden) { pollT = setTimeout(pollStatus, 20000); return; }
   const r = await api('/api/status');
   let next = 5000;
   if (r && r.index) {
@@ -2751,7 +2908,17 @@ def api_search():
     like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     rows = db_many(
         "SELECT * FROM files WHERE group_id=? AND filename LIKE ? ESCAPE '\\' "
-        "ORDER BY filename COLLATE NOCASE LIMIT 300", (gid, like))
+        "ORDER BY filename COLLATE NOCASE LIMIT 501", (gid, like))
+    return jsonify({"ok": True, "files": [_file_json(r) for r in rows[:500]], "truncated": len(rows) > 500})
+
+@app.route("/api/recent")
+@require_api
+def api_recent():
+    """Newest files of the group (message ids grow with time, so highest id = newest)."""
+    gid = req_group()
+    if gid is None:
+        return _no_group()
+    rows = db_many("SELECT * FROM files WHERE group_id=? ORDER BY msg_id DESC LIMIT 200", (gid,))
     return jsonify({"ok": True, "files": [_file_json(r) for r in rows]})
 
 def _ids(data, limit=100):
@@ -3237,6 +3404,8 @@ def sendtobot(msg_id):
     gid = req_group()
     if gid is None or not db_one("SELECT 1 FROM files WHERE group_id=? AND msg_id=?", (gid, msg_id)):
         return jsonify({"ok": False, "msg": "file not found in index"}), 404
+    if not _owner_chat():
+        return jsonify({"ok": False, "msg": "OWNER_CHAT_ID सेट नाही आणि bot मध्ये अजून कोणी login केलेलं नाही"}), 400
 
     async def _fwd():
         cl, msg = await _resolve_msg(gid, msg_id)
@@ -3590,7 +3759,8 @@ def status_text():
     topics_count = db_one("SELECT COUNT(*) as c FROM topics")["c"]
     files_count  = db_one("SELECT COUNT(*) as c FROM files")["c"]
     groups_count = db_one("SELECT COUNT(*) as c FROM groups")["c"]
-    return (f"👥 Groups: {groups_count}\n🗂 Topics indexed: {topics_count}\n📄 Files indexed: {files_count}\n"
+    bot = f"@{_bot_info['username']} ({_bot_info['id']})" if _bot_info["id"] else "connecting…"
+    return (f"🤖 Storage bot: {bot}\n👥 Groups: {groups_count}\n🗂 Topics indexed: {topics_count}\n📄 Files indexed: {files_count}\n"
             f"👤 User session: {'ON ' + _user_status['me'] if _user_status['ready'] else 'OFF'}\n"
             f"🧠 RAM: {_ram_text()}\n"
             f"🔄 Indexer: {_index_status['status']}\n⏱ Check every: {get_poll_interval()}s\n🌐 {WEB_URL}")
