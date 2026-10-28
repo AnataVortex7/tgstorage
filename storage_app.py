@@ -335,6 +335,8 @@ def chan_id(gid):
 def list_groups():
     return db_many("SELECT group_id, title, source FROM groups ORDER BY added_at, group_id")
 
+_group_err = {}         # gid -> last indexing error text (shown in the browser status bar)
+_meta_ok = set()        # gids whose title / topics flag was read successfully from Telegram
 _forum = {}             # gid -> True if the chat has Topics (folders); False = channel / normal group (ONE folder)
 
 def _is_forum(gid):
@@ -1589,11 +1591,24 @@ def _index_batch(gid, messages, cursor):
     meta_set(f"cursor_{gid}", cursor)
     return n
 
+async def _refresh_group_meta(gid):
+    """Read title + 'has topics' from Telegram. Retried by the poller until it works
+    (e.g. the bot was made admin AFTER the server started)."""
+    if gid in _meta_ok:
+        return
+    chat = await _get_chat(gid)
+    forum = bool(getattr(chat, "is_forum", False))
+    db_exec("UPDATE groups SET title=?, is_forum=? WHERE group_id=?",
+            (getattr(chat, "title", "") or "", 1 if forum else 0, gid))
+    _forum[gid] = forum
+    _meta_ok.add(gid)
+
 async def _scan_group(gid):
     global _snapshot_dirty
     _scanning.add(gid)
     cl, ep = _rd(), _scan_epoch          # pin client for the whole scan
     try:
+        await _refresh_group_meta(gid)
         ch = await _input_channel(gid, cl)
         start = meta_get(f"cursor_{gid}", 0) + 1
         latest = await _latest_msg_id(gid, cl)
@@ -1623,6 +1638,12 @@ async def _scan_group(gid):
         _scanning.discard(gid)
         _scan_progress.pop(gid, None)
 
+def _friendly_err(e):
+    n = type(e).__name__
+    if n in ("ChannelInvalid", "ChannelPrivate", "PeerIdInvalid", "ChatAdminRequired", "ChatForbidden"):
+        return "Bot ला हा group/channel दिसत नाही — bot ला तिथे admin कर (नंतर आपोआप सुरू होईल)"
+    return f"{n}: {e}"[:160]
+
 async def _full_index(gid):
     """Queue a catch-up scan. Scans of different groups run strictly one after another
     (same Telegram account = shared flood limit), duplicates are ignored."""
@@ -1643,10 +1664,12 @@ async def _full_index(gid):
                 _index_status["status"] = "done"
                 _index_status["last_run"] = time.time()
                 _last_check[gid] = time.time()
+                _group_err.pop(gid, None)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 _index_status["status"] = f"error: {type(e).__name__}: {e}"
+                _group_err[gid] = _friendly_err(e)
                 print(f"[index] {gid} Error: {type(e).__name__}: {e}", flush=True)
     finally:
         _queued.discard(gid)
@@ -1663,6 +1686,7 @@ async def _poll_group(gid):
         await _full_index(gid)
         return 0
     cl = _rd()
+    await _refresh_group_meta(gid)
     ch = await _input_channel(gid, cl)
     found = 0
     for _ in range(10):               # at most 1000 ids per check
@@ -1677,6 +1701,7 @@ async def _poll_group(gid):
         cursor = max(m.id for m in real)
         meta_set(f"cursor_{gid}", cursor)
     _last_check[gid] = time.time()
+    _group_err.pop(gid, None)
     return found
 
 _poll_wakeup = threading.Event()
@@ -1697,6 +1722,7 @@ def run_poller():
                 asyncio.run_coroutine_threadsafe(
                     asyncio.wait_for(_poll_group(r["group_id"]), 150), _tg_loop).result(timeout=160)
             except Exception as e:
+                _group_err[r["group_id"]] = _friendly_err(e)
                 print(f"[poll] {r['group_id']}: {type(e).__name__} {e}", flush=True)
 
 async def _fill_titles():
@@ -2286,6 +2312,7 @@ function drawIdx() {
   const n = x => (+x || 0).toLocaleString();
   const plural = (k, w) => n(k) + ' ' + w + (k === 1 ? '' : 's');
   if (S.tg === false && !/telegram/.test(s || '')) parts.push('⚠ Telegram connect होत आहे…');
+  if (S.gerr) parts.unshift('⚠ ' + S.gerr);
   if (S.user === false) parts.push('⚠ User login नाही — files दिसणार नाहीत; bot ला /userlogin पाठव');
   // this folder
   if (S.search || S.recent) parts.push((S.recent ? '🕘 ' : '🔎 ') + plural(S.files.length, S.recent ? 'file' : 'result'));
@@ -2727,7 +2754,7 @@ async function pollStatus() {
   if (r && r.index) {
     const was = S.idx; S.idx = r.index.status; S.tg = r.tg_ready; S.user = r.user_ready; S.stats = { files: r.files, topics: r.topics, bytes: r.bytes, scan: r.scan, allFiles: r.all_files };
     S.interval = r.interval || S.interval; S.minIv = r.min_interval || S.minIv; S.maxIv = r.max_interval || S.maxIv;
-    S.lastCheck = r.group ? r.group.last_check : 0; if (r.now) S.skew = r.now - Date.now() / 1000;
+    S.lastCheck = r.group ? r.group.last_check : 0; S.gerr = r.group ? r.group.error : ''; if (r.now) S.skew = r.now - Date.now() / 1000;
     const ver = r.group ? r.group.ver : null;
     const busy = !!document.querySelector('dialog[open]');
     if (r.topics !== S.topics) {
@@ -2885,7 +2912,7 @@ def api_checknow():
         return jsonify({"ok": True, "found": 0, "busy": True,
                         "msg": "Telegram flood-wait चालू आहे, थोड्या वेळाने आपोआप check होईल"})
     except Exception as e:
-        return jsonify({"ok": False, "msg": f"check failed: {type(e).__name__}: {e}"}), 500
+        return jsonify({"ok": False, "msg": _friendly_err(e)}), 500
     return jsonify({"ok": True, "found": found})
 
 # ── File API ────────────────────────────────────────────────────────────
@@ -3383,10 +3410,16 @@ def stream(msg_id, filename):
     skip = start % STREAM_CHUNK
     nchunks = (skip + length + STREAM_CHUNK - 1) // STREAM_CHUNK
 
+    try:
+        agen = tg(_stream_open(gid, msg_id, first_chunk, nchunks), timeout=30)
+    except Exception as e:
+        print(f"[stream] cannot open {gid}/{msg_id}: {type(e).__name__}: {e}", flush=True)
+        return jsonify({"error": "File bot ला उघडता येत नाही. Bot या group/channel मध्ये admin आहे का ते बघ. "
+                                 "दुसऱ्या bot ने टाकलेल्या files साठी bot → 📦 Storage → "
+                                 "Telegram user account login कर. (" + type(e).__name__ + ")"}), 502
+
     def generate():
-        agen = None
         try:
-            agen = tg(_stream_open(gid, msg_id, first_chunk, nchunks), timeout=30)
             sent = 0
             first = True
             while sent < length:
@@ -3402,11 +3435,10 @@ def stream(msg_id, filename):
                 sent += len(chunk)
                 yield chunk
         finally:
-            if agen is not None:
-                try:
-                    tg(_stream_close(agen), timeout=10)
-                except Exception:
-                    pass
+            try:
+                tg(_stream_close(agen), timeout=10)
+            except Exception:
+                pass
 
     headers = {
         "Content-Type": ctype,
@@ -3531,7 +3563,7 @@ def api_status():
     g = {"id": gid, "ver": 0, "last_check": 0, "last_new": 0}
     if gid is not None:
         g.update(ver=_group_ver.get(gid, 0), last_check=_last_check.get(gid, 0),
-                 last_new=_last_new.get(gid, 0))
+                 last_new=_last_new.get(gid, 0), error=_group_err.get(gid, ""))
         topics = db_one("SELECT COUNT(*) as c FROM topics WHERE group_id=?", (gid,))["c"]
         files = db_one("SELECT COUNT(*) as c FROM files WHERE group_id=?", (gid,))["c"]
         size = db_one("SELECT COALESCE(SUM(size), 0) as s FROM files WHERE group_id=?", (gid,))["s"]
