@@ -24,8 +24,22 @@ def _alias(a, b):
 
 # One set of credentials is enough — either spelling works.
 for _a, _b in (("BOT_TOKEN", "TELEGRAM_BOT_TOKEN"), ("MONGO_URI", "MONGODB_URI"),
-               ("API_ID", "TG_API_ID"), ("API_HASH", "TG_API_HASH"), ("WEB_URL", "PUBLIC_URL")):
+               ("API_ID", "TG_API_ID"), ("API_HASH", "TG_API_HASH")):
     _alias(_a, _b)
+
+# This server's public URL. Every link the bot sends (Telegram UI, PC installer, website login) uses it.
+# WEB_URL wins over a stale PUBLIC_URL / RENDER_EXTERNAL_URL left over from the old Render deployment;
+# on Koyeb the platform's own KOYEB_PUBLIC_DOMAIN is used if WEB_URL is empty.
+_url = os.environ.get("WEB_URL", "").strip().rstrip("/")
+if not _url and os.environ.get("KOYEB_PUBLIC_DOMAIN", "").strip():
+    _url = "https://" + os.environ["KOYEB_PUBLIC_DOMAIN"].strip()
+_old = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
+if _url:
+    if _old and _old != _url:
+        print(f"[url] ignoring old PUBLIC_URL={_old}; using {_url}", flush=True)
+    os.environ["WEB_URL"] = os.environ["PUBLIC_URL"] = _url
+    os.environ.pop("RENDER_EXTERNAL_URL", None)
+print(f"[url] public URL = {_url or '(not set — taken from the request)'}", flush=True)
 
 def _mem_limit_mb():
     for f in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
@@ -91,6 +105,10 @@ def application(environ, start_response):
 def _on_sigterm(signum, frame):
     if not _loaded:
         os._exit(0)
+    try:
+        hub_app.shutdown_notice()
+    except Exception as e:
+        print(f"[shutdown] notice: {e}", flush=True)
     try:
         import tgweb
         if tgweb.M:

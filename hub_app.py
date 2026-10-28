@@ -775,8 +775,61 @@ def handle_update(u):
         else:
             AUTH.handle_stranger(m)
 
+BOT_ME = {}
+CONFLICT = [0]          # number of consecutive 409s (another instance polling the same token)
+
+def _bot_label():
+    u = BOT_ME.get('username')
+    return f"@{u}" if u else '(bot)'
+
+def startup_notice():
+    """Every (re)deploy: tell the admins which bot/server just came up, so you know which bot is live.
+    If another instance is still polling the same token, warn about it in Telegram itself."""
+    import socket
+    ist = time.strftime('%d %b %H:%M:%S', time.gmtime(time.time() + 19800))
+    inst = os.environ.get('KOYEB_SERVICE_NAME') or os.environ.get('RENDER_SERVICE_NAME') or socket.gethostname()
+    time.sleep(2)
+    notify(f"🟢 <b>{esc(_bot_label())}</b> सुरू झाला\n"
+           f"🕒 {ist} IST\n🖥 <code>{esc(inst)}</code>\n🌐 {esc(os.environ.get('WEB_URL', '-'))}\n"
+           f"👥 Admins: {len(AUTH.admin_ids())} · PCs: {len(PCS)}")
+    time.sleep(75)
+    if CONFLICT[0] >= 3:
+        notify(f"⚠️ <b>{esc(_bot_label())}</b>: दुसरा instance त्याच token वर चालू आहे ({CONFLICT[0]}× 409).\n"
+               "जुना Render/Koyeb service बंद करा किंवा BotFather मध्ये /revoke करून नवा token वापरा. "
+               "तोपर्यंत commands नीट चालणार नाहीत.")
+
+def shutdown_notice():
+    """Best-effort message when the platform stops this instance (redeploy / restart)."""
+    ist = time.strftime('%H:%M:%S', time.gmtime(time.time() + 19800))
+    for chat in list(AUTH.admin_ids()):
+        tg('sendMessage', chat_id=chat, parse_mode='HTML',
+           text=f"🔴 <b>{esc(_bot_label())}</b> बंद होतोय ({ist} IST) — redeploy/restart.")
+
+from concurrent.futures import ThreadPoolExecutor
+_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix='upd')
+_UID_LOCKS = {}
+
+def _run_update(u):
+    """One update, in a worker thread: a slow handler (Mongo / DB lock / Telegram timeout) can no longer
+    freeze the polling loop. Updates of the same user still run strictly in order."""
+    who = ((u.get('message') or {}).get('from') or (u.get('callback_query') or {}).get('from') or {}).get('id', 0)
+    kind = 'cb' if 'callback_query' in u else ('msg' if 'message' in u else '?')
+    t0 = time.time()
+    with _UID_LOCKS.setdefault(who, threading.Lock()):
+        try:
+            handle_update(u)
+        except Exception as e:
+            print('update error:', repr(e), flush=True)
+    dt = time.time() - t0
+    # never log message text (it can be a password / 2FA code)
+    print(f"[hub] {kind} from {who} handled in {dt:.1f}s" + (" ⚠️ SLOW" if dt > 5 else ''), flush=True)
+
 def bot_loop():
-    offset, cleared, warned = 0, False, 0
+    offset, cleared, last409, n409 = 0, False, 0, 0
+    me = tg('getMe').get('result') or {}
+    BOT_ME.update(me)
+    print(f"[hub] polling as @{me.get('username', '?')} (id {me.get('id', '?')})", flush=True)
+    threading.Thread(target=startup_notice, daemon=True, name='startup_notice').start()
     while True:
         if not cleared:                                   # retry until the webhook is really gone
             cleared = bool(tg('deleteWebhook').get('ok'))
@@ -788,20 +841,25 @@ def bot_loop():
             if r.get('error_code') == 409:
                 if 'webhook' in str(r.get('description', '')).lower():
                     cleared = False
-                elif time.time() - warned > 300:
-                    warned = time.time()
-                    print('⚠️ 409: दुसरा instance त्याच BOT_TOKEN वर getUpdates चालवतोय (जुना Render/Koyeb Worker Hub?) '
-                          '— तो बंद करा. Redeploy वेळी काही सेकंद हे normal आहे.')
-                time.sleep(10)
+                else:
+                    n409 += 1
+                    CONFLICT[0] = n409
+                    if time.time() - last409 > 30:
+                        last409 = time.time()
+                        print(f'⚠️ 409 (x{n409}): दुसरा instance त्याच BOT_TOKEN वर getUpdates चालवतोय — '
+                              'जुना Render/Koyeb service बंद करा, किंवा BotFather मध्ये /revoke करून नवा token वापरा. '
+                              'तोपर्यंत bot चे messages दोन instance मध्ये वाटले जातात (commands उत्तर देत नाहीत).', flush=True)
+                time.sleep(3)
             else:
                 time.sleep(5)
             continue
+        CONFLICT[0] = 0
+        if n409:
+            print(f'✅ getUpdates ठीक झालं ({n409} वेळा 409 आला होता)', flush=True)
+            n409 = 0
         for u in r['result']:
             offset = u['update_id'] + 1
-            try:
-                handle_update(u)
-            except Exception as e:
-                print('update error:', e)
+            _POOL.submit(_run_update, u)
 
 def monitor_loop():
     while True:
