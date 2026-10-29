@@ -599,6 +599,11 @@ class Manager:
                 res['read_out'] = res['read_in'] = 0
         return res
 
+    async def a_bydate(self, aid, chat, ts):
+        """Newest message on or before the given time (used by 'Jump to date')."""
+        ms = await self._cl(aid).get_messages(chat, limit=1, offset_date=datetime.fromtimestamp(ts, timezone.utc))
+        return {'id': ms[0].id if ms else 0}
+
     async def a_around(self, aid, chat, mid):
         ms = await self._cl(aid).get_messages(chat, limit=30, offset_id=mid, add_offset=-15)
         return [ser_msg(m) for m in reversed(list(ms))]
@@ -1287,6 +1292,11 @@ def api_dialogs():
 def api_messages():
     lim = max(1, min(_int('limit', 30), 60))
     return jsonify(M.call(M.a_messages(_acc(), _int('chat'), _int('before', 0), lim)))
+
+@bp.get('/api/bydate')
+@api
+def api_bydate():
+    return jsonify(M.call(M.a_bydate(_acc(), _int('chat'), _int('ts'))))
 
 @bp.get('/api/around')
 @api

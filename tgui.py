@@ -14,7 +14,7 @@ UI_PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8">
 :root{--bg:#e6ebee;--side:#fff;--in:#fff;--out:#eeffde;--acc:#3390ec;--fg:#000;--mut:#707579;--bd:#dfe1e5;--hov:#f4f4f5;--sel:#3390ec;--bdg:#3390ec;--bdgm:#c4c9cc;--ink:#fff;--sh:0 1px 2px #0002;--pat:#0001}
 [data-theme=dark]{--bg:#0e1621;--side:#17212b;--in:#182533;--out:#2b5278;--acc:#6ab3f3;--fg:#f5f5f5;--mut:#708499;--bd:#0b131b;--hov:#202b36;--sel:#2b5278;--bdg:#3e8cd0;--bdgm:#3e546a;--ink:#fff;--sh:0 1px 2px #0006;--pat:#ffffff08}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{height:100%;margin:0;overflow:hidden}
-body{background:var(--bg);color:var(--fg);font:15px/1.35 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+body{background:var(--bg);color:var(--fg);font:var(--fs,15px)/1.35 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 button,input,textarea,select{font:inherit;color:inherit}button{cursor:pointer;background:none;border:0}
 #app{display:flex;height:100%}#side{width:min(420px,34vw);min-width:320px;background:var(--side);display:flex;flex-direction:column;border-right:1px solid var(--bd);position:relative}
 #main{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg);position:relative}
@@ -90,8 +90,8 @@ audio{max-width:100%;height:40px}.card{border-left:3px solid var(--acc);padding:
   <div id="folders"></div><div id="list"></div><button id="fab" title="New message">✎</button>
   <div id="drawer"><div id="dr"></div></div></aside>
  <main id="main"><div id="cbar" style="display:none"><button class="ib" id="back">←</button><div id="cav"></div><div class="tt" id="ctt"><b></b><span class="st"></span></div>
-   <button class="ib" id="csr" title="Search">🔍</button><button class="ib" id="cinfo" title="Info">ⓘ</button><button class="ib" id="cmore">⋮</button></div>
-  <div id="sel"><button class="ib" id="selx">✕</button><b id="selc" style="flex:1"></b><button class="ib" id="self">➦</button><button class="ib" id="seld">🗑</button></div>
+   <button class="ib" id="cdate" title="Jump to date">📅</button><button class="ib" id="csr" title="Search">🔍</button><button class="ib" id="cinfo" title="Info">ⓘ</button><button class="ib" id="cmore">⋮</button></div>
+  <div id="sel"><button class="ib" id="selx">✕</button><b id="selc" style="flex:1"></b><button class="ib" id="selcp" title="Copy text">⧉</button><button class="ib" id="seldl" title="Download files">⬇</button><button class="ib" id="self">➦</button><button class="ib" id="seld">🗑</button></div>
   <div id="pin"><div class="bar"></div><div style="flex:1;min-width:0"><b style="color:var(--acc);font-size:13px">Pinned message</b><div class="mut" id="pint" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div></div></div>
   <div id="msgs"><div id="mi"><div class="empty">Select a chat to start messaging</div></div><button id="dn">⌄</button></div>
   <div id="ups"></div>
@@ -100,7 +100,7 @@ audio{max-width:100%;height:40px}.card{border-left:3px solid var(--acc);padding:
    <button id="send">➤</button></div><input id="file" type="file" multiple hidden></div></div></main>
  <aside id="info"></aside>
 </div>
-<div id="lb"><button class="x">✕</button><button class="nv" style="left:6px">‹</button><img alt=""><button class="nv" style="right:6px">›</button></div><div id="fv"><div class="vh"><b id="fvt"></b><a class="ib" id="fvd" title="Download">⬇</a><button class="ib" id="fvx" title="Close">✕</button></div><div class="vb" id="fvb"></div></div>
+<div id="lb"><button class="x">✕</button><button class="x" id="lbd" title="Download" style="right:64px">⬇</button><span id="lbc" style="position:absolute;top:18px;left:16px;color:#fff;font-size:14px"></span><button class="nv" style="left:6px">‹</button><img alt=""><button class="nv" style="right:6px">›</button></div><div id="fv"><div class="vh"><b id="fvt"></b><a class="ib" id="fvd" title="Download">⬇</a><button class="ib" id="fvx" title="Close">✕</button></div><div class="vb" id="fvb"></div></div>
 <div id="toast"></div>
 <script>
 'use strict';
@@ -109,7 +109,7 @@ const h=(t,p,...k)=>{const e=document.createElement(t);if(p)for(const[a,v]of Obj
 const LS={get(k,d){try{const v=localStorage.getItem('tg_'+k);return v==null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem('tg_'+k,JSON.stringify(v))}catch(e){}}};
 const Q=o=>new URLSearchParams(o).toString(),sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const S={acc:null,accs:[],chat:null,cd:null,dl:[],folder:'all',archived:false,msgs:[],readOut:0,readIn:0,pinned:null,typing:{},seq:0,sel:new Set(),reply:null,edit:null,uploads:{},dls:{},bw:null,defApi:false,loadingOld:false,noMore:false,gsearch:[],q:'',info:false,drafts:{},unreadFrom:0,
- set:Object.assign({theme:'auto',avatars:true,previews:true,notif:false,sound:true,md:false,enter:true},LS.get('set',{}))};
+ set:Object.assign({theme:'auto',avatars:true,previews:true,notif:false,sound:true,md:false,enter:true,fs:15},LS.get('set',{}))};
 const EMOJI='😀😁😂🤣😊😍😘😎🤔😢😭😡👍👎👏🙏💪🔥❤️💔🎉✨🌹🎂🍕☕🚀✅❌⚠️📌📎💯😴🤝👀🙈😅😉😇🥰😋🤗🤩😏😬🙄😤😱🤯🥳😜'.match(/\p{Extended_Pictographic}\uFE0F?/gu)||[];
 const REACT=['👍','❤️','🔥','🥰','👏','😁','🤔','😢','🎉','👎'];
 const sz=n=>n>=1073741824?(n/1073741824).toFixed(2)+' GB':n>=1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round(n/1024))+' KB';
@@ -130,7 +130,7 @@ async function api(path,body,opt){const o={credentials:'same-origin'};if(opt&&op
 const A=(o)=>Object.assign({acc:S.acc},o);
 const cur=()=>S.accs.find(a=>a.id===S.acc)||{};
 function saveSet(){LS.set('set',S.set);applyTheme()}
-function applyTheme(){let t=S.set.theme;if(t==='auto')t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';document.documentElement.dataset.theme=t}
+function applyTheme(){document.documentElement.style.setProperty('--fs',(S.set.fs||15)+'px');let t=S.set.theme;if(t==='auto')t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';document.documentElement.dataset.theme=t}
 /* ---------- avatar ---------- */
 function avatar(id,name,size,online){const a=h('div',{class:'av',style:`background:${colorOf(id)};${size?`width:${size}px;height:${size}px;font-size:${size*.38}px`:''}`,text:(name||'?').trim().slice(0,1).toUpperCase()});
  if(S.set.avatars&&S.acc){const i=h('img',{alt:'',loading:'lazy',src:'/app/api/avatar?'+Q({acc:S.acc,chat:id}),on:{error(){i.remove()}}});a.append(i)}
@@ -166,7 +166,7 @@ function confirmBox(msg,okText,fn,red){return modal('',h('div',{text:msg}),[{t:'
 /* ---------- chat list ---------- */
 const FOLDERS=[['all','All'],['unread','Unread'],['user','Personal'],['group','Groups'],['channel','Channels'],['bot','Bots']];
 function drawFolders(){const f=$('#folders');f.replaceChildren(...FOLDERS.map(([k,n])=>{const c=k==='unread'?S.dl.filter(d=>d.unread&&!d.muted).length:0;return h('button',{class:S.folder===k?'on':'',on:{click(){S.folder=k;drawFolders();drawList()}}},n,c?h('span',{class:'n',text:c}):null)}))}
-function lastText(d){const t=S.typing[d.id];if(t&&t.exp>Date.now())return h('span',{class:'typ',text:(t.who&&d.type!=='user'?t.who+' ':'')+(t.action==='recording'?'is recording…':'typing…')});return h('span',{class:'mut',text:(d.out&&d.last?'You: ':'')+d.last})}
+function lastText(d){if(S.drafts[d.id]&&d.id!==S.chat)return h('span',{class:'mut'},h('span',{style:'color:#e53935',text:'Draft: '}),S.drafts[d.id].slice(0,60));const t=S.typing[d.id];if(t&&t.exp>Date.now())return h('span',{class:'typ',text:(t.who&&d.type!=='user'?t.who+' ':'')+(t.action==='recording'?'is recording…':'typing…')});return h('span',{class:'mut',text:(d.out&&d.last?'You: ':'')+d.last})}
 function drawList(){const q=S.q.toLowerCase();let L=S.dl.filter(d=>(!q||d.name.toLowerCase().includes(q)));
  if(S.folder==='unread')L=L.filter(d=>d.unread);else if(S.folder==='bot')L=L.filter(d=>d.bot);else if(S.folder!=='all')L=L.filter(d=>d.type===S.folder&&!d.bot);
  const rows=[];if(S.archived)rows.push(h('div',{class:'sec',text:'Archived chats'}));
@@ -201,7 +201,7 @@ function flash(el){if(el.scrollIntoView)el.scrollIntoView({block:'center'});el.c
 function markRead(){if(S.msgs.length&&S.cd&&(S.cd.unread||0)>=0){const mx=S.msgs[S.msgs.length-1].id;api('/app/api/read',A({chat:S.chat,max_id:mx})).catch(()=>{});const d=S.dl.find(x=>x.id===S.chat);if(d&&d.unread){d.unread=0;d.mentions=0;drawList()}}}
 /* ---------- message rendering ---------- */
 function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:S.chat,id:m.id},file='/app/api/file?'+Q(b),th='/app/api/thumb?'+Q(b);
- if(x.kind==='photo'){const w=h('div',{class:'ph',on:{click(){lightbox(m.id)}}});if(x.w&&x.h)w.style.aspectRatio=x.w+'/'+x.h;
+ if(x.kind==='photo'){const w=h('div',{class:'ph',on:{click(e){if(S.sel.size||e.shiftKey)return;lightbox(m.id)}}});if(x.w&&x.h)w.style.aspectRatio=x.w+'/'+x.h;
   if(S.set.previews){const i=h('img',{alt:'',loading:'lazy',src:th,on:{error(){w.replaceChildren(h('div',{style:'padding:30px;text-align:center',text:'📷 Photo · '+sz(x.size)+' · tap'}))}}});w.append(i)}else w.append(h('div',{style:'padding:30px;text-align:center',text:'📷 Photo · '+sz(x.size)+' · tap to load'}));return w}
  if(x.kind==='sticker'){return x.mime==='image/webp'?h('img',{class:'stk',alt:x.emoji||'',loading:'lazy',src:th,on:{error(e){e.target.replaceWith(h('div',{class:'stk-e',text:x.emoji||'🏷'}))}}}):h('div',{class:'stk-e',text:x.emoji||'🏷'})}
  if(x.kind==='video'||x.kind==='gif'||x.kind==='videonote'){const w=h('div',{class:'vid'});if(x.w&&x.h)w.style.aspectRatio=x.w+'/'+x.h;if(x.kind==='videonote')w.style.cssText+=';border-radius:50%;width:220px;height:220px';
@@ -246,7 +246,7 @@ function ticks(m){if(!m.out)return null;return h('span',{class:'tk',text:m.id<=S
 function bubbleRow(m,first,last,showName,album){const out=m.out;const row=h('div',{class:'mr'+(out?' out':''),'data-id':m.id});
  if(!out&&S.cd&&S.cd.type!=='user'){row.append(last?avatar(m.from_id,m.from,34):h('div',{class:'sp'}))}
  const nobg=m.media&&(m.media.kind==='sticker'||m.media.kind==='videonote')&&!m.text;
- const b=h('div',{class:'m'+(last?' tl':'')+(nobg?' nobg':'')+(S.sel.has(m.id)?' sel':'')});
+ const b=h('div',{class:'m'+(last?' tl':'')+(nobg?' nobg':'')+(S.sel.has(m.id)?' sel':''),title:new Date(m.ts*1e3).toLocaleString()});
  if(showName&&!out&&S.cd&&S.cd.type!=='user')b.append(h('div',{class:'mn',style:'color:'+colorOf(m.from_id),text:m.from||'User'}));
  if(album&&album.length>1){const g=h('div',{style:`display:grid;grid-template-columns:repeat(${album.length>3?2:Math.min(album.length,2)},1fr);gap:2px;margin:-2px -4px 3px`});album.forEach(a=>g.append(mediaNode(a)));b.append(g);const tx=album.find(a=>a.text);if(tx)b.append(...bodyNode(Object.assign({},tx,{media:null,reply:null,fwd:'',via:'',react:tx.react,btn:null})))}
  else b.append(...bodyNode(m));
@@ -274,7 +274,7 @@ $('#msgs').addEventListener('scroll',onScroll);$('#dn').onclick=()=>{const b=$('
 /* ---------- message actions ---------- */
 async function react(m,emoji){try{const r=await api('/app/api/react',A({chat:S.chat,id:m.id,emoji}));if(r.message)replaceMsg(r.message)}catch(e){toast(e.message)}}
 function msgMenu(x,y,m){closeMenu();const top=h('div',{class:'rb'},REACT.map(e=>h('button',{text:e,on:{click(){closeMenu();react(m,e)}}})));
- showMenu(x,y,[{ic:'↩',t:'Reply',fn:()=>setReply(m)},m.media&&m.media.kind!=='sticker'?{ic:'👁',t:'Open',fn:()=>openFile(m)}:null,m.media&&m.media.kind!=='sticker'?{ic:'⬇',t:'Download',fn:()=>downloadMsg(m)}:null,m.text?{ic:'⧉',t:'Copy text',fn:()=>copyText(m.text)}:null,{ic:'➦',t:'Forward',fn:()=>forwardDlg([m.id])},
+ showMenu(x,y,[{ic:'↩',t:'Reply',fn:()=>setReply(m)},m.media&&m.media.kind!=='sticker'?{ic:'👁',t:'Open',fn:()=>openFile(m)}:null,m.media&&m.media.kind!=='sticker'?{ic:'⬇',t:'Download',fn:()=>downloadMsg(m)}:null,{ic:'🔖',t:'Save to Saved Messages',fn:()=>saveMsg(m)},m.text?{ic:'⧉',t:'Copy text',fn:()=>copyText(m.text)}:null,{ic:'➦',t:'Forward',fn:()=>forwardDlg([m.id])},
   {ic:m.pinned?'📍':'📌',t:m.pinned?'Unpin':'Pin',fn:()=>pinMsg(m)},(m.out&&m.text&&!m.service)?{ic:'✎',t:'Edit',fn:()=>startEdit(m)}:null,{ic:'☑',t:'Select',fn:()=>toggleSel(m.id)},
   {ic:'🗑',t:'Delete',red:true,fn:()=>deleteDlg([m.id])}],top)}
 function copyText(t){if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(()=>toast('Copied'),()=>toast('Copy failed'));else toast('Copy not available')}
@@ -351,14 +351,18 @@ async function openFile(m){const x=m.media;if(!x)return;const url='/app/api/file
  else if(k==='text'){try{const r=await fetch(url,{headers:{Range:'bytes=0-1048575'},credentials:'same-origin'});if(!r.ok)return fail();const t=await r.text();body.replaceChildren(h('pre',{text:t+(x.size>1048576?'\n\n… (first 1 MB shown — use Download for the full file)':'')}))}catch(e){fail()}}
  else body.replaceChildren(h('div',{style:'text-align:center'},h('div',{style:'font-size:56px',text:'📄'}),h('b',{text:x.name||'File'}),h('div',{class:'mut',style:'margin:6px 0 14px',text:sz(x.size)+' · preview not available for this type'}),h('button',{class:'p',style:'background:var(--acc);color:#fff;border-radius:8px;padding:10px 18px',text:'⬇ Download',on:{click(){downloadMsg(m)}}})))}
 /* ---------- lightbox ---------- */
+let LB=null;
 function lightbox(id){const L=S.msgs.filter(m=>m.media&&m.media.kind==='photo');let i=L.findIndex(m=>m.id===id);if(i<0)return;const lb=$('#lb'),im=lb.querySelector('img');
- const show=()=>{const m=L[i];im.src='/app/api/file?'+Q({acc:S.acc,chat:S.chat,id:m.id})};lb.style.display='flex';show();
- lb.querySelector('.x').onclick=()=>{lb.style.display='none';im.removeAttribute('src')};const nv=lb.querySelectorAll('.nv');nv[0].onclick=()=>{if(i>0){i--;show()}};nv[1].onclick=()=>{if(i<L.length-1){i++;show()}}}
+ const show=()=>{const m=L[i];im.src='/app/api/file?'+Q({acc:S.acc,chat:S.chat,id:m.id});$('#lbc').textContent=(i+1)+' / '+L.length};
+ const step=d=>{const n=i+d;if(n>=0&&n<L.length){i=n;show()}};LB={step};lb.style.display='flex';show();
+ const close=()=>{lb.style.display='none';im.removeAttribute('src');LB=null};
+ lb.querySelector('.x').onclick=close;lb.onclick=e=>{if(e.target===lb)close()};$('#lbd').onclick=()=>downloadMsg(L[i]);
+ const nv=lb.querySelectorAll('.nv');nv[0].onclick=()=>step(-1);nv[1].onclick=()=>step(1)}
 /* ---------- info panel ---------- */
 function toggleInfo(){S.info=!S.info;document.body.classList.toggle('info-on',S.info);if(S.info)drawInfo()}
 $('#cinfo').onclick=toggleInfo;
 function drawInfo(){const p=$('#info'),d=S.cd,ci=S.ci&&S.ci.id===S.chat?S.ci:null;if(!d){p.replaceChildren();return}
- const kv=(k,v)=>v?h('div',{class:'kv'},h('div',{text:v}),h('small',{text:k})):null;
+ const kv=(k,v)=>v?h('div',{class:'kv',style:'cursor:pointer',title:'Click to copy',on:{click(){copyText(v)}}},h('div',{text:v}),h('small',{text:k})):null;
  p.replaceChildren(h('div',{class:'hd'},h('button',{class:'ib',text:'✕',on:{click:toggleInfo}}),h('b',{text:'Info'})),
   h('div',{class:'big'},avatar(d.id,d.name,110),h('b',{style:'font-size:20px;margin-top:8px',text:d.name}),h('span',{class:'mut',text:(ci&&ci.status)||''})),
   kv('Bio',ci&&ci.about),kv('Username',ci&&ci.username?'@'+ci.username:''),kv('Phone',ci&&ci.phone?'+'+ci.phone.replace(/^\+/,''):''),
@@ -369,6 +373,20 @@ async function loadShared(kind){const b=$('#ibody');b.replaceChildren(h('div',{c
  const ms=(await api('/app/api/shared?'+Q({acc:S.acc,chat:S.chat,kind}))).messages;if(!ms.length){b.replaceChildren(h('div',{class:'empty',text:'Nothing here'}));return}
  if(kind==='media'||kind==='gifs'){b.replaceChildren(h('div',{class:'grid'},ms.map(m=>h('div',{on:{click(){openById(S.chat,m.id)}}},S.set.previews?h('img',{alt:'',loading:'lazy',src:'/app/api/thumb?'+Q({acc:S.acc,chat:S.chat,id:m.id}),on:{error(e){e.target.remove()}}}):null))))}
  else b.replaceChildren(...ms.map(m=>h('div',{class:'kv',style:'cursor:pointer',on:{click(){openById(S.chat,m.id)}}},kind==='links'?h('div',{},m.web?h('b',{text:m.web.title||m.web.url}):null,h('div',{class:'mut',style:'font-size:13px',text:m.text.slice(0,120)})):h('div',{text:(m.media&&m.media.name)||(m.media&&m.media.kind)||'File'}),h('small',{text:tm(m.ts)+' · '+(m.media?sz(m.media.size):'')}))))}catch(e){b.replaceChildren(h('div',{class:'empty',text:e.message}))}}
+/* ---------- extras: save, jump to date, mark all read, shortcuts, multi-select actions ---------- */
+async function saveMsg(m){const u=cur().uid;if(!u){toast('No account');return}try{await api('/app/api/forward',A({from_chat:S.chat,ids:[m.id],to_chat:u,hide_author:false}));toast('🔖 Saved to Saved Messages')}catch(e){toast(e.message)}}
+async function markAll(){const L=S.dl.filter(d=>d.unread||d.mentions);if(!L.length){toast('Nothing unread');return}toast('Marking '+L.length+' chats as read…',6000);let n=0;
+ for(const d of L){try{await api('/app/api/read',A({chat:d.id,max_id:0}));d.unread=0;d.mentions=0;n++}catch(e){}}drawList();toast('✓ '+n+' chat(s) marked as read')}
+$('#cdate').onclick=()=>{if(!S.chat)return;const dt=h('input',{type:'date'});dt.max=new Date().toISOString().slice(0,10);
+ modal('Jump to date',[h('div',{class:'mut',text:'Shows the last message of that day (or the closest one before it).'}),dt],[{t:'Cancel'},{t:'Go',c:'p',async fn(c){if(!dt.value)return;const ts=Math.floor(new Date(dt.value+'T23:59:59').getTime()/1e3);
+  try{const r=await api('/app/api/bydate?'+Q({acc:S.acc,chat:S.chat,ts}));c();if(!r.id){toast('No messages on or before that date');return}jumpTo(r.id)}catch(e){toast(e.message)}}}])};
+$('#selcp').onclick=()=>{const t=S.msgs.filter(m=>S.sel.has(m.id)&&m.text).map(m=>m.text).join('\n\n');if(t)copyText(t);else toast('No text in the selection')};
+$('#seldl').onclick=async()=>{const ms=S.msgs.filter(m=>S.sel.has(m.id)&&m.media&&m.media.kind!=='sticker');if(!ms.length){toast('No files in the selection');return}for(const m of ms){await downloadMsg(m);await sleep(900)}};
+function stepChat(d){const i=S.dl.findIndex(x=>x.id===S.chat),n=S.dl[i+d];if(n)openChat(n)}
+document.addEventListener('keydown',e=>{
+ if(LB&&$('#lb').style.display!=='none'){if(e.key==='ArrowLeft')LB.step(-1);else if(e.key==='ArrowRight')LB.step(1)}
+ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('#search').focus();$('#search').select()}
+ else if(e.altKey&&(e.key==='ArrowUp'||e.key==='ArrowDown')){e.preventDefault();stepChat(e.key==='ArrowDown'?1:-1)}});
 /* ---------- chat header menu / search ---------- */
 $('#cmore').onclick=e=>{const d=S.cd;if(!d)return;const r=e.currentTarget.getBoundingClientRect();chatMenu(r.left-150,r.bottom,d)};
 $('#back').onclick=()=>{document.body.classList.remove('chat')};
@@ -389,7 +407,7 @@ function openDrawer(noRefresh){const dr=$('#dr'),c=cur(),st=S.st||{};dr.replaceC
    c.id&&!c.storage?stBtn('Use "'+(c.label||c.name)+'" for Storage scanning',()=>linkStorage(c.id)):null):null,
   h('div',{class:'it',on:{click(){closeDrawer();addAccount()}}},'＋','Add account'),h('hr',{style:'border:0;border-top:1px solid var(--bd);width:100%'}),
   h('div',{class:'it',on:{click(){closeDrawer();if(c.uid)openById(c.uid,0)}}},'🔖','Saved Messages'),h('div',{class:'it',on:{click(){closeDrawer();newChat()}}},'👤','Contacts / New chat'),
-  h('div',{class:'it',on:{click(){closeDrawer();S.archived=!S.archived;loadDialogs()}}},'🗄',S.archived?'Back to chats':'Archived chats'),h('div',{class:'it',on:{click(){closeDrawer();sessions()}}},'🛡','Active sessions'),
+  h('div',{class:'it',on:{click(){closeDrawer();S.archived=!S.archived;loadDialogs()}}},'🗄',S.archived?'Back to chats':'Archived chats'),h('div',{class:'it',on:{click(){closeDrawer();markAll()}}},'✓','Mark all as read'),h('div',{class:'it',on:{click(){closeDrawer();sessions()}}},'🛡','Active sessions'),
   h('div',{class:'it',on:{click(){closeDrawer();profile()}}},'✎','Edit profile'),h('div',{class:'it',on:{click(){closeDrawer();settings()}}},'⚙','Settings'),
   h('div',{class:'it',on:{click(){S.set.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';saveSet()}}},'🌙','Night mode'),
   h('div',{class:'mut',style:'padding:12px 18px;font-size:12px',text:S.bw?`📊 ${(S.bw.used/1048576).toFixed(0)} MB used`+(S.bw.limit?` / ${(S.bw.limit/1073741824).toFixed(1)} GB`:' (no limit)')+` (${S.bw.month})`:''}));$('#drawer').classList.add('on');if(noRefresh!==true)loadStorage()}
@@ -404,9 +422,10 @@ function settings(){const sw=(k,t)=>{const i=h('input',{type:'checkbox'});i.chec
  const th=h('select',{},['auto','light','dark'].map(v=>h('option',{value:v,text:v[0].toUpperCase()+v.slice(1)})));th.value=S.set.theme;th.onchange=()=>{S.set.theme=th.value;saveSet()};
  const cacheRow=h('div',{class:'mut',style:'font-size:13px',text:'Server cache: …'}),loadCache=()=>api('/app/api/cache').then(c=>{cacheRow.textContent=`Server cache: ${sz(c.used)} of ${sz(c.limit)} (${c.files} file(s)). Big files you download to the server are kept here and replayed without re-downloading.`}).catch(()=>{}),
   clr=h('button',{class:'mut',style:'text-align:left',text:'🗑 Clear server cache',on:{async click(){try{const r=await api('/app/api/cache/clear',{});toast('Cleared '+r.removed+' file(s)');S.dls={};drawMsgs('keep');loadCache()}catch(e){toast(e.message)}}}});loadCache();
- modal('Settings',[h('div',{class:'sw'},h('span',{text:'Theme'}),th),cacheRow,clr,sw('avatars','Show profile photos'),sw('previews','Auto-load photo/video previews'),sw('notif','Desktop notifications'),sw('sound','Notification sound'),sw('enter','Enter sends message'),sw('md','Markdown formatting by default'),
+ const fsSel=h('select',{},[[13,'Small'],[15,'Normal'],[17,'Large'],[19,'Extra large']].map(([v,t])=>h('option',{value:v,text:t})));fsSel.value=String(S.set.fs||15);fsSel.onchange=()=>{S.set.fs=+fsSel.value;saveSet()};
+ modal('Settings',[h('div',{class:'sw'},h('span',{text:'Theme'}),th),h('div',{class:'sw'},h('span',{text:'Text size'}),fsSel),cacheRow,clr,sw('avatars','Show profile photos'),sw('previews','Auto-load photo/video previews'),sw('notif','Desktop notifications'),sw('sound','Notification sound'),sw('enter','Enter sends message'),sw('md','Markdown formatting by default'),
   h('div',{class:'mut',style:'font-size:13px',text:S.bw?`Bandwidth this month: ${(S.bw.used/1048576).toFixed(0)} MB`+(S.bw.limit?` of ${(S.bw.limit/1073741824).toFixed(1)} GB.`:' (no limit).')+' Previews and avatars are small; full photos/videos/files use more.':''}),
-  h('div',{class:'mut',style:'font-size:13px',text:`Upload limit for this account: ${mbs(cur().max_upload||0)}${cur().premium?' (Premium)':''} — Telegram's own limit`})],[{t:'Close'}])}
+  h('div',{class:'mut',style:'font-size:12px',text:'Shortcuts: Ctrl+K search · Alt+↑/↓ next/previous chat · Esc close · ←/→ in the photo viewer · Shift+click select messages'}),h('div',{class:'mut',style:'font-size:13px',text:`Upload limit for this account: ${mbs(cur().max_upload||0)}${cur().premium?' (Premium)':''} — Telegram's own limit`})],[{t:'Close'}])}
 async function sessions(){const body=h('div',{},h('div',{class:'empty',text:'Loading…'}));const close=modal('Active sessions',body,[{t:'Close'}]);try{const r=(await api('/app/api/sessions?'+Q({acc:S.acc}))).sessions;body.replaceChildren(...r.map(s=>h('div',{class:'kv'},h('b',{text:(s.current?'● This device — ':'')+(s.app||s.device)}),h('div',{class:'mut',style:'font-size:13px',text:`${s.device} · ${s.platform} · ${s.ip} · ${s.country}`}),h('div',{class:'mut',style:'font-size:12px',text:'Last active '+new Date(s.active*1e3).toLocaleString()}),
   s.current?null:h('button',{style:'color:#e53935',text:'Terminate',on:{click(){confirmBox('Terminate this session?','Terminate',async()=>{try{await api('/app/api/sessions/terminate',A({hash:s.hash}));close();sessions()}catch(e){toast(e.message)}},true)}}}))))}catch(e){body.replaceChildren(h('div',{class:'err',text:e.message}))}}
 async function profile(){const c=cur();let about='';try{about=(await api('/app/api/chatinfo?'+Q({acc:S.acc,chat:c.uid}))).info.about||''}catch(e){}const parts=(c.name||'').split(' ');const f=h('input',{value:parts[0]||'',placeholder:'First name'}),l=h('input',{value:parts.slice(1).join(' '),placeholder:'Last name'}),a=h('textarea',{rows:3,maxlength:70,placeholder:'Bio'});a.value=about;
