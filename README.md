@@ -51,6 +51,15 @@
 **2FA bypass password (optional):** `ADMIN_2FA_PASSWORD` (किमान 8 अक्षरं). Bot ने "code पाठवा" म्हटल्यावर Authenticator चा 6 अंकी code
 किंवा हा password — दोन्हीपैकी काहीही चालतं. Bot चा मजकूर बदलत नाही. (`ADMIN_TOTP_SECRET` किंवा `ADMIN_2FA_PASSWORD` यापैकी काहीही सेट असेल तर 2FA step नेहमी येतो.)
 
+**Server Terminal (ऐच्छिक, DEFAULT बंद):** `TERMINAL_PASSWORD` (किमान 12 अक्षरं) सेट केलं तर website च्या
+`⋯` menu मध्ये **💻 Server Terminal** दिसेल — `/term` वर खरा shell (bash) browser मधून उघडतो, redeploy न करता
+server वर file बदलणं / package install करणं / debug करणं यासाठी. हे काम करण्याआधी website login (`WEB_PASSWORD`)
++ वेगळा `TERMINAL_PASSWORD` दोन्ही लागतात; shell उघडला की bot owner ला Telegram वर notification जातं; 30 मिनिटं
+निष्क्रिय राहिला तर आपोआप बंद होतो.
+⚠️ **हे server चा full root access आहे** — हा password जो कोणाकडे जाईल तो या container वर काहीही करू शकतो
+(सगळे secrets वाचणं, files delete करणं, नवीन software चालवणं). `WEB_PASSWORD` पेक्षा वेगळा, लांब, फक्त इथेच
+वापरलेला password ठेव; गरज नसेल तेव्हा `TERMINAL_PASSWORD` env काढून हे पूर्ण बंद कर.
+
 **Limits बंद आहेत:** bandwidth limit आणि account limit default ने लागू होत नाहीत. परत हवे असतील तर `ENFORCE_LIMITS=1`
 (मग `BW_LIMIT_GB` आणि `MAX_ACCOUNTS` लागू होतात).
 

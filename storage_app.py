@@ -7,6 +7,7 @@ v2: multiple groups (add / switch from the UI), periodic "anything new?" check
 """
 
 import os, sys, re, signal, sqlite3, hashlib, hmac, secrets, time, threading, asyncio, mimetypes, ipaddress
+import pty, fcntl, struct, termios, subprocess, base64 as _b64
 from datetime import timedelta
 from functools import wraps
 from urllib.parse import quote as urlquote
@@ -2731,7 +2732,7 @@ $('#c-sort').onclick = e => {
 };
 $('#c-more').onclick = e => {
   e.stopPropagation();
-  btnMenu(e.currentTarget, [['🕘 Recent files', showRecent], ['Select all', () => { S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }], ['Check for new files now', checkNow], ['⏱ Check interval…', setIntervalDlg], '-', ['➕ Add group…', addGroup], ['➖ Remove this group', removeGroup], '-', ['Re-index this group', reindex], '-', ['Logout', () => { location.href = '/logout'; }]]);
+  btnMenu(e.currentTarget, [['🕘 Recent files', showRecent], ['Select all', () => { S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }], ['Check for new files now', checkNow], ['⏱ Check interval…', setIntervalDlg], '-', ['➕ Add group…', addGroup], ['➖ Remove this group', removeGroup], '-', ['Re-index this group', reindex], '-', ['💻 Server Terminal (admin)', () => window.open('/term', '_blank')], '-', ['Logout', () => { location.href = '/logout'; }]]);
 };
 let qT;
 $('#q').addEventListener('input', e => {
@@ -3935,6 +3936,270 @@ def status_text():
 # ── Jinja filter ─────────────────────────────────────────────────────────
 app.jinja_env.filters["urlencode"] = lambda s: urlquote(str(s), safe="")
 
+# ── Admin Terminal (optional, OFF by default) ──────────────────────────────
+# A real shell on this server, reachable from the browser. Anyone who learns TERMINAL_PASSWORD
+# can run anything this process can — install software, read/change/delete any file, read every
+# env var (so every secret in this app), reach the network this container can reach. This is the
+# same power as SSH into the box, just reached through the website instead of a terminal app.
+# It exists so you can fix things without a redeploy; it is not a general-purpose feature to leave
+# open. Use a password you use nowhere else, and turn it off (unset the env var) when not needed.
+TERMINAL_PASSWORD = os.environ.get("TERMINAL_PASSWORD", "").strip()
+TERMINAL_ENABLED = bool(TERMINAL_PASSWORD)
+if TERMINAL_PASSWORD and len(TERMINAL_PASSWORD) < 12:
+    print("[security] TERMINAL_PASSWORD is shorter than 12 characters — terminal disabled", flush=True)
+    TERMINAL_PASSWORD, TERMINAL_ENABLED = "", False
+print(f"[term] admin terminal: {'ENABLED (/term) — protect TERMINAL_PASSWORD like root' if TERMINAL_ENABLED else 'disabled (set TERMINAL_PASSWORD to turn on)'}", flush=True)
+
+TERM_IDLE = 1800          # auto-close the shell after this many seconds with no activity
+TERM_BUF_MAX = 2_000_000  # keep at most this much unread output in memory
+_term = {"proc": None, "fd": None, "pid": 0, "buf": bytearray(), "off": 0, "last": 0, "opened_by": ""}
+_term_lock = threading.Lock()
+_term_cond = threading.Condition(_term_lock)
+
+def _term_alive():
+    return _term["proc"] is not None and _term["proc"].poll() is None
+
+def _term_reader(fd, proc):
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        with _term_cond:
+            if _term["fd"] != fd:          # a newer session replaced this one
+                break
+            _term["buf"].extend(chunk)
+            if len(_term["buf"]) > TERM_BUF_MAX:
+                drop = len(_term["buf"]) - TERM_BUF_MAX // 2
+                del _term["buf"][:drop]
+                _term["off"] += drop
+            _term_cond.notify_all()
+    _term_close(expect_fd=fd)
+
+def _term_close(expect_fd=None):
+    with _term_cond:
+        if expect_fd is not None and _term["fd"] != expect_fd:
+            return
+        proc, fd = _term["proc"], _term["fd"]
+        _term["proc"] = _term["fd"] = None
+        _term_cond.notify_all()
+    if proc is not None:
+        try:
+            os.killpg(_term_pid_of(proc), signal.SIGKILL)
+        except Exception:
+            pass
+    if fd is not None:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+
+def _term_pid_of(proc):
+    return proc.pid
+
+def _term_start(who):
+    with _term_cond:
+        if _term_alive():
+            return
+        master, slave = pty.openpty()
+        env = dict(os.environ, TERM="xterm-256color")
+        cwd = "/app" if os.path.isdir("/app") else os.getcwd()
+        proc = subprocess.Popen(["/bin/bash", "-l"], stdin=slave, stdout=slave, stderr=slave,
+                                env=env, cwd=cwd, preexec_fn=os.setsid, close_fds=True)
+        os.close(slave)
+        _term["proc"], _term["fd"], _term["pid"] = proc, master, proc.pid
+        _term["buf"], _term["off"], _term["opened_by"], _term["last"] = bytearray(), 0, who, time.time()
+    threading.Thread(target=_term_reader, args=(master, proc), daemon=True, name="term_reader").start()
+    print(f"[term] ⚠ shell opened by {who}", flush=True)
+    try:
+        if _tg_ready.is_set() and _tg_client is not None and _owner_chat():
+            tg(_tg_client.send_message(_owner_chat(),
+               f"⚠️ **Server terminal उघडलं**\n👤 {_clean(who)}\n\n"
+               "तू हे केलं नसेल, तर लगेच website आणि TERMINAL_PASSWORD दोन्ही बदल."), timeout=10)
+    except Exception as e:
+        print(f"[term] notify failed: {e}", flush=True)
+
+def run_term_reaper():
+    _low_priority()
+    while True:
+        time.sleep(30)
+        if _term_alive() and time.time() - _term["last"] > TERM_IDLE:
+            print("[term] idle timeout — closing shell", flush=True)
+            _term_close()
+
+TERM_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Server Terminal</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/css/xterm.min.css">
+<style>
+*{box-sizing:border-box;margin:0}html,body{height:100%;background:#0d1117}
+body{display:flex;flex-direction:column;font:14px system-ui,sans-serif;color:#e6edf3;overflow:hidden}
+#bar{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#161b22;border-bottom:1px solid #30363d;flex:none}
+#bar b{flex:1}
+#bar button{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit}
+#bar button:hover{background:#30363d}
+#warn{background:#3d1a1a;border-bottom:1px solid #7d2d2d;color:#f87171;padding:6px 14px;font-size:12.5px;flex:none}
+#gate{position:fixed;inset:0;background:#0d1117ee;display:flex;align-items:center;justify-content:center;z-index:5}
+#gate[hidden]{display:none}
+#gate .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:2rem 2.5rem;width:100%;max-width:380px}
+#gate input{width:100%;padding:.7rem 1rem;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;margin:.6rem 0;font-size:1rem}
+#gate button{width:100%;padding:.75rem;border:none;border-radius:8px;background:#238636;color:#fff;font-weight:600;cursor:pointer}
+#gate .err{color:#f87171;font-size:.85rem;min-height:1.2em;margin-top:.3rem}
+#term{flex:1;min-height:0;padding:6px}
+</style></head><body>
+<div id="warn">⚠️ हा server वरचा खरा shell आहे — इथे चालवलेला प्रत्येक command थेट server वर चालतो. विश्वास नसलेलं काही चालवू नकोस.</div>
+<div id="bar"><b>💻 Server Terminal</b><button id="stop">⏻ Stop shell</button></div>
+<div id="term"></div>
+<div id="gate"><div class="card"><div style="text-align:center;font-size:2rem">🔒</div>
+<h2 style="text-align:center;color:#58a6ff;margin:.4rem 0 1rem">Terminal password</h2>
+<input id="pw" type="password" placeholder="TERMINAL_PASSWORD" autocomplete="off" autofocus>
+<button id="go">Open shell</button><div class="err" id="err"></div></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/addon-fit/addon-fit.min.js"></script>
+<script>
+(() => {
+'use strict';
+const term = new Terminal({cursorBlink: true, fontSize: 14, fontFamily: 'ui-monospace,Consolas,monospace',
+  theme: {background: '#0d1117', foreground: '#e6edf3'}});
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById('term'));
+let since = 0, alive = false, polling = false;
+const b64e = s => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+const b64d = s => new TextDecoder().decode(Uint8Array.from(atob(s), c => c.charCodeAt(0)));
+async function api(url, body) {
+  const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'fetch'}, body: JSON.stringify(body || {})});
+  let d = {}; try { d = await r.json(); } catch (e) {}
+  return r.status === 401 ? (location.href = '/login', d) : d;
+}
+async function poll() {
+  if (polling) return; polling = true;
+  while (alive) {
+    try {
+      const r = await fetch('/api/term/poll?since=' + since, {headers: {'X-Requested-With': 'fetch'}});
+      if (r.status === 401) { location.href = '/login'; return; }
+      const d = await r.json();
+      if (d.data) { term.write(b64d(d.data)); since = d.next; }
+      if (!d.alive) { alive = false; term.write('\r\n\x1b[31m[session closed]\x1b[0m\r\n'); setTimeout(showGate, 1200); }
+    } catch (e) { await new Promise(res => setTimeout(res, 2000)); }
+  }
+  polling = false;
+}
+term.onData(data => { if (alive) api('/api/term/write', {data: b64e(data)}); });
+function sendResize() { try { fit.fit(); } catch (e) {} if (alive) api('/api/term/resize', {rows: term.rows, cols: term.cols}); }
+window.addEventListener('resize', sendResize);
+document.getElementById('stop').onclick = () => { api('/api/term/stop'); alive = false; location.reload(); };
+function showGate() { document.getElementById('gate').hidden = false; document.getElementById('pw').focus(); }
+function hideGate() { document.getElementById('gate').hidden = true; }
+document.getElementById('go').onclick = async () => {
+  const pw = document.getElementById('pw').value, err = document.getElementById('err'), go = document.getElementById('go');
+  err.textContent = ''; go.disabled = true; go.textContent = 'Opening…';
+  const r = await api('/api/term/start', {password: pw});
+  go.disabled = false; go.textContent = 'Open shell';
+  if (!r.ok) { err.textContent = '❌ ' + (r.msg || 'failed'); return; }
+  document.getElementById('pw').value = '';
+  hideGate(); since = 0; alive = true; term.clear(); sendResize(); poll();
+};
+document.getElementById('pw').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('go').click(); });
+showGate();
+})();
+</script>
+</body></html>"""
+
+@app.route("/term")
+@require_auth
+def term_page():
+    if not TERMINAL_ENABLED:
+        return Response("Terminal disabled — set TERMINAL_PASSWORD (12+ chars) to turn it on.",
+                        status=404, mimetype="text/plain")
+    resp = Response(TERM_HTML, mimetype="text/html")
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+        "font-src https://cdnjs.cloudflare.com; connect-src 'self'; img-src 'self' data:; "
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'self'")
+    return resp
+
+@app.route("/api/term/start", methods=["POST"])
+@require_api
+def api_term_start():
+    if not TERMINAL_ENABLED:
+        return jsonify({"ok": False, "msg": "Terminal बंद आहे (TERMINAL_PASSWORD सेट नाही)"}), 404
+    d = request.get_json(silent=True) or {}
+    pw = str(d.get("password") or "")
+    ip = get_ip()
+    if is_blocked(ip):
+        return jsonify({"ok": False, "msg": "या IP वरून खूप चुकीचे प्रयत्न झाले — थोड्या वेळाने try कर"}), 429
+    if not hmac.compare_digest(pw.encode(), TERMINAL_PASSWORD.encode()):
+        record_fail(ip)
+        time.sleep(1)
+        return jsonify({"ok": False, "msg": "चुकीचा terminal password"}), 403
+    _term_start(f"{ip} (web session)")
+    return jsonify({"ok": True, "alive": _term_alive()})
+
+@app.route("/api/term/poll")
+@require_api
+def api_term_poll():
+    if not TERMINAL_ENABLED:
+        return jsonify({"ok": False}), 404
+    try:
+        since = int(request.args.get("since", 0))
+    except ValueError:
+        since = 0
+    deadline = time.time() + 25
+    with _term_cond:
+        while time.time() < deadline:
+            total = _term["off"] + len(_term["buf"])
+            if total > since or not _term_alive():
+                break
+            _term_cond.wait(timeout=1)
+        start = max(0, since - _term["off"])
+        data = bytes(_term["buf"][start:])
+        newoff = _term["off"] + len(_term["buf"])
+        alive = _term_alive()
+    if alive:
+        _term["last"] = time.time()
+    return jsonify({"ok": True, "data": _b64.b64encode(data).decode(), "next": newoff, "alive": alive})
+
+@app.route("/api/term/write", methods=["POST"])
+@require_api
+def api_term_write():
+    if not TERMINAL_ENABLED or not _term_alive():
+        return jsonify({"ok": False}), 409
+    d = request.get_json(silent=True) or {}
+    try:
+        data = _b64.b64decode(d.get("data") or "")
+    except Exception:
+        return jsonify({"ok": False}), 400
+    try:
+        os.write(_term["fd"], data)
+    except OSError:
+        return jsonify({"ok": False}), 409
+    _term["last"] = time.time()
+    return jsonify({"ok": True})
+
+@app.route("/api/term/resize", methods=["POST"])
+@require_api
+def api_term_resize():
+    if not TERMINAL_ENABLED or not _term_alive():
+        return jsonify({"ok": False}), 409
+    d = request.get_json(silent=True) or {}
+    try:
+        rows, cols = max(1, int(d.get("rows", 24))), max(1, int(d.get("cols", 80)))
+        fcntl.ioctl(_term["fd"], termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except Exception:
+        return jsonify({"ok": False}), 400
+    return jsonify({"ok": True})
+
+@app.route("/api/term/stop", methods=["POST"])
+@require_api
+def api_term_stop():
+    _term_close()
+    return jsonify({"ok": True})
+
 # ── Main ──────────────────────────────────────────────────────────────────
 _bg_started = False
 def start_background():
@@ -3943,8 +4208,11 @@ def start_background():
     if _bg_started:
         return
     _bg_started = True
-    for fn, name in ((run_telegram, "tg_client"), (run_indexer, "indexer"),
-                     (run_poller, "poller"), (run_snapshotter, "snapshotter")):
+    threads = [(run_telegram, "tg_client"), (run_indexer, "indexer"),
+               (run_poller, "poller"), (run_snapshotter, "snapshotter")]
+    if TERMINAL_ENABLED:
+        threads.append((run_term_reaper, "term_reaper"))
+    for fn, name in threads:
         threading.Thread(target=fn, daemon=True, name=name).start()
 
 if __name__ == "__main__":          # standalone mode (without Worker Hub)

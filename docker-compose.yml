@@ -15,6 +15,7 @@ services:
       ADMIN_PASSWORD: "ChangeMe-Long-Admin-Password"    # bot login password (min 10 chars)
       ADMIN_TOTP_SECRET: ""                # 2FA secret (strongly recommended)
       ADMIN_2FA_PASSWORD: ""               # optional: password accepted instead of the Authenticator code (min 8 chars)
+      TERMINAL_PASSWORD: ""               # optional: enables a real browser shell at /term — DANGEROUS, see README (min 12 chars)
       COLAB_SECRET: "change-me"
       PANEL_PASSWORD: "change-me"
       SECRET_KEY: "CHANGE_THIS_RANDOM_64_CHARS"
