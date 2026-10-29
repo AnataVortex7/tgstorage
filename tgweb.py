@@ -965,15 +965,34 @@ class Manager:
         return {'login_id': lid, 'token': qr.token}
 
     async def a_qr_wait(self, lid):
+        """Poll (do NOT wait for Telethon's update event): the other side usually approves the token BEFORE we
+        start waiting, so that event would already be gone."""
         v = self._login(lid)
+        cl = v['cl']
+        req = functions.auth.ExportLoginTokenRequest(int(v['api'][0]), v['api'][1], [])
+        user, deadline = None, time.time() + 50
         try:
-            await v['qr'].wait(40)
+            while time.time() < deadline:
+                resp = await cl(req)
+                if isinstance(resp, types.auth.LoginTokenMigrateTo):      # account lives on another data centre
+                    await cl._switch_dc(resp.dc_id)
+                    resp = await cl(functions.auth.ImportLoginTokenRequest(resp.token))
+                if isinstance(resp, types.auth.LoginTokenSuccess):
+                    user = resp.authorization.user
+                    await cl._on_login(user)
+                    break
+                await asyncio.sleep(1.5)
         except Exception as e:
             if type(e).__name__ == 'SessionPasswordNeededError':
                 return {'next': 'password', 'login_id': lid}
             self.logins.pop(lid, None)
-            await self._quiet_disc(v['cl'])
+            await self._quiet_disc(cl)
+            print(f'[qr-import] failed: {type(e).__name__}: {e}', flush=True)
             raise ApiError(f'{type(e).__name__}: {e}'[:160])
+        if user is None:
+            self.logins.pop(lid, None)
+            await self._quiet_disc(cl)
+            raise ApiError('Storage account ने login approve केला नाही (वेळ संपली) — परत try करा')
         r = await self._finish(lid, v)
         r['login_id'] = lid
         return r
@@ -1256,7 +1275,7 @@ def api_storage_import():
         r = M.call(M.a_qr_begin(str(d.get('label') or 'Storage')), 40)
         STORAGE.user_accept_token(r['token'])
         lid = r['login_id']
-    return jsonify(M.call(M.a_qr_wait(lid), 60))
+    return jsonify(M.call(M.a_qr_wait(lid), 150))
 
 @bp.get('/api/dialogs')
 @api
