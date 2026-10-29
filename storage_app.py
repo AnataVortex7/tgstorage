@@ -3952,6 +3952,18 @@ print(f"[term] admin terminal: {'ENABLED (/term) — protect TERMINAL_PASSWORD l
 
 TERM_IDLE = 1800          # auto-close the shell after this many seconds with no activity
 TERM_BUF_MAX = 2_000_000  # keep at most this much unread output in memory
+# A wrong TERMINAL_PASSWORD must NEVER lock the website login (is_blocked/record_fail is shared with
+# /login and trips after MAX_FAIL=2) — so terminal attempts get their own, separate, in-memory limiter.
+_term_fails = {}          # ip -> [timestamps of recent wrong attempts]
+TERM_MAX_FAIL, TERM_FAIL_WINDOW, TERM_LOCK_SECS = 5, 600, 600
+
+def _term_blocked(ip):
+    hits = [t for t in _term_fails.get(ip, []) if time.time() - t < TERM_FAIL_WINDOW]
+    _term_fails[ip] = hits
+    return len(hits) >= TERM_MAX_FAIL and time.time() - hits[-TERM_MAX_FAIL] < TERM_LOCK_SECS
+
+def _term_record_fail(ip):
+    _term_fails.setdefault(ip, []).append(time.time())
 _term = {"proc": None, "fd": None, "pid": 0, "buf": bytearray(), "off": 0, "last": 0, "opened_by": ""}
 _term_lock = threading.Lock()
 _term_cond = threading.Condition(_term_lock)
@@ -4033,7 +4045,7 @@ TERM_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Server Terminal</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/css/xterm.min.css">
+<link rel="stylesheet" href="/term/assets/xterm.css">
 <style>
 *{box-sizing:border-box;margin:0}html,body{height:100%;background:#0d1117}
 body{display:flex;flex-direction:column;font:14px system-ui,sans-serif;color:#e6edf3;overflow:hidden}
@@ -4057,8 +4069,8 @@ body{display:flex;flex-direction:column;font:14px system-ui,sans-serif;color:#e6
 <h2 style="text-align:center;color:#58a6ff;margin:.4rem 0 1rem">Terminal password</h2>
 <input id="pw" type="password" placeholder="TERMINAL_PASSWORD" autocomplete="off" autofocus>
 <button id="go">Open shell</button><div class="err" id="err"></div></div></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/addon-fit/addon-fit.min.js"></script>
+<script src="/term/assets/xterm.js"></script>
+<script src="/term/assets/addon-fit.js"></script>
 <script>
 (() => {
 'use strict';
@@ -4116,12 +4128,24 @@ def term_page():
         return Response("Terminal disabled — set TERMINAL_PASSWORD (12+ chars) to turn it on.",
                         status=404, mimetype="text/plain")
     resp = Response(TERM_HTML, mimetype="text/html")
+    # xterm.js is bundled in term_assets/ and served below — no CDN, so this stays same-origin only.
     resp.headers["Content-Security-Policy"] = (
-        "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
-        "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
-        "font-src https://cdnjs.cloudflare.com; connect-src 'self'; img-src 'self' data:; "
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "connect-src 'self'; img-src 'self' data:; "
         "base-uri 'none'; form-action 'self'; frame-ancestors 'self'")
     return resp
+
+_TERM_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "term_assets")
+_TERM_ASSETS = {"xterm.js": "application/javascript", "xterm.css": "text/css",
+                "addon-fit.js": "application/javascript"}
+
+@app.route("/term/assets/<name>")
+@require_auth
+def term_assets(name):
+    if not TERMINAL_ENABLED or name not in _TERM_ASSETS:
+        return Response(status=404)
+    from flask import send_from_directory
+    return send_from_directory(_TERM_ASSETS_DIR, name, mimetype=_TERM_ASSETS[name], max_age=86400)
 
 @app.route("/api/term/start", methods=["POST"])
 @require_api
@@ -4131,10 +4155,11 @@ def api_term_start():
     d = request.get_json(silent=True) or {}
     pw = str(d.get("password") or "")
     ip = get_ip()
-    if is_blocked(ip):
-        return jsonify({"ok": False, "msg": "या IP वरून खूप चुकीचे प्रयत्न झाले — थोड्या वेळाने try कर"}), 429
+    if _term_blocked(ip):
+        return jsonify({"ok": False, "msg": "या IP वरून खूप चुकीचे terminal password प्रयत्न झाले — "
+                                            "10 मिनिटं थांब (हे website login ला अडवत नाही)"}), 429
     if not hmac.compare_digest(pw.encode(), TERMINAL_PASSWORD.encode()):
-        record_fail(ip)
+        _term_record_fail(ip)
         time.sleep(1)
         return jsonify({"ok": False, "msg": "चुकीचा terminal password"}), 403
     _term_start(f"{ip} (web session)")

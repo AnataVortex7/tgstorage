@@ -59,6 +59,7 @@ server वर file बदलणं / package install करणं / debug कर
 ⚠️ **हे server चा full root access आहे** — हा password जो कोणाकडे जाईल तो या container वर काहीही करू शकतो
 (सगळे secrets वाचणं, files delete करणं, नवीन software चालवणं). `WEB_PASSWORD` पेक्षा वेगळा, लांब, फक्त इथेच
 वापरलेला password ठेव; गरज नसेल तेव्हा `TERMINAL_PASSWORD` env काढून हे पूर्ण बंद कर.
+(Terminal UI साठी लागणारी xterm.js library `term_assets/` मध्ये bundled आहे — कोणत्याही बाहेरच्या CDN वर अवलंबून नाही.)
 
 **Limits बंद आहेत:** bandwidth limit आणि account limit default ने लागू होत नाहीत. परत हवे असतील तर `ENFORCE_LIMITS=1`
 (मग `BW_LIMIT_GB` आणि `MAX_ACCOUNTS` लागू होतात).
