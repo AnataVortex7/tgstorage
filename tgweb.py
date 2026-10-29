@@ -32,8 +32,10 @@ SESSION_KEY = os.environ.get('SESSION_KEY', '').strip()
 DEF_API_ID = os.environ.get('TG_API_ID', '').strip()
 DEF_API_HASH = os.environ.get('TG_API_HASH', '').strip()
 MB = 1024 * 1024
-BW_LIMIT = int(float(os.environ.get('BW_LIMIT_GB', '4')) * 1024 ** 3)
-MAX_ACCOUNTS = int(os.environ.get('MAX_ACCOUNTS', '6'))
+# Limits are OFF by default (0 = unlimited). Set ENFORCE_LIMITS=1 to bring BW_LIMIT_GB / MAX_ACCOUNTS back.
+LIMITS_ON = os.environ.get('ENFORCE_LIMITS', '0').strip() == '1'
+BW_LIMIT = int(float(os.environ.get('BW_LIMIT_GB', '4')) * 1024 ** 3) if LIMITS_ON else 0
+MAX_ACCOUNTS = int(os.environ.get('MAX_ACCOUNTS', '6')) if LIMITS_ON else 0
 TG_LIMIT, TG_LIMIT_PREMIUM = 2000 * MB, 4000 * MB          # Telegram ची खरी मर्यादा
 MAX_UPLOAD = int(float(os.environ.get('MAX_UPLOAD_MB', '4000')) * MB)
 MAX_MEDIA = int(float(os.environ.get('MAX_MEDIA_MB', '4000')) * MB)
@@ -256,6 +258,14 @@ def default_factory(sess, api_id, api_hash):
                           connection_retries=None, retry_delay=3, auto_reconnect=True, flood_sleep_threshold=60)
 
 client_factory = default_factory
+
+STORAGE = None            # storage_app module (plugged in by app.py) — the Backup Browser's user account
+
+def STORAGE_UID():
+    try:
+        return (STORAGE.user_info() or {}).get('uid') if STORAGE else None
+    except Exception:
+        return None
 
 REVOKED = {'AuthKeyUnregisteredError', 'SessionRevokedError', 'UserDeactivatedError',
            'UserDeactivatedBanError', 'AuthKeyDuplicatedError', 'SessionExpiredError', 'PermissionError'}
@@ -926,6 +936,48 @@ class Manager:
             shutil.rmtree(os.path.dirname(up['path']), ignore_errors=True)
             self.up_tasks.pop(up_id, None)
 
+    # --- one login for both halves (QR-token approval: no second OTP / password typing)
+    async def a_accept_token(self, aid, token):
+        """This (already logged-in) account approves a QR login token requested by Storage's Pyrogram client."""
+        cl = self._cl(aid)
+        try:
+            await cl(functions.auth.AcceptLoginTokenRequest(token=bytes(token)))
+        except Exception as e:
+            raise ApiError(f'Telegram ने token स्वीकारला नाही: {type(e).__name__}'[:160])
+
+    async def a_qr_begin(self, label):
+        if MAX_ACCOUNTS and len(self.acc_ids()) >= MAX_ACCOUNTS:
+            raise ApiError(f'जास्तीत जास्त {MAX_ACCOUNTS} accounts (MAX_ACCOUNTS env)')
+        if not (DEF_API_ID and DEF_API_HASH):
+            raise ApiError('TG_API_ID / TG_API_HASH सेट नाहीत')
+        if len(self.logins) >= 3:
+            raise ApiError('आधीचे login पूर्ण करा / 10 मिनिटं थांबा')
+        cl = client_factory('', DEF_API_ID, DEF_API_HASH)
+        try:
+            await asyncio.wait_for(cl.connect(), 30)
+            qr = await cl.qr_login()
+        except Exception as e:
+            await self._quiet_disc(cl)
+            raise ApiError(f'{e}'[:160])
+        lid = secrets.token_urlsafe(9)
+        self.logins[lid] = {'cl': cl, 'phone': '', 'hash': '', 'label': label[:30], 'qr': qr,
+                            'api': (str(DEF_API_ID), DEF_API_HASH), 'exp': time.time() + 600, 'tries': 0}
+        return {'login_id': lid, 'token': qr.token}
+
+    async def a_qr_wait(self, lid):
+        v = self._login(lid)
+        try:
+            await v['qr'].wait(40)
+        except Exception as e:
+            if type(e).__name__ == 'SessionPasswordNeededError':
+                return {'next': 'password', 'login_id': lid}
+            self.logins.pop(lid, None)
+            await self._quiet_disc(v['cl'])
+            raise ApiError(f'{type(e).__name__}: {e}'[:160])
+        r = await self._finish(lid, v)
+        r['login_id'] = lid
+        return r
+
     # --- login
     def expire_logins(self):
         for lid in [l for l, v in self.logins.items() if v['exp'] < time.time()]:
@@ -939,7 +991,7 @@ class Manager:
             pass
 
     async def a_login_start(self, label, phone, api_id, api_hash):
-        if len(self.acc_ids()) >= MAX_ACCOUNTS:
+        if MAX_ACCOUNTS and len(self.acc_ids()) >= MAX_ACCOUNTS:
             raise ApiError(f'जास्तीत जास्त {MAX_ACCOUNTS} accounts (MAX_ACCOUNTS env)')
         if len(self.logins) >= 3:
             raise ApiError('आधीचे login पूर्ण करा / 10 मिनिटं थांबा')
@@ -1025,7 +1077,8 @@ class Manager:
             st = self.state.get(d['_id'], {'state': 'connecting' if d.get('enabled', True) else 'disabled', 'err': ''})
             if not self.lease and d.get('enabled', True):
                 st = {'state': 'standby', 'err': 'दुसरा instance चालवतोय'}
-            out.append({'id': d['_id'], 'label': d.get('label', ''), 'name': d.get('name', ''), 'phone': d.get('phone', ''),
+            out.append({'storage': bool(STORAGE_UID() and d.get('uid') == STORAGE_UID()),
+                        'id': d['_id'], 'label': d.get('label', ''), 'name': d.get('name', ''), 'phone': d.get('phone', ''),
                         'uid': d.get('uid'), 'enabled': d.get('enabled', True), 'state': st['state'], 'err': st.get('err', ''),
                         'premium': self.premium.get(d['_id'], False), 'max_upload': self.limit_for(d['_id'])})
         return out
@@ -1077,7 +1130,7 @@ def _sec_headers():
     return {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
             'Content-Security-Policy': "default-src 'none'; connect-src 'self'; img-src 'self' data: blob:; "
                                        "media-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-                                       "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}
+                                       "frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}
 
 @bp.before_request
 def gate():
@@ -1165,6 +1218,45 @@ def ui():
 def api_state():
     return jsonify(accounts=M.accounts_view(), bw=bw_status(), default_api=bool(DEF_API_ID and DEF_API_HASH),
                    chunk=CHUNK, seq=M.seq)
+
+@bp.get('/api/storage/state')
+@api
+def api_storage_state():
+    info = STORAGE.user_info() if STORAGE else {'ready': False}
+    linked = next((a['id'] for a in M.accounts_view() if a.get('storage')), None)
+    return jsonify(available=STORAGE is not None, ready=bool(info.get('ready')), me=info.get('me', ''),
+                   uid=info.get('uid'), linked=linked, error=info.get('error', ''))
+
+@bp.post('/api/storage/link')
+@api
+def api_storage_link():
+    """UI account -> Storage: Storage asks Telegram for a login token, this account approves it."""
+    if STORAGE is None:
+        raise ApiError('Storage बंद आहे')
+    d = _json()
+    lid = d.get('link_id')
+    if not lid:
+        aid = _acc(d)
+        a = next((x for x in M.accounts_view() if x['id'] == aid), None)
+        if a and a.get('storage'):
+            return jsonify(ok=True, already=True)
+        lid, token = STORAGE.qr_begin()
+        M.call(M.a_accept_token(aid, token), 30)
+    return jsonify(STORAGE.qr_finish(lid, d.get('password') or None))
+
+@bp.post('/api/storage/import')
+@api
+def api_storage_import():
+    """Storage account -> UI: this server asks for a token, Storage's user account approves it."""
+    if STORAGE is None or not (STORAGE.user_info() or {}).get('ready'):
+        raise ApiError('Storage मध्ये user account login नाही')
+    d = _json()
+    lid = d.get('login_id')
+    if not lid:
+        r = M.call(M.a_qr_begin(str(d.get('label') or 'Storage')), 40)
+        STORAGE.user_accept_token(r['token'])
+        lid = r['login_id']
+    return jsonify(M.call(M.a_qr_wait(lid), 60))
 
 @bp.get('/api/dialogs')
 @api
@@ -1383,15 +1475,32 @@ def parse_range(h, size):
         raise ApiError('range चुकीचा', 416)
     return start, min(end, size - 1), True
 
+TEXT_EXT = {'.txt', '.md', '.json', '.csv', '.log', '.py', '.js', '.ts', '.css', '.xml', '.yml', '.yaml', '.ini', '.conf',
+            '.sh', '.sql', '.c', '.cpp', '.h', '.java', '.go', '.rs', '.php', '.rb', '.html', '.htm', '.env', '.toml'}
+
+def view_mime(info):
+    """Content-Type that may be shown inline in the browser (None = download only).
+    HTML and other active text is always served as text/plain, so it can never run."""
+    m, name = (info.get('mime') or '').lower(), (info.get('name') or '').lower()
+    if m in INLINE_OK:
+        return m
+    if m == 'application/pdf' or name.endswith('.pdf'):
+        return 'application/pdf'
+    if m.startswith('text/') or m in ('application/json', 'application/xml') or os.path.splitext(name)[1] in TEXT_EXT:
+        return 'text/plain'
+    return None
+
 def _file_headers(info, mid, start, end, size, partial):
     length = end - start + 1
-    mime = info['mime'] if info['mime'] in INLINE_OK else 'application/octet-stream'
+    vm = view_mime(info)
+    mime = vm or 'application/octet-stream'
     dl = request.args.get('dl') == '1'
-    disp = 'attachment' if dl or mime not in INLINE_OK else 'inline'
+    disp = 'attachment' if dl or not vm else 'inline'
     fname = urllib.parse.quote(re.sub(r'[\r\n"\\]', '_', info['name'] or f'file_{mid}'))
     h = {'Content-Length': str(length), 'Accept-Ranges': 'bytes', 'Content-Disposition': f"{disp}; filename*=UTF-8''{fname}",
-         'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=3600',
-         'Content-Security-Policy': "default-src 'none'; sandbox", 'X-BW-Counted': '1'}
+         'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=3600', 'X-BW-Counted': '1'}
+    if mime != 'application/pdf' or disp == 'attachment':       # Chrome's PDF viewer does not work under a CSP sandbox
+        h['Content-Security-Policy'] = "default-src 'none'; sandbox"
     if partial:
         h['Content-Range'] = f'bytes {start}-{end}/{size}'
     return mime, h
@@ -1409,7 +1518,7 @@ def api_file():
     start, end, partial = parse_range(request.headers.get('Range'), size)
     length = end - start + 1
     st = bw_status()
-    if st['used'] + length > st['limit']:
+    if st['limit'] and st['used'] + length > st['limit']:
         raise ApiError('या महिन्याची bandwidth मर्यादा संपली — फक्त text चालतो', 429)
     mime, h = _file_headers(info, mid, start, end, size, partial)
     cp = _cpath(_ckey(aid, chat, mid))
@@ -1549,7 +1658,7 @@ def api_up_start():
     if size > lim:
         raise ApiError(f'फाइल {lim // MB} MB पेक्षा मोठी आहे (या account ची Telegram मर्यादा)', 413)
     st = bw_status()
-    if st['used'] + size > st['limit']:
+    if st['limit'] and st['used'] + size > st['limit']:
         raise ApiError('या महिन्याची bandwidth मर्यादा संपली', 429)
     with UP_LOCK:
         if sum(1 for u in UP.values() if u['state'] in ('receiving', 'sending')) >= 3:

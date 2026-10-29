@@ -79,6 +79,11 @@ audio{max-width:100%;height:40px}.card{border-left:3px solid var(--acc);padding:
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:2px}.grid div{aspect-ratio:1;background:#00000030;position:relative;overflow:hidden;cursor:pointer}.grid img{width:100%;height:100%;object-fit:cover}
 .empty{margin:auto;color:var(--mut);padding:30px;text-align:center}
 @media(max-width:820px){#side{width:100%;min-width:0}#main{position:absolute;inset:0;transform:translateX(100%);transition:transform .2s;z-index:10}.chat #main{transform:none}#back{display:inline-flex}.info-on #info{position:absolute;inset:0;width:100%;z-index:20}.m{max-width:86%}}
+#fv{position:fixed;inset:0;z-index:75;background:#000d;display:none;flex-direction:column;color:#fff}
+#fv .vh{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#0009}#fv .vh b{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#fv .vh .ib{color:#fff;text-decoration:none}
+#fv .vb{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px;overflow:auto}#fv video,#fv img{max-width:100%;max-height:100%;border-radius:6px}#fv iframe{width:100%;height:100%;border:0;background:#fff;border-radius:6px}
+#fv pre{align-self:stretch;width:100%;margin:0;background:var(--side);color:var(--fg);padding:12px;border-radius:8px;overflow:auto;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monospace,Consolas,monospace}
+.file{cursor:pointer}.stb{border-top:1px solid var(--bd);padding:10px 18px}.stb button{display:block;text-align:left;padding:6px 0;color:var(--acc);font-weight:500}
 </style></head><body>
 <div id="app">
  <aside id="side"><div class="hd"><button class="ib" id="menu" title="Menu">☰</button><input id="search" placeholder="Search" autocomplete="off"></div>
@@ -95,7 +100,8 @@ audio{max-width:100%;height:40px}.card{border-left:3px solid var(--acc);padding:
    <button id="send">➤</button></div><input id="file" type="file" multiple hidden></div></div></main>
  <aside id="info"></aside>
 </div>
-<div id="lb"><button class="x">✕</button><button class="nv" style="left:6px">‹</button><img alt=""><button class="nv" style="right:6px">›</button></div><div id="toast"></div>
+<div id="lb"><button class="x">✕</button><button class="nv" style="left:6px">‹</button><img alt=""><button class="nv" style="right:6px">›</button></div><div id="fv"><div class="vh"><b id="fvt"></b><a class="ib" id="fvd" title="Download">⬇</a><button class="ib" id="fvx" title="Close">✕</button></div><div class="vb" id="fvb"></div></div>
+<div id="toast"></div>
 <script>
 'use strict';
 const $=(s,r)=>(r||document).querySelector(s);
@@ -206,8 +212,8 @@ function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:
  return fileCard(m,x,file)}
 function dlText(st,x,big){if(!big)return sz(x.size);if(st.state==='downloading')return 'Downloading to server… '+pctOf(st)+'% ('+sz(st.done||0)+' / '+sz(st.size||x.size)+')';if(st.state==='cached')return sz(x.size)+' · ✔ Ready on server — tap to save';if(st.state==='error')return '⚠ '+(st.err||'failed')+' — tap ⬇ to retry';return sz(x.size)+' · tap ⬇ to download to server'}
 function fileCard(m,x,file){const k=dlKey(m),st=S.dls[k]||{state:'none'},big=x.size>=BIGF;
- const icon=(!big||st.state==='cached')?h('a',{class:'fi',href:file+'&dl=1',target:'_blank',rel:'noopener',text:st.state==='cached'?'✔':'⬇'}):h('button',{class:'fi',text:st.state==='downloading'?'✕':'⬇',on:{click(e){e.stopPropagation();st.state==='downloading'?cancelDl(m):serverDownload(m).catch(er=>toast(er.message))}}});
- return h('div',{class:'file','data-dl':big?k:null},icon,h('div',{style:'min-width:0'},h('b',{text:x.name||'File'}),h('span',{class:'mut dlp',text:dlText(st,x,big)}),big?h('div',{class:'dlb',style:'height:3px;background:var(--bd);border-radius:2px;margin-top:3px;overflow:hidden;display:'+(st.state==='downloading'?'block':'none')},h('i',{style:'display:block;height:100%;background:var(--acc);width:'+pctOf(st)+'%'})):null))}
+ const icon=(!big||st.state==='cached')?h('button',{class:'fi',title:'Download',text:st.state==='cached'?'✔':'⬇',on:{click(e){e.stopPropagation();downloadMsg(m)}}}):h('button',{class:'fi',text:st.state==='downloading'?'✕':'⬇',on:{click(e){e.stopPropagation();st.state==='downloading'?cancelDl(m):serverDownload(m).catch(er=>toast(er.message))}}});
+ return h('div',{class:'file',title:'Open','data-dl':big?k:null,on:{click(){openFile(m)}}},icon,h('div',{style:'min-width:0'},h('b',{text:x.name||'File'}),h('span',{class:'mut dlp',text:dlText(st,x,big)}),big?h('div',{class:'dlb',style:'height:3px;background:var(--bd);border-radius:2px;margin-top:3px;overflow:hidden;display:'+(st.state==='downloading'?'block':'none')},h('i',{style:'display:block;height:100%;background:var(--acc);width:'+pctOf(st)+'%'})):null))}
 function setDl(k,st){const prev=S.dls[k];S.dls[k]=st;const[a,c]=k.split(':');if(a!==S.acc||String(c)!==String(S.chat))return;if(!prev||prev.state!==st.state)drawMsgs('keep');else updDl(k)}
 function updDl(k){const st=S.dls[k];if(!st)return;document.querySelectorAll('[data-dl="'+k+'"]').forEach(el=>{const p=el.querySelector('.dlp'),b=el.querySelector('.dlb i'),pct=pctOf(st),vid=el.classList.contains('vid');if(p){p.textContent=vid?'⬇ '+pct+'%':'Downloading to server… '+pct+'% ('+sz(st.done||0)+' / '+sz(st.size)+')';if(vid)p.style.display='block'}if(b){b.parentNode.style.display='block';b.style.width=pct+'%'}})}
 async function serverDownload(m,wait){const k=dlKey(m),cur0=S.dls[k];if(cur0&&cur0.state==='cached')return;
@@ -268,7 +274,7 @@ $('#msgs').addEventListener('scroll',onScroll);$('#dn').onclick=()=>{const b=$('
 /* ---------- message actions ---------- */
 async function react(m,emoji){try{const r=await api('/app/api/react',A({chat:S.chat,id:m.id,emoji}));if(r.message)replaceMsg(r.message)}catch(e){toast(e.message)}}
 function msgMenu(x,y,m){closeMenu();const top=h('div',{class:'rb'},REACT.map(e=>h('button',{text:e,on:{click(){closeMenu();react(m,e)}}})));
- showMenu(x,y,[{ic:'↩',t:'Reply',fn:()=>setReply(m)},m.text?{ic:'⧉',t:'Copy text',fn:()=>copyText(m.text)}:null,{ic:'➦',t:'Forward',fn:()=>forwardDlg([m.id])},
+ showMenu(x,y,[{ic:'↩',t:'Reply',fn:()=>setReply(m)},m.media&&m.media.kind!=='sticker'?{ic:'👁',t:'Open',fn:()=>openFile(m)}:null,m.media&&m.media.kind!=='sticker'?{ic:'⬇',t:'Download',fn:()=>downloadMsg(m)}:null,m.text?{ic:'⧉',t:'Copy text',fn:()=>copyText(m.text)}:null,{ic:'➦',t:'Forward',fn:()=>forwardDlg([m.id])},
   {ic:m.pinned?'📍':'📌',t:m.pinned?'Unpin':'Pin',fn:()=>pinMsg(m)},(m.out&&m.text&&!m.service)?{ic:'✎',t:'Edit',fn:()=>startEdit(m)}:null,{ic:'☑',t:'Select',fn:()=>toggleSel(m.id)},
   {ic:'🗑',t:'Delete',red:true,fn:()=>deleteDlg([m.id])}],top)}
 function copyText(t){if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(()=>toast('Copied'),()=>toast('Copy failed'));else toast('Copy not available')}
@@ -319,6 +325,31 @@ async function queueUpload(file,asFile){const lim=cur().max_upload||2e9;if(file.
   await api('/app/api/up/finish',{id:U.id});U.state='sending';drawUploads();watchUpload(U)}catch(e){U.state='error';U.err=e.message;drawUploads()}}
 async function watchUpload(U){while(S.uploads[U.id]&&U.state==='sending'){await sleep(4000);try{const r=await api('/app/api/up/status?'+Q({id:U.id}));if(r.state==='done'){finishUpload(U,r.message)}else if(r.state==='error'||r.state==='canceled'){U.state=r.state;U.err=r.err;drawUploads()}}catch(e){}}}
 function finishUpload(U,msg){if(U.state==='done')return;U.state='done';if(msg&&U.chat===S.chat&&!S.msgs.some(x=>x.id===msg.id)){S.msgs.push(msg);drawMsgs('bottom')}setTimeout(()=>{delete S.uploads[U.id];drawUploads()},1500);drawUploads()}
+/* ---------- in-app file viewer + download ---------- */
+function fileKind(x){const m=(x.mime||'').toLowerCase(),n=(x.name||'').toLowerCase();
+ if(x.kind==='photo'||m.startsWith('image/'))return 'image';
+ if(x.kind==='video'||x.kind==='gif'||x.kind==='videonote'||m.startsWith('video/'))return 'video';
+ if(x.kind==='voice'||x.kind==='audio'||m.startsWith('audio/'))return 'audio';
+ if(m==='application/pdf'||n.endsWith('.pdf'))return 'pdf';
+ if(m.startsWith('text/')||m==='application/json'||/\.(txt|md|json|csv|log|py|js|ts|html?|css|xml|ya?ml|ini|conf|sh|sql|c|cpp|h|java|go|rs|php|rb|toml)$/.test(n))return 'text';
+ return 'other'}
+async function probeFile(url){try{const r=await fetch(url,{headers:{Range:'bytes=0-0'},credentials:'same-origin'});if(r.ok)return '';let e='';try{e=(await r.json()).error}catch(_){}return e||('error '+r.status)}catch(e){return 'network error'}}
+async function downloadMsg(m){const x=m.media;if(!x)return;const u='/app/api/file?'+Q({acc:S.acc,chat:S.chat,id:m.id})+'&dl=1';
+ if(x.size>=BIGF&&!confirm('Download "'+(x.name||'file')+'" ('+sz(x.size)+')?\nThis uses about '+sz(x.size)+' of your monthly bandwidth.'))return;
+ const er=await probeFile(u);if(er){toast('⚠ '+er,6000);return}
+ const a=h('a',{href:u,download:x.name||'file',style:'display:none'});document.body.append(a);a.click();a.remove();toast('⬇ Download started')}
+function closeFv(fromPop){const fv=$('#fv');if(fv.style.display==='none')return;fv.style.display='none';$('#fvb').replaceChildren();if(!fromPop&&history.state&&history.state.fv)history.back()}
+window.addEventListener('popstate',()=>closeFv(true));$('#fvx').onclick=()=>closeFv();
+async function openFile(m){const x=m.media;if(!x)return;const url='/app/api/file?'+Q({acc:S.acc,chat:S.chat,id:m.id}),k=fileKind(x),body=$('#fvb');
+ $('#fvt').textContent=x.name||(k==='image'?'Photo':k==='video'?'Video':'File');const d=$('#fvd');d.href='#';d.onclick=e=>{e.preventDefault();downloadMsg(m)};
+ body.replaceChildren(h('div',{class:'mut',text:'Loading…'}));$('#fv').style.display='flex';history.pushState({fv:1},'');
+ const fail=async()=>{const er=await probeFile(url);body.replaceChildren(h('div',{style:'text-align:center;max-width:420px'},h('div',{style:'font-size:44px',text:'⚠'}),h('div',{text:er||"Can't open this file here"}),h('div',{class:'mut',style:'margin-top:8px',text:'You can still use ⬇ Download.'})))};
+ if(k==='image')body.replaceChildren(h('img',{alt:'',src:url,on:{error:fail}}));
+ else if(k==='video')body.replaceChildren(h('video',{src:url,controls:true,autoplay:true,playsinline:true,on:{error:fail}}));
+ else if(k==='audio')body.replaceChildren(h('audio',{src:url,controls:true,autoplay:true,style:'width:min(92vw,520px)',on:{error:fail}}));
+ else if(k==='pdf'){const er=await probeFile(url);if(er)return fail();body.replaceChildren(h('iframe',{src:url}))}
+ else if(k==='text'){try{const r=await fetch(url,{headers:{Range:'bytes=0-1048575'},credentials:'same-origin'});if(!r.ok)return fail();const t=await r.text();body.replaceChildren(h('pre',{text:t+(x.size>1048576?'\n\n… (first 1 MB shown — use Download for the full file)':'')}))}catch(e){fail()}}
+ else body.replaceChildren(h('div',{style:'text-align:center'},h('div',{style:'font-size:56px',text:'📄'}),h('b',{text:x.name||'File'}),h('div',{class:'mut',style:'margin:6px 0 14px',text:sz(x.size)+' · preview not available for this type'}),h('button',{class:'p',style:'background:var(--acc);color:#fff;border-radius:8px;padding:10px 18px',text:'⬇ Download',on:{click(){downloadMsg(m)}}})))}
 /* ---------- lightbox ---------- */
 function lightbox(id){const L=S.msgs.filter(m=>m.media&&m.media.kind==='photo');let i=L.findIndex(m=>m.id===id);if(i<0)return;const lb=$('#lb'),im=lb.querySelector('img');
  const show=()=>{const m=L[i];im.src='/app/api/file?'+Q({acc:S.acc,chat:S.chat,id:m.id})};lb.style.display='flex';show();
@@ -345,14 +376,23 @@ $('#csr').onclick=()=>{const q=h('input',{placeholder:'Search in this chat'}),re
 let st2;function onSearch(){S.q=$('#search').value.trim();S.gsearch=[];S.gres=null;drawList();clearTimeout(st2);if(S.q.length<2)return;st2=setTimeout(async()=>{try{if(/^(@|https?:\/\/t\.me\/|\+\d{8,})/.test(S.q)){S.gres=await api('/app/api/resolve',A({q:S.q}))}else S.gsearch=(await api('/app/api/search?'+Q({acc:S.acc,q:S.q}))).messages}catch(e){S.gsearch=[]}drawList()},450)}
 $('#search').oninput=onSearch;
 /* ---------- drawer / modals ---------- */
-function openDrawer(){const dr=$('#dr'),c=cur();dr.replaceChildren(h('div',{style:'padding:16px 18px;background:var(--hov)'},avatar(c.uid,c.name||'?',64),h('b',{style:'display:block;margin-top:8px',text:c.label||c.name||'No account'}),h('span',{class:'mut',text:c.phone||''})),
-  ...S.accs.map(a=>h('div',{class:'ac'+(a.id===S.acc?' on':''),on:{click(){switchAcc(a.id);closeDrawer()}}},avatar(a.uid,a.name,34),h('div',{},h('b',{text:a.label||a.name}),h('div',{class:'mut',style:'font-size:12px',text:a.state})))),
+const stBtn=(t,fn)=>h('button',{text:t,on:{click(){closeDrawer();fn()}}});
+function askPw(cb){const p=h('input',{type:'password',placeholder:'Two-step verification password',autocomplete:'off'});modal('Cloud password',[h('div',{class:'mut',text:'This account has a cloud password:'}),p],[{t:'Cancel'},{t:'Continue',c:'p',fn(c){const v=p.value;c();cb(v)}}]);p.focus()}
+async function loadStorage(){try{const r=await api('/app/api/storage/state'),j=JSON.stringify(r);if(j!==S.stj){S.stj=j;S.st=r;if($('#drawer').classList.contains('on'))openDrawer(true)}}catch(e){}}
+function linkStorage(aid){const go=()=>doLink(aid);if(S.st&&S.st.ready)confirmBox('Storage scanning account will change and every group will be scanned again. Continue?','Continue',go);else go()}
+async function doLink(aid,lid,pw){toast('Linking account to Storage…',9000);try{const r=await api('/app/api/storage/link',{acc:aid,link_id:lid,password:pw});if(r.need_password){askPw(p=>doLink(aid,r.link_id,p));return}toast(r.already?'Already used for Storage':'✅ Storage scanning account set: '+(r.me||''),5000);S.stj='';await loadState();loadStorage()}catch(e){toast(e.message,7000)}}
+async function importStorage(lid,pw){toast('Adding the Storage account here…',9000);try{const r=pw?await api('/app/api/login/password',{login_id:lid,password:pw}):await api('/app/api/storage/import',{label:'Storage',login_id:lid});if(r.next==='password'){askPw(p=>importStorage(r.login_id||lid,p));return}await loadState();S.stj='';loadStorage();toast('✅ Account added: '+(r.name||''),5000)}catch(e){toast(e.message,7000)}}
+function openDrawer(noRefresh){const dr=$('#dr'),c=cur(),st=S.st||{};dr.replaceChildren(h('div',{style:'padding:16px 18px;background:var(--hov)'},avatar(c.uid,c.name||'?',64),h('b',{style:'display:block;margin-top:8px',text:c.label||c.name||'No account'}),h('span',{class:'mut',text:c.phone||''})),
+  ...S.accs.map(a=>h('div',{class:'ac'+(a.id===S.acc?' on':''),on:{click(){switchAcc(a.id);closeDrawer()}}},avatar(a.uid,a.name,34),h('div',{},h('b',{text:a.label||a.name}),h('div',{class:'mut',style:'font-size:12px',text:a.state+(a.storage?' · 📦 Storage scanning':'')})))),
+  st.available?h('div',{class:'stb'},h('b',{text:'📦 Storage scanning account'}),h('div',{class:'mut',style:'font-size:13px;margin:2px 0 4px',text:st.ready?st.me:(st.error||'Not logged in — files uploaded by other bots can not be read')}),
+   st.ready&&!st.linked?stBtn('＋ Show this account here (no new login)',()=>importStorage()):null,
+   c.id&&!c.storage?stBtn('Use "'+(c.label||c.name)+'" for Storage scanning',()=>linkStorage(c.id)):null):null,
   h('div',{class:'it',on:{click(){closeDrawer();addAccount()}}},'＋','Add account'),h('hr',{style:'border:0;border-top:1px solid var(--bd);width:100%'}),
   h('div',{class:'it',on:{click(){closeDrawer();if(c.uid)openById(c.uid,0)}}},'🔖','Saved Messages'),h('div',{class:'it',on:{click(){closeDrawer();newChat()}}},'👤','Contacts / New chat'),
   h('div',{class:'it',on:{click(){closeDrawer();S.archived=!S.archived;loadDialogs()}}},'🗄',S.archived?'Back to chats':'Archived chats'),h('div',{class:'it',on:{click(){closeDrawer();sessions()}}},'🛡','Active sessions'),
   h('div',{class:'it',on:{click(){closeDrawer();profile()}}},'✎','Edit profile'),h('div',{class:'it',on:{click(){closeDrawer();settings()}}},'⚙','Settings'),
   h('div',{class:'it',on:{click(){S.set.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';saveSet()}}},'🌙','Night mode'),
-  h('div',{class:'mut',style:'padding:12px 18px;font-size:12px',text:S.bw?`📊 ${(S.bw.used/1048576).toFixed(0)} MB / ${(S.bw.limit/1073741824).toFixed(1)} GB (${S.bw.month})`:''}));$('#drawer').classList.add('on')}
+  h('div',{class:'mut',style:'padding:12px 18px;font-size:12px',text:S.bw?`📊 ${(S.bw.used/1048576).toFixed(0)} MB used`+(S.bw.limit?` / ${(S.bw.limit/1073741824).toFixed(1)} GB`:' (no limit)')+` (${S.bw.month})`:''}));$('#drawer').classList.add('on');if(noRefresh!==true)loadStorage()}
 function closeDrawer(){$('#drawer').classList.remove('on')}$('#menu').onclick=openDrawer;$('#drawer').onclick=e=>{if(e.target.id==='drawer')closeDrawer()};
 async function switchAcc(id){if(id===S.acc)return;S.acc=id;LS.set('acc',id);S.chat=null;S.cd=null;S.dl=[];S.archived=false;showEmpty();drawList();await loadDialogs()}
 function newChat(){const f=h('input',{placeholder:'@username, phone (+91…) or t.me link'}),q=h('input',{placeholder:'Search contacts'}),list=h('div',{style:'max-height:36vh;overflow:auto'});let C=[];
@@ -365,7 +405,7 @@ function settings(){const sw=(k,t)=>{const i=h('input',{type:'checkbox'});i.chec
  const cacheRow=h('div',{class:'mut',style:'font-size:13px',text:'Server cache: …'}),loadCache=()=>api('/app/api/cache').then(c=>{cacheRow.textContent=`Server cache: ${sz(c.used)} of ${sz(c.limit)} (${c.files} file(s)). Big files you download to the server are kept here and replayed without re-downloading.`}).catch(()=>{}),
   clr=h('button',{class:'mut',style:'text-align:left',text:'🗑 Clear server cache',on:{async click(){try{const r=await api('/app/api/cache/clear',{});toast('Cleared '+r.removed+' file(s)');S.dls={};drawMsgs('keep');loadCache()}catch(e){toast(e.message)}}}});loadCache();
  modal('Settings',[h('div',{class:'sw'},h('span',{text:'Theme'}),th),cacheRow,clr,sw('avatars','Show profile photos'),sw('previews','Auto-load photo/video previews'),sw('notif','Desktop notifications'),sw('sound','Notification sound'),sw('enter','Enter sends message'),sw('md','Markdown formatting by default'),
-  h('div',{class:'mut',style:'font-size:13px',text:S.bw?`Bandwidth this month: ${(S.bw.used/1048576).toFixed(0)} MB of ${(S.bw.limit/1073741824).toFixed(1)} GB. Previews and avatars are small; full photos/videos/files use more.`:''}),
+  h('div',{class:'mut',style:'font-size:13px',text:S.bw?`Bandwidth this month: ${(S.bw.used/1048576).toFixed(0)} MB`+(S.bw.limit?` of ${(S.bw.limit/1073741824).toFixed(1)} GB.`:' (no limit).')+' Previews and avatars are small; full photos/videos/files use more.':''}),
   h('div',{class:'mut',style:'font-size:13px',text:`Upload limit for this account: ${mbs(cur().max_upload||0)}${cur().premium?' (Premium)':''} — Telegram's own limit`})],[{t:'Close'}])}
 async function sessions(){const body=h('div',{},h('div',{class:'empty',text:'Loading…'}));const close=modal('Active sessions',body,[{t:'Close'}]);try{const r=(await api('/app/api/sessions?'+Q({acc:S.acc}))).sessions;body.replaceChildren(...r.map(s=>h('div',{class:'kv'},h('b',{text:(s.current?'● This device — ':'')+(s.app||s.device)}),h('div',{class:'mut',style:'font-size:13px',text:`${s.device} · ${s.platform} · ${s.ip} · ${s.country}`}),h('div',{class:'mut',style:'font-size:12px',text:'Last active '+new Date(s.active*1e3).toLocaleString()}),
   s.current?null:h('button',{style:'color:#e53935',text:'Terminate',on:{click(){confirmBox('Terminate this session?','Terminate',async()=>{try{await api('/app/api/sessions/terminate',A({hash:s.hash}));close();sessions()}catch(e){toast(e.message)}},true)}}}))))}catch(e){body.replaceChildren(h('div',{class:'err',text:e.message}))}}
@@ -396,12 +436,12 @@ function handleEvent(e){if(e.type==='dl'){const k=e.acc+':'+e.chat+':'+e.mid,st=
   else if(e.type==='edit'&&e.msg)replaceMsg(e.msg);else if(e.type==='del'){S.msgs=S.msgs.filter(x=>!(e.ids||[]).includes(x.id));drawMsgs('keep')}}
  soon()}
 async function poll(){for(;;){try{const r=await api('/app/api/events?'+Q({since:S.seq,wait:20}));S.seq=r.seq;for(const e of r.events)handleEvent(e)}catch(e){await sleep(4000)}}}
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeMenu();$('#lb').style.display='none';const ov=document.querySelector('.ov');if(ov)ov.remove();if(S.sel.size){S.sel.clear();selUpdate();drawMsgs('keep')}}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeMenu();closeFv();$('#lb').style.display='none';const ov=document.querySelector('.ov');if(ov)ov.remove();if(S.sel.size){S.sel.clear();selUpdate();drawMsgs('keep')}}});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&S.chat)markRead()});
 /* ---------- start ---------- */
 (async()=>{applyTheme();if(window.matchMedia)try{matchMedia('(prefers-color-scheme: dark)').addEventListener('change',applyTheme)}catch(e){}
  $('#md').style.color=S.set.md?'var(--acc)':'';
- try{const s=await loadState();S.seq=s.seq||0;drawFolders();if(!S.accs.length){$('#list').replaceChildren(h('div',{class:'empty'},'No Telegram account yet.',h('br'),h('button',{style:'color:var(--acc);font-weight:600;margin-top:10px',text:'＋ Add account',on:{click:addAccount}})))}else await loadDialogs()}
+ try{const s=await loadState();S.seq=s.seq||0;drawFolders();if(!S.accs.length){$('#list').replaceChildren(h('div',{class:'empty'},'No Telegram account yet.',h('br'),h('button',{style:'color:var(--acc);font-weight:600;margin-top:10px',text:'＋ Add account',on:{click:addAccount}})))}else await loadDialogs();loadStorage()}
  catch(e){document.body.replaceChildren(h('div',{class:'empty',text:'✖ '+e.message}));return}
  poll();setInterval(()=>loadState().catch(()=>{}),60000);setInterval(()=>{if(Object.keys(S.typing).length)drawList()},3000)})();
 </script></body></html>'''

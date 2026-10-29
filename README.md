@@ -48,6 +48,12 @@
 बाकी optional env जुन्या दोन्ही README प्रमाणेच (`BW_LIMIT_GB`, `MAX_ACCOUNTS`, `DISK_CACHE_GB`, `STEALTH_TRIGGER`,
 `LOCKOUT_HOURS`, `POLL_INTERVAL`, `CACHE_MAX_GB`, `BACKUP_TOKEN` …). `BACKUP_API.md` पहा.
 
+**2FA bypass password (optional):** `ADMIN_2FA_PASSWORD` (किमान 8 अक्षरं). Bot ने "code पाठवा" म्हटल्यावर Authenticator चा 6 अंकी code
+किंवा हा password — दोन्हीपैकी काहीही चालतं. Bot चा मजकूर बदलत नाही. (`ADMIN_TOTP_SECRET` किंवा `ADMIN_2FA_PASSWORD` यापैकी काहीही सेट असेल तर 2FA step नेहमी येतो.)
+
+**Limits बंद आहेत:** bandwidth limit आणि account limit default ने लागू होत नाहीत. परत हवे असतील तर `ENFORCE_LIMITS=1`
+(मग `BW_LIMIT_GB` आणि `MAX_ACCOUNTS` लागू होतात).
+
 Secret बनवण्याच्या commands:
 * `SESSION_KEY`: `python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"`
 * `ADMIN_TOTP_SECRET`: `python -c "import secrets,base64;print(base64.b32encode(secrets.token_bytes(20)).decode())"`

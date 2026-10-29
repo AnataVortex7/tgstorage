@@ -78,6 +78,11 @@ def load():
     _s.ADMIN_CHECK = _h.AUTH.is_admin
     _s.ADMIN_IDS = _h.AUTH.admin_ids
     _h.STORAGE = _s
+    try:
+        import tgweb as _t
+        _t.STORAGE = _s            # Telegram UI can show / share the Storage scanning account
+    except Exception as _e:
+        print(f"[boot] tgweb link: {_e}", flush=True)
     storage_app, hub_app = _s, _h
     _loaded = True
 

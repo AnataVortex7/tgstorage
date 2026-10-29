@@ -336,6 +336,7 @@ def list_groups():
     return db_many("SELECT group_id, title, source FROM groups ORDER BY added_at, group_id")
 
 _group_err = {}         # gid -> last indexing error text (shown in the browser status bar)
+_meta_retry = {}        # gid -> (retry not before, last exception)
 _meta_ok = set()        # gids whose title / topics flag was read successfully from Telegram
 _forum = {}             # gid -> True if the chat has Topics (folders); False = channel / normal group (ONE folder)
 
@@ -713,7 +714,7 @@ def run_telegram():
                     await old.stop()
                 except Exception:
                     pass
-            _user_status.update(ready=False, me="", error="")
+            _user_status.update(ready=False, me="", error="", uid=None)
             await _loop.run_in_executor(None, _delete_user_session)
             extra = "\n(USER_SESSION env variable आहे — तो तिथून काढ.)" if USER_SESSION else ""
             await msg.reply("👋 User session काढला (database मधून delete). "
@@ -1050,7 +1051,7 @@ async def _bridge_sweeper():
 # Only the resulting session string is stored (SQLite + MongoDB), never the
 # phone number / OTP / password. The user's messages with OTP / password are
 # deleted from the chat right after they are read.
-_user_status = {"ready": False, "me": "", "error": ""}
+_user_status = {"ready": False, "me": "", "error": "", "uid": None}
 _bot_info = {"id": 0, "username": ""}
 _login_state = {}            # owner id -> {"step", "client", "phone", "hash", "tries", "ts"}
 LOGIN_TTL = 600
@@ -1112,8 +1113,110 @@ async def _start_user(sess):
     await c.start()
     me = await c.get_me()
     _tg_user = c
-    _user_status.update(ready=True, error="",
+    _user_status.update(ready=True, error="", uid=me.id, phone=me.phone_number or "",
                         me=f"{me.first_name or ''} ({me.id})".strip())
+
+# ── One login for BOTH halves (Telegram UI /app  <->  Storage scanning account) ───────────────
+# Telegram lets an already logged-in account approve a "QR login token" for a second session.
+# So the account is logged in only ONCE (in /app or in Storage) and the other side gets its own
+# session by approval — no second OTP / password round trip, and no shared auth key (that would
+# give AUTH_KEY_DUPLICATED).
+_qr_links = {}               # link id -> {"c": pyrogram Client (connected, not logged in), "ts": time}
+
+def user_info():
+    return {"ready": bool(_user_status["ready"]), "me": _user_status.get("me", ""),
+            "uid": _user_status.get("uid"), "error": _user_status.get("error", "")}
+
+async def _qr_begin_async():
+    for k, v in list(_qr_links.items()):                    # forget abandoned links
+        if time.time() - v["ts"] > 600:
+            _qr_links.pop(k, None)
+            try:
+                await v["c"].disconnect()
+            except Exception:
+                pass
+    c = Client(name=f"qr{secrets.token_hex(3)}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+    await c.connect()
+    try:
+        r = await c.session.invoke(tg_raw.functions.auth.ExportLoginToken(
+            api_id=API_ID, api_hash=API_HASH, except_ids=[]))
+        if not isinstance(r, tg_raw.types.auth.LoginToken):
+            raise RuntimeError("Telegram returned an unexpected login response")
+    except Exception:
+        await c.disconnect()
+        raise
+    lid = secrets.token_urlsafe(8)
+    _qr_links[lid] = {"c": c, "ts": time.time()}
+    return lid, r.token
+
+async def _qr_finish_async(lid, pw):
+    from pyrogram.errors import SessionPasswordNeeded
+    from pyrogram.session import Session, Auth
+    st = _qr_links.get(lid)
+    if not st:
+        raise RuntimeError("link expired — try again")
+    c = st["c"]
+    st["ts"] = time.time()
+    try:
+        if pw:
+            await c.check_password(pw)                      # sets the user id on success
+        else:
+            user = None
+            for _ in range(12):                             # the other side approves within a second or two
+                try:
+                    r = await c.session.invoke(tg_raw.functions.auth.ExportLoginToken(
+                        api_id=API_ID, api_hash=API_HASH, except_ids=[]))
+                    if isinstance(r, tg_raw.types.auth.LoginTokenMigrateTo):    # account lives on another data centre
+                        await c.session.stop()
+                        await c.storage.dc_id(r.dc_id)
+                        await c.storage.auth_key(await Auth(c, r.dc_id, await c.storage.test_mode()).create())
+                        c.session = Session(c, r.dc_id, await c.storage.auth_key(), await c.storage.test_mode())
+                        await c.session.start()
+                        r = await c.session.invoke(tg_raw.functions.auth.ImportLoginToken(token=r.token))
+                except SessionPasswordNeeded:
+                    return {"ok": False, "need_password": True, "link_id": lid}
+                if isinstance(r, tg_raw.types.auth.LoginTokenSuccess):
+                    user = r.authorization.user
+                    break
+                await asyncio.sleep(1.5)
+            if user is None:
+                raise TimeoutError("account ने login approve केला नाही")
+            await c.storage.user_id(user.id)
+            await c.storage.is_bot(False)
+    except SessionPasswordNeeded:
+        return {"ok": False, "need_password": True, "link_id": lid}
+    except Exception:
+        _qr_links.pop(lid, None)
+        try:
+            await c.disconnect()
+        except Exception:
+            pass
+        raise
+    sess = await c.export_session_string()
+    _qr_links.pop(lid, None)
+    try:
+        await c.disconnect()
+    except Exception:
+        pass
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _save_user_session, sess)
+    await _start_user(sess)
+    asyncio.create_task(_reindex_all())                     # every group is scanned again with the new account
+    return {"ok": True, "me": _user_status["me"]}
+
+def qr_begin():
+    return tg(_qr_begin_async(), timeout=60)
+
+def qr_finish(lid, pw=None):
+    return tg(_qr_finish_async(lid, pw), timeout=90)
+
+def user_accept_token(token):
+    """Storage's user account approves a login token requested by the Telegram UI engine."""
+    async def _acc():
+        if _tg_user is None:
+            raise RuntimeError("Storage user account नाही")
+        await _tg_user.invoke(tg_raw.functions.auth.AcceptLoginToken(token=bytes(token)))
+    tg(_acc(), timeout=30)
 
 async def _reindex_all():
     """After a (new) user login: wipe + rescan every group with the user account."""
@@ -1596,7 +1699,15 @@ async def _refresh_group_meta(gid):
     (e.g. the bot was made admin AFTER the server started)."""
     if gid in _meta_ok:
         return
-    chat = await _get_chat(gid)
+    nxt = _meta_retry.get(gid)
+    if nxt and time.time() < nxt[0]:                       # failed a moment ago: do not ask Telegram again yet
+        raise nxt[1]
+    try:
+        chat = await _get_chat(gid)
+    except Exception as e:
+        _meta_retry[gid] = (time.time() + 90, e)
+        raise
+    _meta_retry.pop(gid, None)
     forum = bool(getattr(chat, "is_forum", False))
     db_exec("UPDATE groups SET title=?, is_forum=? WHERE group_id=?",
             (getattr(chat, "title", "") or "", 1 if forum else 0, gid))

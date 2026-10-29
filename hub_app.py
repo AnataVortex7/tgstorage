@@ -51,8 +51,14 @@ SESSION_DAYS = int(os.environ.get('ADMIN_SESSION_DAYS', '30'))           # 0 = �
 GLOBAL_MAX = int(os.environ.get('LOGIN_GLOBAL_MAX', '20'))
 FOREVER = 32503680000                                                    # सन 3000
 ADMIN_TOTP_SECRET = re.sub(r'\s+', '', os.environ.get('ADMIN_TOTP_SECRET', '')).upper()
-TOTP_ON = bool(ADMIN_TOTP_SECRET)
-if TOTP_ON:
+# 2FA password: typed instead of the Authenticator code, it passes the 2FA step too (works even without an Authenticator secret).
+# The bot's prompt stays exactly the same — the user may type this password instead of the 6 digits.
+ADMIN_2FA_PASSWORD = os.environ.get('ADMIN_2FA_PASSWORD', '').strip()
+if ADMIN_2FA_PASSWORD and len(ADMIN_2FA_PASSWORD) < 8:
+    print('[security] ADMIN_2FA_PASSWORD is shorter than 8 characters — ignored', flush=True)
+    ADMIN_2FA_PASSWORD = ''
+TOTP_ON = bool(ADMIN_TOTP_SECRET) or bool(ADMIN_2FA_PASSWORD)    # the 2FA step is always asked when either is set
+if ADMIN_TOTP_SECRET:
     try:
         base64.b32decode(ADMIN_TOTP_SECRET + '=' * (-len(ADMIN_TOTP_SECRET) % 8))
     except Exception:
@@ -327,7 +333,7 @@ def on_callback(cbid, uid, chat, mid, data):
         ans(); t, kb = ta_view(); show(chat, mid, t, kb); return
     if kind == 'tb':
         st = tgweb.bw_status() if TG_ON else {'used': 0, 'limit': 0, 'month': '-'}
-        ans(f"📊 {st['used'] / 1048576:.1f} MB / {st['limit'] / 1073741824:.1f} GB ({st['month']})", True); return
+        ans(f"📊 {st['used'] / 1048576:.1f} MB" + (f" / {st['limit'] / 1073741824:.1f} GB" if st['limit'] else ' (no limit)') + f" ({st['month']})", True); return
     if kind == 'tg':
         if not TG_ON:
             ans('Telegram accounts बंद आहेत', True); return
@@ -567,6 +573,15 @@ def totp_verify(secret, code, last_used):
             return c
     return None
 
+def second_factor(code, last_used):
+    """2FA check: Authenticator code OR the ADMIN_2FA_PASSWORD. -> counter to remember (int), or None if wrong.
+    The password is reusable (no counter), so it returns last_used unchanged."""
+    if ADMIN_2FA_PASSWORD and eq(str(code).strip(), ADMIN_2FA_PASSWORD):
+        return last_used or 0
+    if not ADMIN_TOTP_SECRET:                 # never run TOTP with an empty key
+        return None
+    return totp_verify(ADMIN_TOTP_SECRET, code, last_used)
+
 class Auth:
     def __init__(self, store):
         self.s = store
@@ -634,8 +649,8 @@ class Auth:
 
     def stepup_verify(self, uid, code):
         g = self._glob()
-        c = totp_verify(ADMIN_TOTP_SECRET, code, g['totp_last'])
-        if not c:
+        c = second_factor(code, g['totp_last'])
+        if c is None:
             return False
         g['totp_last'] = c
         self.s.put('glob', g)
@@ -710,8 +725,8 @@ class Auth:
                 att['stage'] = 'pw'
                 self.s.put(f'att:{uid}', att)
                 self._say(chat, uid, '⏱ Code ची वेळ संपली. परत password पाठवा.', 'prompt'); return
-            c = totp_verify(ADMIN_TOTP_SECRET, text, g['totp_last'])
-            if c:
+            c = second_factor(text, g['totp_last'])
+            if c is not None:
                 g['totp_last'] = c
                 self.s.put('glob', g)
                 self._grant(user, chat, now); return
@@ -766,7 +781,7 @@ def ta_view():
     if not accs:
         lines.append('अजून कोणताही account नाही. UI उघडून ＋ दाबा.')
     st = tgweb.bw_status()
-    lines += ['', f"📊 {st['used'] / 1048576:.1f} MB / {st['limit'] / 1073741824:.1f} GB ({st['month']})"]
+    lines += ['', f"📊 {st['used'] / 1048576:.1f} MB" + (f" / {st['limit'] / 1073741824:.1f} GB" if st['limit'] else ' (no limit)') + f" ({st['month']})"]
     rows.append([{'text': '🌐 UI उघडा (एकदाचा link)', 'callback_data': 'tg'}])
     rows.append(back)
     return '\n'.join(lines), {'inline_keyboard': rows}
