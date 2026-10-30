@@ -367,12 +367,53 @@ function drawInfo(){const p=$('#info'),d=S.cd,ci=S.ci&&S.ci.id===S.chat?S.ci:nul
   h('div',{class:'big'},avatar(d.id,d.name,110),h('b',{style:'font-size:20px;margin-top:8px',text:d.name}),h('span',{class:'mut',text:(ci&&ci.status)||''})),
   kv('Bio',ci&&ci.about),kv('Username',ci&&ci.username?'@'+ci.username:''),kv('Phone',ci&&ci.phone?'+'+ci.phone.replace(/^\+/,''):''),
   h('div',{class:'kv'},h('div',{class:'sw'},h('span',{text:'Notifications'}),h('button',{class:'mut',text:d.muted?'🔇 Muted':'🔔 On',on:{async click(){await chatAct('mute',d,{mute:!d.muted});d.muted=!d.muted;drawInfo()}}}))),
-  h('div',{class:'tabs',id:'itabs'},[['media','Media'],['files','Files'],['links','Links'],['voice','Voice'],['music','Music'],['gifs','GIFs']].concat(d.type!=='user'?[['members','Members']]:[]).map(([k,n])=>h('button',{text:n,on:{click(e){document.querySelectorAll('#itabs button').forEach(b=>b.classList.remove('on'));e.target.classList.add('on');loadShared(k)}}}))),h('div',{id:'ibody'}))}
+  h('div',{class:'tabs',id:'itabs'},[['media','Media'],['files','Files'],['links','Links'],['voice','Voice'],['music','Music'],['gifs','GIFs']].concat(d.type!=='user'?[['members','Members']]:[]).concat((d.type!=='user'&&(d.owner||d.admin))?[['manage','⚙ Manage']]:[]).map(([k,n])=>h('button',{text:n,on:{click(e){document.querySelectorAll('#itabs button').forEach(b=>b.classList.remove('on'));e.target.classList.add('on');loadShared(k)}}}))),h('div',{id:'ibody'}))}
 async function loadShared(kind){const b=$('#ibody');b.replaceChildren(h('div',{class:'empty',text:'Loading…'}));try{
+ if(kind==='manage'){drawManage(b);return}
  if(kind==='members'){const r=(await api('/app/api/members?'+Q({acc:S.acc,chat:S.chat}))).members;b.replaceChildren(...r.map(u=>h('div',{class:'row',on:{click(){openByQuery(u.username?'@'+u.username:String(u.id))}}},avatar(u.id,u.name,40),h('div',{class:'rm'},h('b',{text:(u.bot?'🤖 ':'')+u.name}),h('div',{class:'mut',style:'font-size:13px',text:u.status||(u.username?'@'+u.username:'')})))));if(!r.length)b.replaceChildren(h('div',{class:'empty',text:'Not available'}));return}
  const ms=(await api('/app/api/shared?'+Q({acc:S.acc,chat:S.chat,kind}))).messages;if(!ms.length){b.replaceChildren(h('div',{class:'empty',text:'Nothing here'}));return}
  if(kind==='media'||kind==='gifs'){b.replaceChildren(h('div',{class:'grid'},ms.map(m=>h('div',{on:{click(){openById(S.chat,m.id)}}},S.set.previews?h('img',{alt:'',loading:'lazy',src:'/app/api/thumb?'+Q({acc:S.acc,chat:S.chat,id:m.id}),on:{error(e){e.target.remove()}}}):null))))}
  else b.replaceChildren(...ms.map(m=>h('div',{class:'kv',style:'cursor:pointer',on:{click(){openById(S.chat,m.id)}}},kind==='links'?h('div',{},m.web?h('b',{text:m.web.title||m.web.url}):null,h('div',{class:'mut',style:'font-size:13px',text:m.text.slice(0,120)})):h('div',{text:(m.media&&m.media.name)||(m.media&&m.media.kind)||'File'}),h('small',{text:tm(m.ts)+' · '+(m.media?sz(m.media.size):'')}))))}catch(e){b.replaceChildren(h('div',{class:'empty',text:e.message}))}}
+/* ---------- group/channel management (owner/admin only) ---------- */
+function drawManage(b){const d=S.cd,ci=S.ci&&S.ci.id===S.chat?S.ci:null;
+ const t=h('input',{value:d.name,maxlength:128,placeholder:'Title'}),a=h('textarea',{rows:3,maxlength:255,placeholder:'Description'});a.value=(ci&&ci.about)||'';
+ const saveBtn=h('button',{class:'mut',text:'Save title / description',on:{async click(){if(!t.value.trim())return;try{await api('/app/api/chat/edit',A({chat:S.chat,title:t.value,about:a.value}));d.name=t.value;toast('✅ Saved');drawList();const nm=document.querySelector('#info .big b');if(nm)nm.textContent=t.value;const ct=document.querySelector('#ctt b');if(ct)ct.textContent=t.value}catch(e){toast(e.message)}}}});
+ const addIn=h('input',{placeholder:'@username / phone / @botusername — add member or bot'}),memList=h('div',{});
+ const addBtn=h('button',{class:'mut',text:'➕ Add',on:{async click(){if(!addIn.value.trim())return;try{const r=await api('/app/api/chat/member/add',A({chat:S.chat,q:addIn.value}));toast('✅ जोडलं: '+r.name);addIn.value='';loadMembersMgr()}catch(e){toast(e.message)}}}});
+ async function memberAct(k,u,promote){try{if(k==='admin')await api('/app/api/chat/member/admin',A({chat:S.chat,uid:u.id,promote}));else await api('/app/api/chat/member/kick',A({chat:S.chat,uid:u.id}));toast('✅ झालं');loadMembersMgr()}catch(e){toast(e.message)}}
+ function memberMenu(e,u){e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();showMenu(r.left-160,r.bottom,[
+  {t:'🛡 Promote to admin',fn:()=>memberAct('admin',u,true)},{t:'Demote (remove admin)',fn:()=>memberAct('admin',u,false)},
+  {t:'🚫 Remove from group',red:true,fn:()=>confirmBox('Remove '+u.name+' from this group?','Remove',()=>memberAct('kick',u),true)}])}
+ async function loadMembersMgr(){memList.replaceChildren(h('div',{class:'empty',text:'Loading…'}));try{
+  const r=(await api('/app/api/members?'+Q({acc:S.acc,chat:S.chat}))).members;
+  memList.replaceChildren(...r.map(u=>h('div',{class:'row'},avatar(u.id,u.name,36),
+   h('div',{class:'rm'},h('b',{text:(u.bot?'🤖 ':'')+u.name}),h('div',{class:'mut',style:'font-size:12px',text:u.username?'@'+u.username:''})),
+   h('button',{class:'ib',text:'⋮',on:{click(e){memberMenu(e,u)}}}))));
+  if(!r.length)memList.replaceChildren(h('div',{class:'empty',text:'No members'}))}catch(e){memList.replaceChildren(h('div',{class:'empty',text:e.message}))}}
+ loadMembersMgr();
+ const forumToggle=h('button',{class:'mut',text:'…'}),topicsBox=h('div',{});
+ async function refreshTopics(){try{
+  const r=(await api('/app/api/chat/topics?'+Q({acc:S.acc,chat:S.chat}))).topics;
+  forumToggle.textContent='🟢 Topics चालू — बंद कर';
+  forumToggle.onclick=async()=>{try{await api('/app/api/chat/forum/toggle',A({chat:S.chat,enabled:false}));toast('Topics बंद केले');refreshTopics()}catch(e){toast(e.message)}};
+  const newT=h('input',{placeholder:'नवीन topic चं नाव'});
+  const newBtn=h('button',{class:'mut',text:'+ New topic',on:{async click(){if(!newT.value.trim())return;try{await api('/app/api/chat/topic/create',A({chat:S.chat,title:newT.value}));newT.value='';toast('✅ Topic तयार झालं');refreshTopics()}catch(e){toast(e.message)}}}});
+  topicsBox.replaceChildren(h('div',{style:'display:flex;gap:8px;margin-bottom:8px'},newT,newBtn),
+   ...r.map(tp=>h('div',{class:'kv',style:'display:flex;justify-content:space-between;align-items:center'},
+    h('span',{text:(tp.closed?'🔒 ':'')+tp.title}),
+    h('div',{style:'display:flex;gap:6px'},
+     h('button',{class:'ib',text:tp.closed?'Reopen':'Close',on:{async click(){try{await api('/app/api/chat/topic/edit',A({chat:S.chat,topic_id:tp.id,closed:!tp.closed}));refreshTopics()}catch(e){toast(e.message)}}}}),
+     h('button',{class:'ib',style:'color:#e53935',text:'🗑',on:{click(){confirmBox('Topic "'+tp.title+'" delete करायचं? त्यातले सगळे messages पण जातील.','Delete',async()=>{try{await api('/app/api/chat/topic/delete',A({chat:S.chat,topic_id:tp.id}));toast('🗑 Deleted');refreshTopics()}catch(e){toast(e.message)}},true)}}})))));
+  if(!r.length)topicsBox.append(h('div',{class:'empty',text:'अजून topics नाहीत'}));
+ }catch(e){
+  forumToggle.textContent='⚪ Topics सुरू कर';
+  forumToggle.onclick=async()=>{try{await api('/app/api/chat/forum/toggle',A({chat:S.chat,enabled:true}));toast('✅ Topics सुरू झाले');refreshTopics()}catch(e2){toast(e2.message)}};
+  topicsBox.replaceChildren(h('div',{class:'mut',style:'font-size:13px',text:e.message}))}}
+ refreshTopics();
+ b.replaceChildren(
+  h('div',{class:'kv'},h('b',{text:'Title / Description'}),t,a,saveBtn),
+  h('div',{class:'kv'},h('b',{text:'Members'}),h('div',{style:'display:flex;gap:8px;margin-bottom:8px'},addIn,addBtn),memList),
+  h('div',{class:'kv'},h('b',{text:'Topics'}),h('div',{style:'margin-bottom:8px'},forumToggle),topicsBox))}
 /* ---------- extras: save, jump to date, mark all read, shortcuts, multi-select actions ---------- */
 async function saveMsg(m){const u=cur().uid;if(!u){toast('No account');return}try{await api('/app/api/forward',A({from_chat:S.chat,ids:[m.id],to_chat:u,hide_author:false}));toast('🔖 Saved to Saved Messages')}catch(e){toast(e.message)}}
 async function markAll(){const L=S.dl.filter(d=>d.unread||d.mentions);if(!L.length){toast('Nothing unread');return}toast('Marking '+L.length+' chats as read…',6000);let n=0;

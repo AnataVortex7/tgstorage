@@ -731,6 +731,118 @@ class Manager:
         d['owner'] = d['admin'] = True
         return {'dialog': d}
 
+    async def a_edit_chat_info(self, aid, chat, title, about):
+        cl = self._cl(aid)
+        ent = await cl.get_entity(chat)
+        title = (title or '').strip()[:128]
+        try:
+            if title and title != _name(ent):
+                if type(ent).__name__ == 'Channel':
+                    await cl(functions.channels.EditTitleRequest(ent, title))
+                else:
+                    await cl(functions.messages.EditChatTitleRequest(chat_id=ent.id, title=title))
+            await cl(functions.messages.EditChatAboutRequest(ent, (about or '').strip()[:255]))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        return {'ok': True}
+
+    async def a_add_member(self, aid, chat, q):
+        cl = self._cl(aid)
+        ent = await cl.get_entity(chat)
+        q = re.sub(r'^https?://t\.me/', '', (q or '').strip()).lstrip('@')
+        if not q:
+            raise ApiError('username / phone द्या')
+        try:
+            user = await cl.get_entity(q if not q.lstrip('+').isdigit() or q.startswith('+') else int(q))
+        except Exception as e:
+            raise ApiError(f'User सापडला नाही: {e}'[:140], 404)
+        try:
+            if type(ent).__name__ == 'Channel':
+                await cl(functions.channels.InviteToChannelRequest(ent, [user]))
+            else:
+                await cl(functions.messages.AddChatUserRequest(chat_id=ent.id, user_id=user, fwd_limit=100))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        return {'ok': True, 'name': _name(user)}
+
+    async def a_kick_member(self, aid, chat, uid):
+        cl = self._cl(aid)
+        try:
+            await cl.kick_participant(chat, int(uid))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        return {'ok': True}
+
+    async def a_set_admin(self, aid, chat, uid, promote):
+        cl = self._cl(aid)
+        try:
+            await cl.edit_admin(chat, int(uid), is_admin=bool(promote))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        return {'ok': True}
+
+    async def a_toggle_forum(self, aid, chat, enabled):
+        cl = self._cl(aid)
+        ent = await cl.get_entity(chat)
+        if type(ent).__name__ != 'Channel':
+            raise ApiError('Topics फक्त supergroup/channel मध्येच असतात (आधी Settings → आणखी members add करून supergroup बनव)')
+        try:
+            await cl(functions.channels.ToggleForumRequest(ent, enabled=bool(enabled), tabs=False))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        return {'ok': True}
+
+    async def a_topics(self, aid, chat):
+        cl = self._cl(aid)
+        ent = await cl.get_entity(chat)
+        try:
+            r = await cl(functions.messages.GetForumTopicsRequest(
+                ent, offset_date=None, offset_id=0, offset_topic=0, limit=100))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        out = []
+        for t in r.topics:
+            if type(t).__name__ != 'ForumTopic':
+                continue
+            out.append({'id': t.id, 'title': t.title, 'closed': bool(getattr(t, 'closed', False)),
+                        'pinned': bool(getattr(t, 'pinned', False))})
+        return out
+
+    async def a_create_topic(self, aid, chat, title):
+        cl = self._cl(aid)
+        ent = await cl.get_entity(chat)
+        title = (title or '').strip()[:128]
+        if not title:
+            raise ApiError('नाव टाक')
+        try:
+            await cl(functions.messages.CreateForumTopicRequest(ent, title=title, random_id=secrets.randbits(63)))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        return {'ok': True}
+
+    async def a_edit_topic(self, aid, chat, topic_id, title, closed):
+        cl = self._cl(aid)
+        ent = await cl.get_entity(chat)
+        kw = {'peer': ent, 'topic_id': int(topic_id)}
+        if title is not None:
+            kw['title'] = (title or '').strip()[:128]
+        if closed is not None:
+            kw['closed'] = bool(closed)
+        try:
+            await cl(functions.messages.EditForumTopicRequest(**kw))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        return {'ok': True}
+
+    async def a_delete_topic(self, aid, chat, topic_id):
+        cl = self._cl(aid)
+        ent = await cl.get_entity(chat)
+        try:
+            await cl(functions.messages.DeleteTopicHistoryRequest(ent, top_msg_id=int(topic_id)))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        return {'ok': True}
+
     async def a_resolve(self, aid, q):
         q = q.strip()
         if not q:
@@ -1474,6 +1586,60 @@ def api_chat_create():
     if kind not in ('group', 'channel'):
         raise ApiError('bad kind', 400)
     return jsonify(M.call(M.a_create_chat(_acc(d), d.get('title'), d.get('about'), kind), 40))
+
+@bp.post('/api/chat/edit')
+@api
+def api_chat_edit():
+    d = _json()
+    return jsonify(M.call(M.a_edit_chat_info(_acc(d), _int('chat', src=d), d.get('title'), d.get('about')), 30))
+
+@bp.post('/api/chat/member/add')
+@api
+def api_member_add():
+    d = _json()
+    return jsonify(M.call(M.a_add_member(_acc(d), _int('chat', src=d), str(d.get('q', ''))), 30))
+
+@bp.post('/api/chat/member/kick')
+@api
+def api_member_kick():
+    d = _json()
+    return jsonify(M.call(M.a_kick_member(_acc(d), _int('chat', src=d), _int('uid', src=d)), 30))
+
+@bp.post('/api/chat/member/admin')
+@api
+def api_member_admin():
+    d = _json()
+    return jsonify(M.call(M.a_set_admin(_acc(d), _int('chat', src=d), _int('uid', src=d), bool(d.get('promote'))), 30))
+
+@bp.post('/api/chat/forum/toggle')
+@api
+def api_forum_toggle():
+    d = _json()
+    return jsonify(M.call(M.a_toggle_forum(_acc(d), _int('chat', src=d), bool(d.get('enabled'))), 30))
+
+@bp.get('/api/chat/topics')
+@api
+def api_topics():
+    return jsonify(topics=M.call(M.a_topics(_acc(), _int('chat')), 20))
+
+@bp.post('/api/chat/topic/create')
+@api
+def api_topic_create():
+    d = _json()
+    return jsonify(M.call(M.a_create_topic(_acc(d), _int('chat', src=d), d.get('title')), 30))
+
+@bp.post('/api/chat/topic/edit')
+@api
+def api_topic_edit():
+    d = _json()
+    return jsonify(M.call(M.a_edit_topic(_acc(d), _int('chat', src=d), _int('topic_id', src=d),
+                                         d.get('title'), d.get('closed')), 30))
+
+@bp.post('/api/chat/topic/delete')
+@api
+def api_topic_delete():
+    d = _json()
+    return jsonify(M.call(M.a_delete_topic(_acc(d), _int('chat', src=d), _int('topic_id', src=d)), 30))
 
 @bp.post('/api/resolve')
 @api
