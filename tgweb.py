@@ -234,7 +234,9 @@ def ser_dialog(d):
             'type': kind, 'pinned': bool(getattr(d, 'pinned', False)), 'out': bool(getattr(m, 'out', False)) if m else False,
             'muted': _muted(d), 'bot': bool(getattr(ent, 'bot', False)), 'verified': bool(getattr(ent, 'verified', False)),
             'online': st == 'UserStatusOnline', 'read_out': int(getattr(raw, 'read_outbox_max_id', 0) or 0),
-            'read_in': int(getattr(raw, 'read_inbox_max_id', 0) or 0), 'archived': bool(getattr(d, 'archived', False))}
+            'read_in': int(getattr(raw, 'read_inbox_max_id', 0) or 0), 'archived': bool(getattr(d, 'archived', False)),
+            'owner': bool(getattr(ent, 'creator', False)),
+            'admin': bool(getattr(ent, 'creator', False)) or getattr(ent, 'admin_rights', None) is not None}
 
 def status_text(ent):
     st = type(getattr(ent, 'status', None)).__name__
@@ -709,7 +711,25 @@ class Manager:
         kind = 'user' if type(ent).__name__ == 'User' else ('channel' if getattr(ent, 'broadcast', False) else 'group')
         return {'id': utils.get_peer_id(ent), 'name': _name(ent), 'type': kind, 'username': getattr(ent, 'username', '') or '',
                 'unread': 0, 'last': '', 'ts': 0, 'pinned': False, 'muted': False, 'out': False, 'bot': bool(getattr(ent, 'bot', False)),
-                'verified': bool(getattr(ent, 'verified', False)), 'online': False, 'mentions': 0, 'read_out': 0, 'read_in': 0, 'self': False}
+                'verified': bool(getattr(ent, 'verified', False)), 'online': False, 'mentions': 0, 'read_out': 0, 'read_in': 0, 'self': False,
+                'owner': bool(getattr(ent, 'creator', False)),
+                'admin': bool(getattr(ent, 'creator', False)) or getattr(ent, 'admin_rights', None) is not None}
+
+    async def a_create_chat(self, aid, title, about, kind):
+        cl = self._cl(aid)
+        title = (title or '').strip()[:128]
+        if not title:
+            raise ApiError('नाव टाक')
+        megagroup = kind != 'channel'
+        try:
+            r = await cl(functions.channels.CreateChannelRequest(
+                title=title, about=(about or '').strip()[:255], megagroup=megagroup))
+        except Exception as e:
+            raise ApiError(f'{e}'[:160])
+        chat = r.chats[0]
+        d = self._dlg(chat)
+        d['owner'] = d['admin'] = True
+        return {'dialog': d}
 
     async def a_resolve(self, aid, q):
         q = q.strip()
@@ -1445,6 +1465,15 @@ def api_chat_delete():
     d = _json()
     M.call(M.a_chatdelete(_acc(d), int(d['chat'])))
     return jsonify(ok=1)
+
+@bp.post('/api/chat/create')
+@api
+def api_chat_create():
+    d = _json()
+    kind = d.get('kind')
+    if kind not in ('group', 'channel'):
+        raise ApiError('bad kind', 400)
+    return jsonify(M.call(M.a_create_chat(_acc(d), d.get('title'), d.get('about'), kind), 40))
 
 @bp.post('/api/resolve')
 @api

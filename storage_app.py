@@ -3249,6 +3249,13 @@ except OSError as _e:
 _cache_mutex = threading.Lock()
 _cache_keylocks = {}                        # key -> Lock (one Telegram fetch per file at a time)
 _cache_stats = {"hits": 0, "misses": 0}
+# Opening a folder can fire off many /stream requests at once (one per visible file). Each one may also
+# kick off a background cache_fill_bg() download. Without a cap, a big folder can start dozens of these
+# in parallel, flood-waiting the single Telegram connection and starving waitress's worker threads (which
+# then makes totally unrelated requests — status checks, the admin terminal, other users — time out too).
+# Background pre-caching is a nice-to-have, so it backs off instead of piling on when already busy.
+_BG_FILL_LIMIT = _env_int("BG_CACHE_FILL_LIMIT", 3)
+_bg_fill_sem = threading.Semaphore(_BG_FILL_LIMIT)
 
 def _cache_path(gid, msg_id):
     return os.path.join(CACHE_DIR, f"{abs(gid)}_{msg_id}")
@@ -3342,14 +3349,21 @@ def cache_fill(gid, msg_id, size, timeout=3600):
     # (lock dict entries are tiny; they are left in place on purpose)
 
 def cache_fill_bg(gid, msg_id, size):
-    """Start a background fill unless already cached / running."""
+    """Start a background fill unless already cached / running / too many already in flight."""
     if not CACHE_ENABLED or not size or size > CACHE_MAX_FILE or cache_get(gid, msg_id, size):
         return
     with _cache_mutex:
         lk = _cache_keylocks.setdefault((gid, msg_id), threading.Lock())
     if lk.locked():
         return
-    threading.Thread(target=cache_fill, args=(gid, msg_id, size), daemon=True, name="cache_fill").start()
+    if not _bg_fill_sem.acquire(blocking=False):
+        return                                   # busy — this view still streams fine, just won't pre-cache
+    def _run():
+        try:
+            cache_fill(gid, msg_id, size)
+        finally:
+            _bg_fill_sem.release()
+    threading.Thread(target=_run, daemon=True, name="cache_fill").start()
 
 @app.route("/api/cache")
 @require_api
