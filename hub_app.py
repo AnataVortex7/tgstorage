@@ -73,8 +73,10 @@ SYNC_WAIT = float(os.environ.get('SYNC_WAIT', '20'))
 BOOT = time.time()
 
 PCS = {}                         # pcid -> {name, st, ts, url, ev, cmds, offline}
+RGS = {}                         # rgid -> {name, st, ts, ev, cmds, offline} (ReelGuard Android APKs)
+RG_SECRET = os.environ.get('RG_SECRET', 'ReelGuard@Akshay1181')
 TOKENS = {}                      # one-time install tokens
-PENDING = {}                     # admin user id -> ('seturl', pcid|'ALL')
+PENDING = {}                     # admin user id -> ('seturl', pcid|'ALL') | ('rgpass', rgid)
 LOCK = threading.Lock()
 
 # ── PC terminal (reverse-proxy via /api/sync long-poll) ──────────────────
@@ -259,6 +261,7 @@ def main_text():
 def main_kb():
     rows = [[{'text': f"{'🟢' if online(pc) else '🔴'} {pc['name']}", 'callback_data': f'p:{pcid}'}]
             for pcid, pc in sorted(PCS.items(), key=lambda kv: kv[1]['name'])]
+    rows.append([{'text': f'📱 ReelGuard APKs ({len(RGS)})', 'callback_data': 'rgl'}])
     rows.append([{'text': '🌐 सगळ्यांचा Job URL बदला', 'callback_data': 'ua'}])
     rows.append([{'text': '👤 Telegram Accounts', 'callback_data': 'ta'}])
     rows.append([{'text': '📦 Storage (Backup Browser)', 'callback_data': 'sb'}])
@@ -267,6 +270,68 @@ def main_kb():
     rows.append([{'text': '➕ नवा PC install', 'callback_data': 'n'},
                  {'text': '🔄 Refresh', 'callback_data': 'm'}])
     return {'inline_keyboard': rows}
+
+def rg_online(rg):
+    return time.time() - rg.get('ts', 0) < 60
+
+def rg_enqueue(rgid, ctype, arg='', cmd_id=None):
+    with LOCK:
+        rg = RGS.get(rgid)
+        if not rg:
+            return False
+        if len(rg['cmds']) < 20:
+            rg['cmds'].append({'id': cmd_id or secrets.token_hex(3), 'type': ctype, 'arg': arg})
+        rg['ev'].set()
+    return True
+
+def rg_list_view():
+    if not RGS:
+        txt = (
+            '📱 <b>ReelGuard APKs</b>\n\n'
+            'अजून एकही मोबाईल जोडलेला नाही.\n'
+            'युजरच्या मोबाईलवर ReelGuard APK उघडताच तो इथे दिसेल.'
+        )
+        kb = {'inline_keyboard': [
+            [{'text': '🔄 Refresh', 'callback_data': 'rgl'},
+             {'text': '⬅️ Back', 'callback_data': 'm'}]
+        ]}
+        return txt, kb
+    lines = [f'📱 <b>ReelGuard APKs ({len(RGS)})</b>', '']
+    rows = []
+    for rgid, rg in sorted(RGS.items(), key=lambda kv: kv[1]['name']):
+        st = rg['st']
+        on = '🟢' if rg_online(rg) else '🔴'
+        sh = '🛡 चालू' if st.get('shield') else '🔓 बंद'
+        lines.append(f"{on} <b>{esc(rg['name'])}</b> (<code>{rgid}</code>) — {sh}")
+        rows.append([{'text': f"{on} {rg['name']} ({sh})", 'callback_data': f'rg:{rgid}'}])
+    rows.append([{'text': '🔄 Refresh', 'callback_data': 'rgl'},
+                 {'text': '⬅️ Back', 'callback_data': 'm'}])
+    return '\n'.join(lines), {'inline_keyboard': rows}
+
+def rg_device_view(rgid):
+    rg = RGS.get(rgid)
+    if not rg:
+        return None, None
+    st = rg['st']
+    on = '🟢 Online' if rg_online(rg) else '🔴 Offline'
+    txt = '\n'.join([
+        f"📱 <b>{esc(rg['name'])}</b>  (<code>{rgid}</code>)",
+        f"स्थिती: {on} ({int(time.time() - rg['ts'])}s पूर्वी दिसला)",
+        f"🛡 Master Shield: {'✅ चालू' if st.get('shield') else '❌ बंद'}",
+        f"🔒 Anti-Uninstall: {'✅ चालू' if st.get('anti_uninstall') else '❌ बंद'}",
+        f"🔑 Password: {'✅ Set आहे' if st.get('password_set') else '❌ मोकळा (Unset)'}",
+        f"⚙️ Device Admin: {yn(st.get('admin_active'))} · Accessibility: {yn(st.get('a11y_active'))}",
+        f"📦 Blocked APKs: {st.get('blocked_apps', 0)} · आज अडवलेले Reels: {st.get('blocked_today', 0)}",
+    ])
+    kb = {'inline_keyboard': [
+        [{'text': '🔓 पूर्ण Unlock करा (Shield + Password बंद)', 'callback_data': f'rgc:{rgid}:unlock'}],
+        [{'text': '🔒 परत Lock करा (Shield चालू)', 'callback_data': f'rgc:{rgid}:lock'}],
+        [{'text': '🔑 नवीन Password सेट करा', 'callback_data': f'rgp:{rgid}'}],
+        [{'text': '📊 Status तपासा', 'callback_data': f'rgc:{rgid}:status'},
+         {'text': '🔄 Refresh', 'callback_data': f'rg:{rgid}'}],
+        [{'text': '⬅️ Back to APKs', 'callback_data': 'rgl'}],
+    ]}
+    return txt, kb
 
 def pc_text(pcid):
     pc = PCS[pcid]
@@ -337,6 +402,29 @@ def on_callback(cbid, uid, chat, mid, data):
         PENDING[uid] = ('otp', data, chat, mid, 0)
         ans('🔑 2FA code लागतो')
         tg('sendMessage', chat_id=chat, text='🔑 सुरक्षेसाठी Authenticator app मधला 6 अंकी code पाठवा.\nरद्द: /cancel')
+        return
+    if kind == 'rgl':
+        ans(); t, kb = rg_list_view(); show(chat, mid, t, kb); return
+    if kind == 'rg':
+        t, kb = rg_device_view(pcid)
+        if not t:
+            ans('मोबाईल सापडला नाही', True); return
+        ans(); show(chat, mid, t, kb); return
+    if kind == 'rgp':
+        rg = RGS.get(pcid)
+        if not rg:
+            ans('मोबाईल सापडला नाही', True); return
+        PENDING[uid] = ('rgpass', pcid)
+        ans()
+        tg('sendMessage', chat_id=chat, parse_mode='HTML', text=(
+            f"🔑 <b>{esc(rg['name'])}</b> साठी नवीन Password पाठवा (किमान 4 अक्षरं):\nरद्द: /cancel"))
+        return
+    if kind == 'rgc' and len(parts) > 2 and parts[2] in ('unlock', 'lock', 'status'):
+        rg = RGS.get(pcid)
+        if not rg:
+            ans('मोबाईल सापडला नाही', True); return
+        rg_enqueue(pcid, parts[2])
+        ans('⏳ आदेश पाठवला' + ('' if rg_online(rg) else ' (मोबाईल offline — online आल्यावर चालेल)'))
         return
     if kind == 'ta':
         ans(); t, kb = ta_view(); show(chat, mid, t, kb); return
@@ -505,6 +593,14 @@ def on_message(uid, chat, text, mid=None):
         else:
             PENDING[uid] = pend[:4] + (tries,)
             tg('sendMessage', chat_id=chat, text=f'❌ चुकीचा code. {3 - tries} प्रयत्न बाकी (किंवा /cancel).')
+        return
+    if pend and pend[0] == 'rgpass' and text and not text.startswith('/'):
+        if len(text.strip()) < 4:
+            tg('sendMessage', chat_id=chat, text='❌ किमान 4 अक्षरांचा password पाठवा (किंवा /cancel)'); return
+        rgid = pend[1]
+        PENDING.pop(uid, None)
+        ok = rg_enqueue(rgid, 'setpass', text.strip())
+        tg('sendMessage', chat_id=chat, text='✅ नवीन Password मोबाईलला पाठवला — उत्तर इथे येईल.' if ok else '❌ मोबाईल सापडला नाही')
         return
     if pend and pend[0] == 'seturl' and text and not text.startswith('/'):
         if not URL_RE.match(text):
@@ -1128,6 +1224,45 @@ def api_sync():
     with LOCK:
         cmds, pc['cmds'] = pc['cmds'][:], []
         pc['ts'] = time.time()
+    return jsonify(cmds=cmds)
+
+
+@app.post('/api/reelguard/sync')
+def api_reelguard_sync():
+    throttle_check()
+    rgid = (request.headers.get('X-RG-Id') or '')[:16]
+    key = request.headers.get('X-RG-Key') or ''
+    if not re.fullmatch(r'[0-9a-f]{8}', rgid) or not eq(key, RG_SECRET):
+        bad_attempt()
+    d = request.get_json(silent=True) or {}
+    if not isinstance(d, dict):
+        return ('bad', 400)
+    name = (str(d.get('name') or rgid))[:50]
+    with LOCK:
+        rg = RGS.get(rgid)
+        new = rg is None
+        if new:
+            rg = RGS[rgid] = {'ev': threading.Event(), 'cmds': [], 'offline': False, 'name': name, 'st': {}}
+        was_off = rg['offline']
+        rg.update(st=d, ts=time.time(), name=name, offline=False)
+    kb_rg = {'inline_keyboard': [[{'text': '📱 Control APK', 'callback_data': f'rg:{rgid}'}]]}
+    if new and time.time() - BOOT > 30:
+        notify(f'📱 नवीन ReelGuard मोबाईल जोडला: <b>{esc(name)}</b> (<code>{rgid}</code>)', kb_rg)
+    elif was_off:
+        notify(f'🟢 ReelGuard मोबाईल परत online: <b>{esc(name)}</b>', kb_rg)
+    for r in (d.get('results') or [])[:10]:
+        body = str(r.get('text', ''))[-2000:]
+        if body.strip():
+            notify(f'📱 <b>{esc(name)}</b> (<code>{rgid}</code>)\n{esc(body)}', kb_rg)
+    with LOCK:
+        if not rg['cmds']:
+            rg['ev'].clear()
+        has = bool(rg['cmds'])
+    if not has:
+        rg['ev'].wait(SYNC_WAIT)
+    with LOCK:
+        cmds, rg['cmds'] = rg['cmds'][:], []
+        rg['ts'] = time.time()
     return jsonify(cmds=cmds)
 
 
