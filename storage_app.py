@@ -1730,7 +1730,9 @@ async def _scan_group(gid):
         ch = await _input_channel(gid, cl)
         start = meta_get(f"cursor_{gid}", 0) + 1
         latest = await _latest_msg_id(gid, cl)
-        if start >= latest:
+        # bot client: `latest` is its own temp "indexing" message (not a real file) -> start == latest means nothing new
+        # user client: `latest` is a real message, so start == latest still has ONE unscanned message
+        if start > latest or (start == latest and cl is not _tg_user):
             print(f"[index] {gid}: up to date, nothing to scan", flush=True)
             return
         BATCH = 100            # Telegram max ids per GetMessages call
