@@ -76,6 +76,13 @@ PCS = {}                         # pcid -> {name, st, ts, url, ev, cmds, offline
 TOKENS = {}                      # one-time install tokens
 PENDING = {}                     # admin user id -> ('seturl', pcid|'ALL')
 LOCK = threading.Lock()
+
+# ── PC terminal (reverse-proxy via /api/sync long-poll) ──────────────────
+# shell command output is routed back here so the browser can poll it.
+# _SHELL_OUT[pcid] = deque of {id, line, ts}  (last 500 lines per PC)
+_SHELL_OUT = {}                  # pcid -> deque
+_SHELL_LOCK = threading.Lock()
+_SHELL_OUT_MAX = 500
 BAD = collections.defaultdict(list)
 
 
@@ -288,7 +295,8 @@ def pc_kb(pcid):
         [{'text': '♻️ Manager restart', 'callback_data': f'c:{pcid}:rmgr'}],
     ]
     if PCS[pcid].get('url'):
-        rows.append([{'text': '🖥 Terminal (एकदाचा link)', 'callback_data': f't:{pcid}'}])
+        rows.append([{'text': '🖥 Local Panel (एकदाचा link)', 'callback_data': f't:{pcid}'}])
+    rows.append([{'text': '💻 Browser Terminal (server मधून)', 'callback_data': f'bt:{pcid}'}])
     rows.append([{'text': '⬅️ Back', 'callback_data': 'm'}])
     return {'inline_keyboard': rows}
 
@@ -300,13 +308,13 @@ def show(chat, mid, text, kb):
         tg('sendMessage', chat_id=chat, text=text, parse_mode='HTML',
            disable_web_page_preview=True, reply_markup=kb)
 
-def enqueue(pcid, ctype, arg=''):
+def enqueue(pcid, ctype, arg='', cmd_id=None):
     with LOCK:
         pc = PCS.get(pcid)
         if not pc:
             return False
-        if len(pc['cmds']) < 10:
-            pc['cmds'].append({'id': secrets.token_hex(3), 'type': ctype, 'arg': arg})
+        if len(pc['cmds']) < 20:
+            pc['cmds'].append({'id': cmd_id or secrets.token_hex(3), 'type': ctype, 'arg': arg})
         pc['ev'].set()
     return True
 
@@ -436,6 +444,19 @@ def on_callback(cbid, uid, chat, mid, data):
             t = threading.Timer(90, tg, args=('deleteMessage',), kwargs={'chat_id': chat, 'message_id': m2})
             t.daemon = True
             t.start()
+    elif kind == 'bt':
+        # Browser terminal via server — no need for PC to be online right now
+        term_url = f"{root_url()}/app/pc/{pcid}/term"
+        ans('✅ Terminal link')
+        r = tg('sendMessage', chat_id=chat, parse_mode='HTML', disable_web_page_preview=True, text=(
+            f"💻 <b>{esc(pc['name'])}</b> Browser Terminal\n"
+            f"<a href=\"{esc(term_url)}\">{esc(term_url)}</a>\n\n"
+            f"🔐 Admin login लागेल. PC online असेल तर commands थेट चालतात.\n"
+            f"हा message 2 मिनिटांत delete होईल."))
+        m2 = (r.get('result') or {}).get('message_id') if isinstance(r, dict) else None
+        if m2:
+            td = threading.Timer(120, tg, args=('deleteMessage',), kwargs={'chat_id': chat, 'message_id': m2})
+            td.daemon = True; td.start()
     elif kind == 'u':
         PENDING[uid] = ('seturl', pcid)
         ans()
@@ -1008,7 +1029,39 @@ def get_file(token, name):
         if not f.exists():
             return text_resp(f'# {name} server वर ठेवलेला नाही\n'), 500
         return text_resp(f.read_text(encoding='utf-8'))
+    if name == 'backup.ps1':
+        return _serve_backup_script()
     abort(404)
+
+
+def _serve_backup_script():
+    """backup.ps1 serve करतो — __BASE__ आणि __TOKEN__ आपोआप fill होतात.
+    BACKUP_TOKEN storage_app.py मधून येतो (BACKUP_TOKEN env var)."""
+    f = FILES / 'backup.ps1'
+    if not f.exists():
+        return text_resp('# backup.ps1 server वर ठेवलेला नाही\n'), 500
+    backup_token = os.environ.get('BACKUP_TOKEN', '').strip()
+    if not backup_token:
+        return text_resp('# BACKUP_TOKEN env var set केलेला नाही — server वर set करा.\n'), 503
+    root = root_url()
+    src = f.read_text(encoding='utf-8')
+    src = src.replace('__BASE__', root).replace('__TOKEN__', backup_token)
+    return text_resp(src)
+
+
+@app.get('/backup.ps1')
+def backup_script_direct():
+    """Direct URL — BACKUP_TOKEN ने authenticate करतो.
+    irm 'https://your-server/backup.ps1?t=TOKEN' | iex"""
+    t = request.args.get('t', '')
+    backup_token = os.environ.get('BACKUP_TOKEN', '').strip()
+    if not backup_token or not t:
+        abort(403)
+    # Constant-time compare
+    import hmac as _hmac
+    if not _hmac.compare_digest(t.encode(), backup_token.encode()):
+        bad_attempt()
+    return _serve_backup_script()
 
 
 # ───────────────────────── PC ↔ server (long-poll) ─────────────────────────
@@ -1038,9 +1091,17 @@ def api_sync():
         notify(f'🔗 <b>{esc(name)}</b> चा terminal URL बदलला', kb_pc)
     for r in (d.get('results') or [])[:10]:
         body = str(r.get('text', ''))[-3500:]
-        if not body.strip():
-            continue
-        notify(f'🖥 <b>{esc(name)}</b>\n<pre>{esc(body)}</pre>')
+        rid  = str(r.get('id', ''))
+        # shell command output → store in _SHELL_OUT (browser polls this)
+        if rid.startswith('sh:'):
+            if body:                              # may be empty for ptoken / housekeeping cmds
+                with _SHELL_LOCK:
+                    q = _SHELL_OUT.setdefault(pcid, __import__('collections').deque(maxlen=_SHELL_OUT_MAX))
+                    q.append({'id': rid, 'text': body, 'ts': time.time()})
+        else:
+            if not body.strip():
+                continue
+            notify(f'🖥 <b>{esc(name)}</b>\n<pre>{esc(body)}</pre>')
     with LOCK:
         if not pc['cmds']:
             pc['ev'].clear()
@@ -1051,6 +1112,158 @@ def api_sync():
         cmds, pc['cmds'] = pc['cmds'][:], []
         pc['ts'] = time.time()
     return jsonify(cmds=cmds)
+
+
+# ───────────────────────── PC browser terminal ──────────────────────────────
+
+_PC_TERM_PAGE = r"""<!doctype html>
+<html lang="mr"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PC Terminal</title>
+<link rel="stylesheet" href="/term/assets/xterm.css">
+<style>
+  body{margin:0;background:#1a1a2e;color:#eee;font-family:sans-serif;display:flex;flex-direction:column;height:100vh}
+  #hdr{background:#16213e;padding:8px 14px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+  #hdr h2{margin:0;font-size:14px;flex:1}
+  #dot{width:10px;height:10px;border-radius:50%;background:#888;flex-shrink:0}
+  #dot.on{background:#4caf50} #dot.off{background:#e53935}
+  #xterm-wrap{flex:1;overflow:hidden;padding:4px}
+  #inp-row{display:flex;gap:6px;padding:8px;background:#16213e;flex-shrink:0}
+  #sh-sel{padding:4px 6px;background:#0f3460;color:#eee;border:1px solid #444;border-radius:4px}
+  #cmd-in{flex:1;padding:6px 10px;background:#0f3460;color:#eee;border:1px solid #444;border-radius:4px;font-family:monospace}
+  #run-btn{padding:6px 14px;background:#4caf50;color:#fff;border:none;border-radius:4px;cursor:pointer}
+  #run-btn:hover{background:#388e3c}
+</style>
+</head><body>
+<div id="hdr">
+  <div id="dot"></div>
+  <h2 id="pc-name">PC Terminal</h2>
+  <span id="st-txt" style="font-size:12px;color:#aaa"></span>
+</div>
+<div id="xterm-wrap"></div>
+<div id="inp-row">
+  <select id="sh-sel"><option value="cmd">cmd</option><option value="powershell">powershell</option></select>
+  <input id="cmd-in" placeholder="command टाका... (Enter)" autocomplete="off" spellcheck="false">
+  <button id="run-btn">▶ Run</button>
+</div>
+<script src="/term/assets/xterm.js"></script>
+<script src="/term/assets/addon-fit.js"></script>
+<script>
+const PCID = location.pathname.split('/').pop();
+const term = new Terminal({theme:{background:'#1a1a2e',foreground:'#eee'},cursorBlink:true,scrollback:5000,fontSize:13});
+const fit  = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById('xterm-wrap'));
+fit.fit();
+window.addEventListener('resize', ()=>fit.fit());
+
+let since = 0, polling = false;
+const dot = document.getElementById('dot');
+const stTxt = document.getElementById('st-txt');
+
+async function poll(){
+  if(polling) return; polling=true;
+  try{
+    const r = await fetch(`/app/api/pc/${PCID}/term/poll?since=${since}`);
+    if(!r.ok){polling=false;return;}
+    const d = await r.json();
+    if(d.name) document.getElementById('pc-name').textContent = d.name + ' — Terminal';
+    dot.className = 'dot ' + (d.online ? 'on' : 'off');
+    stTxt.textContent = d.online ? 'online' : 'offline';
+    for(const e of (d.lines||[])){
+      term.writeln(e.text.replace(/\r?\n/g,'\r\n'));
+      since = Math.max(since, e.seq+1);
+    }
+  }catch(e){}
+  polling=false;
+}
+setInterval(poll, 1000);
+poll();
+
+async function runCmd(){
+  const cmd = document.getElementById('cmd-in').value.trim();
+  if(!cmd) return;
+  const sh  = document.getElementById('sh-sel').value;
+  document.getElementById('cmd-in').value='';
+  term.writeln('\x1b[33m$ ' + cmd + '\x1b[0m');
+  try{
+    const r = await fetch(`/app/api/pc/${PCID}/term/run`,{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cmd,shell:sh})});
+    const d = await r.json();
+    if(!d.ok) term.writeln('\x1b[31m' + (d.msg||'error') + '\x1b[0m');
+  }catch(e){ term.writeln('\x1b[31m'+e+'\x1b[0m'); }
+}
+document.getElementById('run-btn').onclick = runCmd;
+document.getElementById('cmd-in').addEventListener('keydown', e=>{if(e.key==='Enter')runCmd();});
+term.writeln('\x1b[36mPC Terminal — commands PC वर चालतात, output इथे दिसतो\x1b[0m');
+term.writeln('\x1b[90mPC online नसेल तर commands queue होतात, PC connect झाला की चालतात.\x1b[0m');
+</script>
+</body></html>
+"""
+
+def _pc_term_auth():
+    """Hub च्या cookie session ने check करतो — admin logged in असायला हवा."""
+    from flask import session
+    if not session.get('a'):
+        from flask import abort
+        abort(403)
+
+@app.get('/app/pc/<pcid>/term')
+def pc_term_page(pcid):
+    _pc_term_auth()
+    if not re.fullmatch(r'[0-9a-f]{8}', pcid):
+        abort(404)
+    return _PC_TERM_PAGE, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+@app.post('/app/api/pc/<pcid>/term/run')
+def pc_term_run(pcid):
+    _pc_term_auth()
+    if not re.fullmatch(r'[0-9a-f]{8}', pcid):
+        return jsonify(ok=False, msg='bad pcid'), 400
+    d = request.get_json(silent=True) or {}
+    cmd   = str(d.get('cmd', '')).strip()[:2000]
+    shell = d.get('shell', 'cmd')
+    if shell not in ('cmd', 'powershell'):
+        shell = 'cmd'
+    if not cmd:
+        return jsonify(ok=False, msg='command empty')
+    cid = 'sh:' + secrets.token_hex(4)
+    ok = enqueue(pcid, 'shell', f'{shell}\x00{cmd}', cmd_id=cid)
+    if not ok:
+        return jsonify(ok=False, msg='PC offline किंवा सापडला नाही')
+    return jsonify(ok=True, id=cid)
+
+_SHELL_SEQ = {}   # pcid -> int counter
+
+@app.get('/app/api/pc/<pcid>/term/poll')
+def pc_term_poll(pcid):
+    _pc_term_auth()
+    if not re.fullmatch(r'[0-9a-f]{8}', pcid):
+        return jsonify(ok=False), 400
+    try:
+        since = int(request.args.get('since', 0))
+    except ValueError:
+        since = 0
+    with LOCK:
+        pc = PCS.get(pcid)
+    online = pc is not None and (time.time() - pc.get('ts', 0)) < 45
+    name   = pc['name'] if pc else pcid
+    with _SHELL_LOCK:
+        raw = list(_SHELL_OUT.get(pcid) or [])
+    # assign stable seq numbers (monotone, survive deque rotation)
+    with _SHELL_LOCK:
+        seq_map = _SHELL_SEQ.setdefault(pcid, {})
+        next_seq = max(seq_map.values(), default=-1) + 1 if seq_map else 0
+        lines = []
+        for entry in raw:
+            eid = entry['id']
+            if eid not in seq_map:
+                seq_map[eid] = next_seq
+                next_seq += 1
+            if seq_map[eid] >= since:
+                lines.append({'seq': seq_map[eid], 'text': entry['text']})
+    return jsonify(ok=True, online=online, name=name, lines=lines)
 
 
 # ───────────────────────── start background threads ─────────────────────────

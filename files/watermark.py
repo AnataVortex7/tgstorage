@@ -411,6 +411,34 @@ def run_command(c):
     if t == 'rmgr':
         threading.Thread(target=lambda: (time.sleep(2), restart_manager()), daemon=True).start()
         return '♻️ Manager restart होतोय (1-2 मिनिटांत परत येईल)'
+    if t == 'shell':
+        # format: arg = "shell_type\x00command"  e.g. "powershell\x00dir C:\\"
+        try:
+            parts_arg = a.split('\x00', 1)
+            sh   = parts_arg[0] if len(parts_arg) == 2 else 'cmd'
+            cmd  = parts_arg[1] if len(parts_arg) == 2 else a
+            cwd_path = os.path.expanduser('~')
+            if sh == 'powershell':
+                args = ['powershell', '-NoProfile', '-NonInteractive', '-Command', cmd]
+                use_shell = False
+            else:
+                args = cmd
+                use_shell = True
+            r = subprocess.run(args, shell=use_shell, cwd=cwd_path, capture_output=True,
+                               timeout=120, stdin=subprocess.DEVNULL,
+                               creationflags=NO_WINDOW if IS_WIN else 0)
+            raw = (r.stdout or b'') + (r.stderr or b'')
+            try:
+                out = raw.decode('utf-8')
+            except UnicodeDecodeError:
+                out = raw.decode('mbcs' if IS_WIN else 'latin1', errors='replace')
+            if r.returncode != 0:
+                out = out + f'\n[exit code: {r.returncode}]'
+            return out.strip() or '(no output)'
+        except subprocess.TimeoutExpired:
+            return '⏱ 120s timeout — command थांबवला'
+        except Exception as e:
+            return f'❌ error: {e}'
     return f'❓ अज्ञात command: {t}'
 
 def _post_json(url, body, headers, timeout):
