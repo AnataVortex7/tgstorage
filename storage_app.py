@@ -344,6 +344,11 @@ _forum = {}             # gid -> True if the chat has Topics (folders); False = 
 def _is_forum(gid):
     return _forum.get(gid, True)
 
+def _has_topics(gid):
+    """True once we have seen a REAL topic (id != 0) of this group: proof that it is a forum,
+    even if Telegram's is_forum flag was read wrongly."""
+    return any(t for t in _topics.get(gid, {}))
+
 def refresh_chan_map():
     _chan_to_gid.clear()
     for r in db_many("SELECT group_id, is_forum FROM groups"):
@@ -1394,6 +1399,7 @@ _queued = set()              # gids waiting for their turn
 _snapshot_dirty = False
 _dbg = {"topic_create": 0, "empty": 0, "other_service": 0, "no_media": 0,
         "media_not_document": 0, "doc_unknown_topic": 0, "doc_indexed": 0, "doc_dup": 0}
+_reply_samples = []          # first indexed documents + how their topic was resolved (see /api/diag)
 _dbg_samples = []            # a few examples of documents that were skipped
 
 def meta_get(key, default=0):
@@ -1456,6 +1462,9 @@ def _handle_raw_message(gid, m):
         if isinstance(act, tg_raw.types.MessageActionTopicCreate):
             _dbg["topic_create"] += 1
             _save_topic(gid, m.id, act.title)
+            if not _forum.get(gid, True):          # a TopicCreate message exists only in forums
+                _forum[gid] = True
+                db_exec("UPDATE groups SET is_forum=1 WHERE group_id=?", (gid,))
         elif isinstance(act, tg_raw.types.MessageActionTopicEdit):
             new_title = getattr(act, "title", None)
             tid = _topic_id_of(m)
@@ -1495,7 +1504,8 @@ def _handle_raw_message(gid, m):
         _dbg["media_not_document"] += 1
         return False
     topics = _topics.setdefault(gid, {})
-    if _is_forum(gid):
+    forum = _is_forum(gid) or _has_topics(gid)
+    if forum:
         tid = _topic_id_of(m)
         if not tid or tid == 1:                # no reply header / General topic (id 1)
             tid = 0
@@ -1510,8 +1520,11 @@ def _handle_raw_message(gid, m):
             _save_topic(gid, tid, f"Topic {tid}")
     else:
         tid = 0                                # channel / normal group: everything in ONE folder
+    if len(_reply_samples) < 8 or (forum and tid == 0 and len(_reply_samples) < 16):
+        _reply_samples.append({"msg_id": m.id, "forum": forum, "topic_id": tid,
+                               "reply_to": repr(getattr(m, "reply_to", None))[:250]})
     if tid == 0 and 0 not in topics:
-        _save_topic(gid, 0, "General" if _is_forum(gid) else "All files")
+        _save_topic(gid, 0, "General" if forum else "All files")
     n = db_exec("""
         INSERT OR IGNORE INTO files
             (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
@@ -1715,7 +1728,7 @@ async def _refresh_group_meta(gid):
         _meta_retry[gid] = (time.time() + 90, e)
         raise
     _meta_retry.pop(gid, None)
-    forum = bool(getattr(chat, "is_forum", False))
+    forum = bool(getattr(chat, "is_forum", False)) or _has_topics(gid)
     db_exec("UPDATE groups SET title=?, is_forum=? WHERE group_id=?",
             (getattr(chat, "title", "") or "", 1 if forum else 0, gid))
     _forum[gid] = forum
@@ -1850,8 +1863,8 @@ async def _fill_titles():
         try:
             chat = await _get_chat(r["group_id"])
             db_exec("UPDATE groups SET title=?, is_forum=? WHERE group_id=?",
-                    (chat.title or r["title"] or "", 1 if getattr(chat, "is_forum", False) else 0, r["group_id"]))
-            _forum[r["group_id"]] = bool(getattr(chat, "is_forum", False))
+                    (chat.title or r["title"] or "", 1 if (getattr(chat, "is_forum", False) or _has_topics(r["group_id"])) else 0, r["group_id"]))
+            _forum[r["group_id"]] = bool(getattr(chat, "is_forum", False)) or _has_topics(r["group_id"])
         except Exception as e:
             print(f"[groups] title for {r['group_id']}: {e}", flush=True)
 
@@ -3725,6 +3738,26 @@ def api_status():
 def api_debug():
     return jsonify({"counters": _dbg, "samples": _dbg_samples,
                     "known_topics": {str(g): len(t) for g, t in _topics.items()}})
+
+@app.route("/api/diag")
+@require_api
+def api_diag():
+    """One-click diagnosis of 'files show in All but not inside the topic folder'."""
+    gid = req_group()
+    if gid is None:
+        return _no_group()
+    g = db_one("SELECT title, is_forum FROM groups WHERE group_id=?", (gid,))
+    return jsonify({
+        "group": {"id": gid, "title": g["title"], "db_is_forum": g["is_forum"],
+                  "effective_forum": _is_forum(gid) or _has_topics(gid)},
+        "files_total": db_one("SELECT COUNT(*) AS c FROM files WHERE group_id=?", (gid,))["c"],
+        "files_per_folder": [dict(r) for r in db_many(
+            "SELECT topic_id, folder_path, COUNT(*) AS n FROM files WHERE group_id=? "
+            "GROUP BY topic_id, folder_path ORDER BY n DESC LIMIT 60", (gid,))],
+        "topics": [dict(r) for r in db_many(
+            "SELECT topic_id, path, msg_count FROM topics WHERE group_id=? ORDER BY topic_id LIMIT 60", (gid,))],
+        "counters": _dbg, "reply_samples": _reply_samples, "unknown_samples": _dbg_samples,
+    })
 
 # ── Backup API (for Hermes on Render, token auth, NOT the web login) ──────
 # POST /hapi/backup/<name>   body = .tar.gz  -> uploaded to Telegram (topic folder BACKUP_TOPIC)
