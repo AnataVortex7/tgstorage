@@ -1242,11 +1242,11 @@ def api_sync():
 
 @app.post('/api/reelguard/sync')
 def api_reelguard_sync():
-    throttle_check()
+    # throttle_check() इथे नाही — APK दर 20s ला poll करतो, चुकीचा request आला तरी block नको
     rgid = (request.headers.get('X-RG-Id') or '')[:16]
     key = request.headers.get('X-RG-Key') or ''
-    # Bug Fix: bad_attempt() APK ला lockout करत होतं — आता फक्त 403 देतो
     if not re.fullmatch(r'[0-9a-f]{8}', rgid) or not eq(key, RG_SECRET):
+        # bad_attempt() नाही — APK ला lockout होऊ देत नाही, फक्त 403 देतो
         print(f"[rg-auth] FAILED — rgid={rgid!r} key_ok={eq(key, RG_SECRET)} ip={request.remote_addr}", flush=True)
         return ('unauthorized', 403)
     d = request.get_json(silent=True) or {}
