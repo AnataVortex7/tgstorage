@@ -1497,11 +1497,17 @@ def _handle_raw_message(gid, m):
     topics = _topics.setdefault(gid, {})
     if _is_forum(gid):
         tid = _topic_id_of(m)
-        if tid not in topics:                  # General topic / unknown or deleted topic
+        if not tid or tid == 1:                # no reply header / General topic (id 1)
             tid = 0
+        elif tid not in topics:
+            # Topic-create message was not seen (older than the scan, deleted, ...).
+            # Do NOT dump the file into General: keep its REAL topic id with a placeholder
+            # name. A later TopicCreate/TopicEdit renames it and _save_topic() re-points
+            # every file of that topic_id to the new folder path automatically.
             _dbg["doc_unknown_topic"] += 1
             if len(_dbg_samples) < 5:
-                _dbg_samples.append({"msg_id": m.id, "reply_to": repr(getattr(m, "reply_to", None))[:300]})
+                _dbg_samples.append({"msg_id": m.id, "topic": tid, "reply_to": repr(getattr(m, "reply_to", None))[:300]})
+            _save_topic(gid, tid, f"Topic {tid}")
     else:
         tid = 0                                # channel / normal group: everything in ONE folder
     if tid == 0 and 0 not in topics:
