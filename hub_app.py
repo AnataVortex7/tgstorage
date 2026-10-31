@@ -74,7 +74,8 @@ BOOT = time.time()
 
 PCS = {}                         # pcid -> {name, st, ts, url, ev, cmds, offline}
 RGS = {}                         # rgid -> {name, st, ts, ev, cmds, offline} (ReelGuard Android APKs)
-RG_SECRET = os.environ.get('RG_SECRET', 'ReelGuard@Akshay1181')
+RG_SECRET = os.environ.get('RG_SECRET') or 'ReelGuard@Akshay1181'
+print(f"[security] RG_SECRET = {'(env set)' if os.environ.get('RG_SECRET') else '(default hardcoded — RG_SECRET env var set करा!)'}", flush=True)
 TOKENS = {}                      # one-time install tokens
 PENDING = {}                     # admin user id -> ('seturl', pcid|'ALL') | ('rgpass', rgid)
 LOCK = threading.Lock()
@@ -1090,6 +1091,18 @@ def monitor_loop():
             if not online(pc) and not pc['offline']:
                 pc['offline'] = True
                 notify(f"🔴 <b>{esc(pc['name'])}</b> offline झाला")
+        # ── ReelGuard APK offline detection (Bug Fix) ──
+        now = time.time()
+        with LOCK:
+            for rgid, rg in list(RGS.items()):
+                was_off = rg.get('offline', False)
+                is_now_off = now - rg.get('ts', 0) > 90
+                if is_now_off and not was_off:
+                    rg['offline'] = True
+                    print(f"[rg] {rg['name']} ({rgid}) offline झाला", flush=True)
+                    notify(f"🔴 ReelGuard मोबाईल offline: <b>{esc(rg['name'])}</b>")
+                elif not is_now_off and was_off:
+                    rg['offline'] = False
 
 
 # ───────────────────────── public (सगळं 404 / token-protected) ─────────────────────────
@@ -1232,8 +1245,10 @@ def api_reelguard_sync():
     throttle_check()
     rgid = (request.headers.get('X-RG-Id') or '')[:16]
     key = request.headers.get('X-RG-Key') or ''
+    # Bug Fix: bad_attempt() APK ला lockout करत होतं — आता फक्त 403 देतो
     if not re.fullmatch(r'[0-9a-f]{8}', rgid) or not eq(key, RG_SECRET):
-        bad_attempt()
+        print(f"[rg-auth] FAILED — rgid={rgid!r} key_ok={eq(key, RG_SECRET)} ip={request.remote_addr}", flush=True)
+        return ('unauthorized', 403)
     d = request.get_json(silent=True) or {}
     if not isinstance(d, dict):
         return ('bad', 400)
