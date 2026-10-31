@@ -1,20 +1,21 @@
 # backup.ps1 - PC data backup to Telegram via server
-# Win+R -> paste command -> Enter  (self-elevates to Admin if needed)
-# __BASE__ and __TOKEN__ are filled in by the server automatically.
+# Run from the bot button "PC Backup command" (Win+R -> paste -> Enter). The link is short-lived;
+# the server fills in __BASE__, __SELF__ and the token below - you never type or store a token.
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 
 $Base  = '__BASE__'
+$Self  = '__SELF__'
 $Token = '__TOKEN__'
 
-# --- Self-elevate if not admin ---
+# --- Self-elevate if not admin (re-runs the same short-lived link) ---
 $id      = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal $id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    $url = "$Base/backup.ps1?t=$Token"
-    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"irm '$url' | iex`""
+    # no -NonInteractive: the final "Press Enter" needs an interactive window
+    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm '$Self' | iex`""
     exit
 }
 

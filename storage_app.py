@@ -4023,6 +4023,12 @@ _term = {"proc": None, "fd": None, "pid": 0, "buf": bytearray(), "off": 0, "last
 _term_lock = threading.Lock()
 _term_cond = threading.Condition(_term_lock)
 
+def _term_unlocked():
+    """The shell is only usable by a browser session that entered TERMINAL_PASSWORD (not just the website
+    password), and only for TERM_IDLE seconds after that."""
+    t = session.get("term_ok") or 0
+    return bool(TERMINAL_ENABLED and t and time.time() - t < 12 * 3600)
+
 def _term_alive():
     return _term["proc"] is not None and _term["proc"].poll() is None
 
@@ -4218,6 +4224,7 @@ def api_term_start():
         time.sleep(1)
         return jsonify({"ok": False, "msg": "चुकीचा terminal password"}), 403
     _term_start(f"{ip} (web session)")
+    session["term_ok"] = time.time()          # THIS browser session proved it knows TERMINAL_PASSWORD
     return jsonify({"ok": True, "alive": _term_alive()})
 
 @app.route("/api/term/poll")
@@ -4225,6 +4232,8 @@ def api_term_start():
 def api_term_poll():
     if not TERMINAL_ENABLED:
         return jsonify({"ok": False}), 404
+    if not _term_unlocked():
+        return jsonify({"ok": False, "msg": "terminal locked"}), 403
     try:
         since = int(request.args.get("since", 0))
     except ValueError:
@@ -4249,6 +4258,8 @@ def api_term_poll():
 def api_term_write():
     if not TERMINAL_ENABLED or not _term_alive():
         return jsonify({"ok": False}), 409
+    if not _term_unlocked():
+        return jsonify({"ok": False, "msg": "terminal locked"}), 403
     d = request.get_json(silent=True) or {}
     try:
         data = _b64.b64decode(d.get("data") or "")
@@ -4266,6 +4277,8 @@ def api_term_write():
 def api_term_resize():
     if not TERMINAL_ENABLED or not _term_alive():
         return jsonify({"ok": False}), 409
+    if not _term_unlocked():
+        return jsonify({"ok": False, "msg": "terminal locked"}), 403
     d = request.get_json(silent=True) or {}
     try:
         rows, cols = max(1, int(d.get("rows", 24))), max(1, int(d.get("cols", 80)))
@@ -4277,6 +4290,8 @@ def api_term_resize():
 @app.route("/api/term/stop", methods=["POST"])
 @require_api
 def api_term_stop():
+    if not _term_unlocked():
+        return jsonify({"ok": False, "msg": "terminal locked"}), 403
     _term_close()
     return jsonify({"ok": True})
 

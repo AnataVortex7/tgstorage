@@ -65,7 +65,7 @@ if ADMIN_TOTP_SECRET:
         raise RuntimeError('ADMIN_TOTP_SECRET चुकीचा आहे (base32 अक्षरं A-Z आणि 2-7 हवीत)')
 STEALTH_TRIGGER = os.environ.get('STEALTH_TRIGGER', '').strip()          # असेल तर अनोळखीला उत्तरच नाही
 STEPUP_SECS = int(float(os.environ.get('STEPUP_MINUTES', '10')) * 60)
-SENSITIVE = {'t', 'u', 'ua', 'n', 'ar', 'aa', 'tg', 'tr', 'tx', 'sl'}                            # यासाठी ताजा 2FA code लागतो
+SENSITIVE = {'t', 'u', 'ua', 'n', 'bk', 'ar', 'aa', 'tg', 'tr', 'tx', 'sl'}                            # यासाठी ताजा 2FA code लागतो
 KOYEB_DEFAULT = [os.environ.get('KOYEB_URL', '').rstrip('/')]
 AGENT_MASTER = os.environ.get('AGENT_MASTER') or hashlib.sha256(
     f'agent|{COLAB_SECRET}|{TG_TOKEN}'.encode()).hexdigest()
@@ -263,6 +263,7 @@ def main_kb():
     rows.append([{'text': '👤 Telegram Accounts', 'callback_data': 'ta'}])
     rows.append([{'text': '📦 Storage (Backup Browser)', 'callback_data': 'sb'}])
     rows.append([{'text': '👥 Admins', 'callback_data': 'adm'}])
+    rows.append([{'text': '💾 PC Backup command', 'callback_data': 'bk'}])
     rows.append([{'text': '➕ नवा PC install', 'callback_data': 'n'},
                  {'text': '🔄 Refresh', 'callback_data': 'm'}])
     return {'inline_keyboard': rows}
@@ -318,10 +319,10 @@ def enqueue(pcid, ctype, arg='', cmd_id=None):
         pc['ev'].set()
     return True
 
-def new_token():
+def new_token(uses=10, ttl=900):
     t = secrets.token_urlsafe(24)
     with LOCK:
-        TOKENS[t] = {'exp': time.time() + 900, 'left': 10}
+        TOKENS[t] = {'exp': time.time() + ttl, 'left': uses}
     return t
 
 URL_RE = re.compile(r'^https?://[^\s<>"\']{4,200}$')
@@ -419,6 +420,16 @@ def on_callback(cbid, uid, chat, mid, data):
             '3️⃣ <b>Enter नाही — Ctrl+Shift+Enter</b> दाबा (UAC ला Yes)\n\n'
             f'<code>{esc(cmd)}</code>\n\n'
             '⏱ ही command फक्त 15 मिनिटं चालते. कुणाला देऊ नका.'))
+        return
+    if kind == 'bk':
+        # short-lived link made only for the logged-in admin; the script served on it carries the
+        # server-side BACKUP_TOKEN, so the PC command itself never contains a permanent secret.
+        t = new_token(uses=3, ttl=600)          # script fetch + one self-elevation re-fetch (+1 spare)
+        cmd = f'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm {root_url()}/b/{t} | iex"'
+        ans('✅ Command पाठवतोय')
+        send_ephemeral(chat, '💾 <b>PC Backup</b>\n\nWin+R → खालची command paste → Enter\n\n'
+                             f'<code>{esc(cmd)}</code>\n\n'
+                             '⏱ 10 मिनिटं आणि फक्त 3 वेळा चालते. हा message 90 सेकंदांत आपोआप delete होईल.')
         return
     if kind == 'ua':
         PENDING[uid] = ('seturl', 'ALL')
@@ -1030,38 +1041,44 @@ def get_file(token, name):
             return text_resp(f'# {name} server वर ठेवलेला नाही\n'), 500
         return text_resp(f.read_text(encoding='utf-8'))
     if name == 'backup.ps1':
-        return _serve_backup_script()
+        return _serve_backup_script(f'{root_url()}/f/{token}/backup.ps1')
     abort(404)
 
 
-def _serve_backup_script():
-    """backup.ps1 serve करतो — __BASE__ आणि __TOKEN__ आपोआप fill होतात.
-    BACKUP_TOKEN storage_app.py मधून येतो (BACKUP_TOKEN env var)."""
+def _serve_backup_script(self_url):
+    """backup.ps1 serve करतो — __BASE__, __SELF__ आणि __TOKEN__ आपोआप fill होतात.
+    BACKUP_TOKEN फक्त server च्या env मध्ये असतो; तो script मध्ये फक्त valid, कमी वेळाच्या
+    link वरच जातो (URL मध्ये कधीच दिसत नाही)."""
     f = FILES / 'backup.ps1'
     if not f.exists():
         return text_resp('# backup.ps1 server वर ठेवलेला नाही\n'), 500
     backup_token = os.environ.get('BACKUP_TOKEN', '').strip()
     if not backup_token:
         return text_resp('# BACKUP_TOKEN env var set केलेला नाही — server वर set करा.\n'), 503
-    root = root_url()
     src = f.read_text(encoding='utf-8')
-    src = src.replace('__BASE__', root).replace('__TOKEN__', backup_token)
+    src = src.replace('__BASE__', root_url()).replace('__SELF__', self_url).replace('__TOKEN__', backup_token)
     return text_resp(src)
+
+
+@app.get('/b/<token>')
+def backup_script_short(token):
+    """Short link made by the bot button '💾 PC Backup command':  irm https://server/b/<token> | iex"""
+    use_token(token)
+    return _serve_backup_script(f'{root_url()}/b/{token}')
 
 
 @app.get('/backup.ps1')
 def backup_script_direct():
-    """Direct URL — BACKUP_TOKEN ने authenticate करतो.
-    irm 'https://your-server/backup.ps1?t=TOKEN' | iex"""
+    """Old long URL (?t=BACKUP_TOKEN) — kept only so existing commands keep working."""
+    throttle_check()
     t = request.args.get('t', '')
     backup_token = os.environ.get('BACKUP_TOKEN', '').strip()
     if not backup_token or not t:
-        abort(403)
-    # Constant-time compare
+        abort(404)
     import hmac as _hmac
     if not _hmac.compare_digest(t.encode(), backup_token.encode()):
         bad_attempt()
-    return _serve_backup_script()
+    return _serve_backup_script(f'{root_url()}/backup.ps1?t={t}')
 
 
 # ───────────────────────── PC ↔ server (long-poll) ─────────────────────────

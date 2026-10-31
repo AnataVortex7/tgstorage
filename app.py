@@ -89,7 +89,7 @@ def load():
 
 # ── path router ──────────────────────────────────────────────────────────
 _HUB_EXACT = {"/health", "/api/sync", "/app", "/backup.ps1"}
-_HUB_PREFIX = ("/app/", "/i/", "/f/")
+_HUB_PREFIX = ("/app/", "/i/", "/f/", "/b/")
 
 
 def _is_hub(path):
