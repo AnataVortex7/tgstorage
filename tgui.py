@@ -24,7 +24,7 @@ button,input,textarea,select{font:inherit;color:inherit}button{cursor:pointer;ba
 .ib{width:38px;height:38px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:18px;color:var(--mut);flex:none;position:relative}.ib:hover{background:var(--hov);color:var(--fg)}
 .ib .bd-dot{position:absolute;top:4px;right:4px;background:#10b981;color:#fff;font-size:10px;font-weight:700;border-radius:8px;padding:0 4px;min-width:15px;height:15px;display:flex;align-items:center;justify-content:center}
 #accbar{display:flex;gap:6px;padding:6px 10px;overflow-x:auto;border-bottom:1px solid var(--bd);background:var(--side);scrollbar-width:none;align-items:center}
-#accbar:empty{display:none}
+#accbar:empty,#dlbar:empty{display:none}#dlbar{padding:6px 10px;background:rgba(36,129,204,.1);border-bottom:1px solid var(--bd);display:flex;flex-direction:column;gap:4px;font-size:12.5px}
 .apill{display: inline-flex;align-items:center;gap:6px;padding:4px 10px 4px 5px;border-radius:18px;background:var(--hov);font-size:12.5px;font-weight:600;white-space:nowrap;cursor:pointer;border:1.5px solid transparent}
 .apill.on{border-color:var(--acc);background:rgba(51,144,236,.14);color:var(--acc)}
 .apill .st-d{width:8px;height:8px;border-radius:50%;background:#94a3b8}.apill .st-d.ok{background:#10b981}
@@ -120,6 +120,7 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
    <button class="ib" id="dlmgr" title="Multi-Thread Downloads & Server Cache">⚡<span class="bd-dot" id="dlcnt" style="display:none">0</span></button>
   </div>
   <div id="accbar"></div>
+  <div id="dlbar"></div>
   <div id="folders"></div>
   <div id="list"></div>
   <button id="fab" title="New message / group / channel">✎</button>
@@ -167,7 +168,7 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
 </div>
 <div id="lb"><button class="x">✕</button><button class="x" id="lbd" title="Download" style="right:64px">⬇</button><span id="lbc" style="position:absolute;top:18px;left:16px;color:#fff;font-size:14px"></span><button class="nv" style="left:6px">‹</button><img alt=""><button class="nv" style="right:6px">›</button></div>
 <div id="fv"><div class="vh"><b id="fvt"></b><span id="fvst" style="font-size:12px;color:#6ee7b7"></span><a class="ib" id="fvd" title="Fast Download to Browser">⬇</a><button class="ib" id="fvx" title="Close">✕</button></div><div class="vb" id="fvb"></div></div>
-<div id="toast"></div>
+<div id="toast"></div><iframe name="tg_dl_frame" id="dlframe" style="display:none"></iframe>
 <script>
 'use strict';
 const $=(s,r)=>(r||document).querySelector(s);
@@ -191,11 +192,12 @@ function listTime(t){if(!t)return '';const d=new Date(t*1e3),n=new Date();if(day
 const COLS=['#e17076','#faa774','#a695e7','#7bc862','#6ec9cb','#65aadd','#ee7aae'];
 const colorOf=id=>COLS[Math.abs(Number(id)||0)%COLS.length];
 function toast(m,ms){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>t.style.display='none',ms||3200)}
-async function api(path,body,opt){const o={credentials:'same-origin'};if(opt&&opt.raw){o.method='POST';o.headers={'X-Requested-With':'app','Content-Type':'application/octet-stream'};o.body=opt.raw}
+async function api(path,body,opt){const o={credentials:'same-origin'};if(opt&&opt.keepalive)o.keepalive=true;if(opt&&opt.raw){o.method='POST';o.headers={'X-Requested-With':'app','Content-Type':'application/octet-stream'};o.body=opt.raw}
  else if(body!==undefined){o.method='POST';o.headers={'Content-Type':'application/json','X-Requested-With':'app'};o.body=JSON.stringify(body)}
  const r=await fetch(path,o);let d={};try{d=await r.json()}catch(e){}
  if(!r.ok){if(r.status===404&&!d.error)throw new Error('Session expired — get a new link from the bot');const e=new Error(d.error||('error '+r.status));e.status=r.status;e.data=d;throw e}return d}
 const A=(o)=>Object.assign({acc:S.acc},o);
+const fileUrl=(b,dl)=>'/app/api/file?'+Q(Object.assign({},b,S.dlTok?{dt:S.dlTok}:{},dl?{dl:1}:{}));
 const cur=()=>S.accs.find(a=>a.id===S.acc)||{};
 function saveSet(){LS.set('set',S.set);applyTheme()}
 function applyTheme(){document.documentElement.style.setProperty('--fs',(S.set.fs||15)+'px');let t=S.set.theme;if(t==='auto')t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';document.documentElement.dataset.theme=t}
@@ -300,7 +302,22 @@ function drawList(){
  const n=S.dl.reduce((a,d)=>a+(d.muted?0:d.unread),0);document.title=(n?`(${n}) `:'')+'Telegram'}
 function dialogRow(d){return h('div',{class:'row',on:{click(){openChat(d)}}},avatar(d.id,d.name),h('div',{class:'rm'},h('div',{class:'r1'},h('b',{text:d.name})),h('div',{class:'r2'},h('span',{class:'mut',text:d.username?'@'+d.username:d.type}))))}
 async function loadDialogs(){if(!S.acc)return;try{const r=await api('/app/api/dialogs?'+Q({acc:S.acc}));S.dl=r.dialogs||[];S.adl=r.archived||[];drawFolders();drawList()}catch(e){$('#list').replaceChildren(h('div',{class:'empty',text:e.message}))}}
-async function loadState(){const s=await api('/app/api/state');S.accs=s.accounts;S.bw=s.bw;S.defApi=s.default_api;S.chunk=s.chunk;if(s.dl_cfg)S.dlCfg=s.dl_cfg;if(!S.acc||!S.accs.find(a=>a.id===S.acc))S.acc=(LS.get('acc')&&S.accs.find(a=>a.id===LS.get('acc')))?LS.get('acc'):(S.accs[0]||{}).id||null;drawAccBar();return s}
+async function loadState(){
+ const s=await api('/app/api/state');
+ S.accs=s.accounts;S.bw=s.bw;S.defApi=s.default_api;S.chunk=s.chunk;
+ if(s.dl_cfg)S.dlCfg=s.dl_cfg;
+ if(s.dl_tok)S.dlTok=s.dl_tok;
+ if(s.downloads){
+  for(const[k,st]of Object.entries(s.downloads)){
+   S.dls[k]=st;
+   if(st.state==='downloading')watchDl(k);
+  }
+  updateDlCounter();
+ }
+ if(!S.acc||!S.accs.find(a=>a.id===S.acc))S.acc=(LS.get('acc')&&S.accs.find(a=>a.id===LS.get('acc')))?LS.get('acc'):(S.accs[0]||{}).id||null;
+ drawAccBar();
+ return s;
+}
 function chatMenu(x,y,d){const isArch=!!d.archived||S.archived;showMenu(x,y,[
  {ic:d.pinned?'📍':'📌',t:d.pinned?'Unpin':'Pin',fn:()=>chatAct('pin',d,{pin:!d.pinned})},
  {ic:d.muted?'🔔':'🔇',t:d.muted?'Unmute':'Mute',fn:()=>chatAct('mute',d,{mute:!d.muted})},
@@ -373,7 +390,7 @@ function flash(el){if(el.scrollIntoView)el.scrollIntoView({block:'center'});el.c
 function markRead(){if(S.msgs.length&&S.cd&&(S.cd.unread||0)>=0){const mx=S.msgs[S.msgs.length-1].id;api('/app/api/read',A({chat:S.chat,max_id:mx})).catch(()=>{});const d=S.dl.find(x=>x.id===S.chat);if(d&&d.unread){d.unread=0;d.mentions=0;drawList()}}}
 
 /* ---------- message rendering + auto server caching on view/download ---------- */
-function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:S.chat,id:m.id},file='/app/api/file?'+Q(b),th='/app/api/thumb?'+Q(b);
+function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:S.chat,id:m.id},file=fileUrl(b,false),th='/app/api/thumb?'+Q(b);
  if(x.kind==='photo'){const w=h('div',{class:'ph',on:{click(e){if(S.sel.size||e.shiftKey)return;lightbox(m.id)}}});if(x.w&&x.h)w.style.aspectRatio=x.w+'/'+x.h;
   if(S.set.previews){const i=h('img',{alt:'',loading:'lazy',src:th,on:{error(){w.replaceChildren(h('div',{style:'padding:30px;text-align:center',text:'📷 Photo · '+sz(x.size)+' · tap'}))}}});w.append(i)}else w.append(h('div',{style:'padding:30px;text-align:center',text:'📷 Photo · '+sz(x.size)+' · tap to load'}));return w}
  if(x.kind==='sticker'){return x.mime==='image/webp'?h('img',{class:'stk',alt:x.emoji||'',loading:'lazy',src:th,on:{error(e){e.target.replaceWith(h('div',{class:'stk-e',text:x.emoji||'🏷'}))}}}):h('div',{class:'stk-e',text:x.emoji||'🏷'})}
@@ -442,9 +459,23 @@ function setDl(k,st){
  if(!prev||prev.state!==st.state)drawMsgs('keep');else updDl(k);
 }
 function updateDlCounter(){
- const n=Object.values(S.dls).filter(x=>x&&x.state==='downloading').length;
+ const active=Object.entries(S.dls).filter(([_,x])=>x&&x.state==='downloading');
+ const n=active.length;
  const badge=$('#dlcnt');
  if(badge){badge.style.display=n?'flex':'none';badge.textContent=n}
+ const bar=$('#dlbar');
+ if(!bar)return;
+ if(!n){bar.replaceChildren();return}
+ bar.replaceChildren(...active.slice(0,3).map(([k,st])=>{
+  const[acc,chat,id]=k.split(':'),pct=pctOf(st);
+  return h('div',{style:'display:flex;flex-direction:column;gap:3px'},
+   h('div',{style:'display:flex;justify-content:space-between;align-items:center;gap:6px'},
+    h('span',{style:'font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;cursor:pointer',on:{click:openDlManager},text:`⚡ ${st.name||('File #'+id)} · ${pct}%`+(st.speed?` (${spd(st.speed)})`:'')}),
+    h('button',{style:'color:#ef4444;font-weight:700;padding:0 4px',title:'Cancel download',text:'✕',on:{async click(e){e.stopPropagation();try{await api('/app/api/dl/cancel',{acc,chat:+chat,id:+id});setDl(k,{state:'none'})}catch(er){toast(er.message)}}}})
+   ),
+   h('div',{style:'height:3px;background:var(--bd);border-radius:2px;overflow:hidden'},h('i',{style:'display:block;height:100%;background:var(--acc);width:'+pct+'%'}))
+  );
+ }));
 }
 function updDl(k){
  const st=S.dls[k];if(!st)return;
@@ -462,8 +493,8 @@ function updDl(k){
 async function serverDownload(m,wait){
  const k=dlKey(m),cur0=S.dls[k];
  if(cur0&&cur0.state==='cached')return;
- const r=await api('/app/api/dl/start',A({chat:S.chat,id:m.id}));
- setDl(k,{state:r.state,done:r.done||0,size:r.size||(m.media&&m.media.size)||0,speed:r.speed||0,threads:r.threads||S.dlCfg.threads,expires_in:r.expires_in||S.dlCfg.ttl});
+ const r=await api('/app/api/dl/start',A({chat:S.chat,id:m.id}),{keepalive:true});
+ setDl(k,{state:r.state,done:r.done||0,size:r.size||(m.media&&m.media.size)||0,speed:r.speed||0,threads:r.threads||S.dlCfg.threads,expires_in:r.expires_in||S.dlCfg.ttl,name:(m.media&&m.media.name)||('File #'+m.id)});
  if(r.state==='downloading')watchDl(k);
  if(!wait)return;
  while(S.dls[k]&&S.dls[k].state==='downloading')await sleep(350);
@@ -793,18 +824,18 @@ async function probeFile(url){try{const r=await fetch(url,{headers:{Range:'bytes
 
 async function downloadMsg(m){
  const x=m.media;if(!x)return;
- const u='/app/api/file?'+Q({acc:S.acc,chat:S.chat,id:m.id})+'&dl=1';
- // Trigger server multi-threaded download immediately AND stream to user's browser!
+ const u=fileUrl({acc:S.acc,chat:S.chat,id:m.id},true);
+ // Start server multi-threaded download with keepalive:true so closing/refreshing the page never stops it!
  serverDownload(m,false).catch(()=>{});
- const a=h('a',{href:u,download:x.name||'file',style:'display:none'});
+ const a=h('a',{href:u,download:x.name||'file',target:'tg_dl_frame',rel:'noopener',style:'display:none'});
  document.body.append(a);a.click();a.remove();
- toast('⚡ Multi-thread server → browser download started!');
+ toast('⚡ Download started (continues even if page is refreshed or closed)');
 }
 function closeFv(fromPop){const fv=$('#fv');if(fv.style.display==='none')return;fv.style.display='none';fv.dataset.dl='';$('#fvb').replaceChildren();$('#fvst').textContent='';if(!fromPop&&history.state&&history.state.fv)history.back()}
 window.addEventListener('popstate',()=>closeFv(true));$('#fvx').onclick=()=>closeFv();
 async function openFile(m){
  const x=m.media;if(!x)return;
- const k=dlKey(m),url='/app/api/file?'+Q({acc:S.acc,chat:S.chat,id:m.id}),kind=fileKind(x),body=$('#fvb');
+ const k=dlKey(m),url=fileUrl({acc:S.acc,chat:S.chat,id:m.id},false),kind=fileKind(x),body=$('#fvb');
  // Immediately start caching the viewed file on the server with multi-threading!
  serverDownload(m,false).catch(()=>{});
  $('#fv').dataset.dl=k;
@@ -878,7 +909,7 @@ async function openDlManager(){
     kids.push(h('div',{class:'mut',style:'text-align:center;padding:12px;font-size:13px',text:'No cached files on server right now.'}));
    }else{
     for(const c of r.cached){
-     const dlUrl=c.acc&&c.chat&&c.id?('/app/api/file?'+Q({acc:c.acc,chat:c.chat,id:c.id})+'&dl=1'):null;
+     const dlUrl=c.acc&&c.chat&&c.id?fileUrl({acc:c.acc,chat:c.chat,id:c.id},true):null;
      kids.push(h('div',{class:'dl-card'},
       h('div',{class:'top'},
        h('b',{text:c.name}),
@@ -904,7 +935,7 @@ async function openDlManager(){
 /* ---------- lightbox ---------- */
 let LB=null;
 function lightbox(id){const L=S.msgs.filter(m=>m.media&&m.media.kind==='photo');let i=L.findIndex(m=>m.id===id);if(i<0)return;const lb=$('#lb'),im=lb.querySelector('img');
- const show=()=>{const m=L[i];im.src='/app/api/file?'+Q({acc:S.acc,chat:S.chat,id:m.id});$('#lbc').textContent=(i+1)+' / '+L.length};
+ const show=()=>{const m=L[i];im.src=fileUrl({acc:S.acc,chat:S.chat,id:m.id},false);$('#lbc').textContent=(i+1)+' / '+L.length};
  const step=d=>{const n=i+d;if(n>=0&&n<L.length){i=n;show()}};LB={step};lb.style.display='flex';show();
  const close=()=>{lb.style.display='none';im.removeAttribute('src');LB=null};
  lb.querySelector('.x').onclick=close;lb.onclick=e=>{if(e.target===lb)close()};$('#lbd').onclick=()=>downloadMsg(L[i]);

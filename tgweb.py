@@ -55,7 +55,7 @@ TG_LIMIT, TG_LIMIT_PREMIUM = 2000 * MB, 4000 * MB          # Telegram ची ख
 MAX_UPLOAD = int(float(os.environ.get('MAX_UPLOAD_MB', '4000')) * MB)
 # Unlimited media download size by default (0 = no cap, any size file can be downloaded/streamed)
 MAX_MEDIA = int(float(os.environ.get('MAX_MEDIA_MB', '0')) * MB) if LIMITS_ON else 0
-UI_SESSION_SECS = 7200
+UI_SESSION_SECS = 604800
 LEASE_SECS = 45
 CHUNK = 8 * MB                                              # browser → server upload तुकडा
 REQ = 512 * 1024                                            # Telegram MTProto 512 KB chunk
@@ -1851,8 +1851,29 @@ def new_token():
 def _ip():
     return request.headers.get('X-Forwarded-For', '').split(',')[0].strip() or request.remote_addr or '?'
 
+def _make_dl_tok(ttl=86400 * 7):
+    import hmac, hashlib
+    exp = int(time.time() + ttl)
+    sig = hmac.new(SESSION_KEY.encode(), f'dl:{exp}'.encode(), hashlib.sha256).hexdigest()[:32]
+    return f'{exp}.{sig}'
+
+def _verify_dl_tok(tok):
+    import hmac, hashlib
+    if not tok or '.' not in str(tok):
+        return False
+    exp_s, _, sig = str(tok).partition('.')
+    if not exp_s.isdigit() or int(exp_s) < time.time():
+        return False
+    want = hmac.new(SESSION_KEY.encode(), f'dl:{exp_s}'.encode(), hashlib.sha256).hexdigest()[:32]
+    return secrets.compare_digest(sig, want)
+
 def session_ok():
-    return bool(session.get('tg_ok')) and time.time() < session.get('tg_exp', 0)
+    if bool(session.get('tg_ok')) and time.time() < session.get('tg_exp', 0):
+        return True
+    if request.method == 'GET' and request.path.rstrip('/') in ('/app/api/file', '/app/api/thumb', '/app/api/avatar'):
+        if _verify_dl_tok(request.args.get('dt', '')):
+            return True
+    return False
 
 def _sec_headers():
     return {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
@@ -1941,11 +1962,39 @@ def _ids(d, key='ids'):
 def ui():
     return Response(UI_PAGE, mimetype='text/html', headers=_sec_headers())
 
+def _all_dls_snapshot():
+    out = {}
+    done, _ = cache_files()
+    now = time.time()
+    ttl = DL_CFG['ttl']
+    for ctime, sz, p, k in done:
+        meta = _get_cmeta(k, p)
+        acc, chat, mid = meta.get('acc'), meta.get('chat'), meta.get('id')
+        exp_in = max(0, int(ttl - (now - ctime))) if ttl > 0 else 0
+        if acc and chat is not None and mid and (ttl <= 0 or exp_in > 0):
+            out[f'{acc}:{chat}:{mid}'] = {
+                'state': 'cached', 'done': sz, 'contig': sz, 'size': sz,
+                'speed': 0, 'threads': DL_CFG['threads'], 'expires_in': exp_in,
+                'name': meta.get('name', ''), 'acc': acc, 'chat': chat, 'id': mid
+            }
+    with DL_LOCK:
+        for k, j in list(DL.items()):
+            if j.get('state') in ('downloading', 'error'):
+                ui_k = f"{j['acc']}:{j['chat']}:{j['id']}"
+                out[ui_k] = {
+                    'state': j['state'], 'done': j.get('done', 0), 'contig': j.get('contig', 0),
+                    'size': j.get('size', 0), 'speed': j.get('speed', 0),
+                    'threads': j.get('threads', DL_CFG['threads']), 'err': j.get('err', ''),
+                    'name': j.get('name', ''), 'expires_in': ttl,
+                    'acc': j['acc'], 'chat': j['chat'], 'id': j['id']
+                }
+    return out
+
 @bp.get('/api/state')
 @api
 def api_state():
     return jsonify(accounts=M.accounts_view(), bw=bw_status(), default_api=bool(DEF_API_ID and DEF_API_HASH),
-                   chunk=CHUNK, seq=M.seq, dl_cfg=DL_CFG)
+                   chunk=CHUNK, seq=M.seq, dl_cfg=DL_CFG, dl_tok=_make_dl_tok(), downloads=_all_dls_snapshot())
 
 @bp.get('/api/storage/state')
 @api
@@ -2401,7 +2450,10 @@ def _file_headers(info, mid, start, end, size, partial):
     dl = request.args.get('dl') == '1'
     disp = 'attachment' if dl or not vm else 'inline'
     fname = urllib.parse.quote(re.sub(r'[\r\n"\\]', '_', info['name'] or f'file_{mid}'))
-    h = {'Content-Length': str(length), 'Accept-Ranges': 'bytes', 'Content-Disposition': f"{disp}; filename*=UTF-8''{fname}",
+    etag = f'"{mid}-{size}"'
+    h = {'Content-Length': str(length), 'Accept-Ranges': 'bytes', 'ETag': etag,
+         'Last-Modified': 'Wed, 01 Jan 2025 00:00:00 GMT',
+         'Content-Disposition': f"{disp}; filename*=UTF-8''{fname}",
          'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=3600', 'X-BW-Counted': '1'}
     if mime != 'application/pdf' or disp == 'attachment':
         h['Content-Security-Policy'] = "default-src 'none'; sandbox"
