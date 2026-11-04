@@ -107,9 +107,13 @@ if "localhost" in WEB_URL or "127.0.0.1" in WEB_URL:
           "from your phone. Set WEB_URL to your public https URL.", flush=True)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except OSError:
+    DATA_DIR = os.path.join(tempfile.gettempdir() if "tempfile" in dir() else "/tmp", "tg_data")
+    os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH  = os.path.join(DATA_DIR, "browser.db")
 TMP_DIR  = os.environ.get("TMP_DL_DIR", "/tmp/tg_dl")
-os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(TMP_DIR,  exist_ok=True)
 
 # ── Flask ────────────────────────────────────────────────────────────────

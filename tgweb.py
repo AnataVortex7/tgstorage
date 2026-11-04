@@ -23,6 +23,17 @@ try:
 except Exception:                                   # pragma: no cover
     Fernet = None
 try:
+    import cryptg as _cryptg  # noqa: F401
+except Exception:
+    try:
+        import sys as _sys, types as _pytypes, tgcrypto as _tgcrypto
+        _cg = _pytypes.ModuleType("cryptg")
+        _cg.encrypt_ige = lambda plain, key, iv: _tgcrypto.ige256_encrypt(bytes(plain), bytes(key), bytes(bytearray(iv)))
+        _cg.decrypt_ige = lambda cipher, key, iv: _tgcrypto.ige256_decrypt(bytes(cipher), bytes(key), bytes(bytearray(iv)))
+        _sys.modules["cryptg"] = _cg
+    except Exception:
+        pass
+try:
     from telethon import TelegramClient, events, functions, types, utils
     from telethon.sessions import StringSession
 except Exception:                                   # pragma: no cover
