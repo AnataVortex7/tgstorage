@@ -1,16 +1,20 @@
 """
-tgweb.py — Render वर अनेक Telegram account चालवणारा web client (backend).
+tgweb.py — Render/Koyeb वर अनेक Telegram accounts चालवणारा web client (backend).
 
-• Account login server वर (Telethon). Session string Fernet ने encrypt होऊन MongoDB मध्ये.
+• Account login server वर (Telethon) — Phone OTP + 2FA आणि QR Code login.
+• Session string Fernet ने encrypt होऊन MongoDB मध्ये.
 • UI: /app (tgui.py) — फक्त bot ने दिलेल्या एकदाच चालणाऱ्या link ने; बाकी सगळ्यांना रिकामा 404.
-• मोठ्या फाइल (Telegram मर्यादेपर्यंत: 2 GB, Premium 4 GB) RAM मध्ये न घेता तुकड्या-तुकड्यांत
-  (download = streaming + Range; upload = 8 MB chunks → disk → Telegram).
-• Bandwidth: महिन्याचा counter + मर्यादा. एका वेळी एकच instance accounts चालवतो (Mongo lease).
-
-Env: SESSION_KEY, MONGODB_URI, TG_API_ID / TG_API_HASH (default), BW_LIMIT_GB (4), MAX_ACCOUNTS (6),
-     MAX_UPLOAD_MB (4000), MAX_MEDIA_MB (4000)
+• Multi-Threaded Parallel Downloader:
+  - फाइल कितीही मोठी असली तरी (2 GB / 4 GB+ अमर्यादित) अनेक समांतर threads/workers (default 8) वापरून
+    Telegram वरून अतिवेगाने server वर download होते.
+  - Browser मध्ये कोणतीही video / media / file उघडली किंवा Download दाबलं की ती आपोआप server वर
+    multi-thread वेगाने download होते आणि server वरून थेट (progressive streaming + 1 MB disk buffer)
+    युजरच्या browser मध्ये जाते.
+  - ठरलेल्या वेळेनंतर (Fixed Time TTL, default 60 मिनिटं — Settings मधून बदलता येतो) server वरच्या
+    cached फाइल्स आपोआप साफ (auto-clear) होतात.
 """
 import os, io, re, time, json, uuid, atexit, shutil, asyncio, tempfile, threading, secrets, collections, urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from flask import Blueprint, request, session, jsonify, Response, abort
 
@@ -36,16 +40,25 @@ MB = 1024 * 1024
 LIMITS_ON = os.environ.get('ENFORCE_LIMITS', '0').strip() == '1'
 BW_LIMIT = int(float(os.environ.get('BW_LIMIT_GB', '4')) * 1024 ** 3) if LIMITS_ON else 0
 MAX_ACCOUNTS = int(os.environ.get('MAX_ACCOUNTS', '6')) if LIMITS_ON else 0
-TG_LIMIT, TG_LIMIT_PREMIUM = 2000 * MB, 4000 * MB          # Telegram ची खरी मर्यादा
+TG_LIMIT, TG_LIMIT_PREMIUM = 2000 * MB, 4000 * MB          # Telegram ची खरी upload मर्यादा
 MAX_UPLOAD = int(float(os.environ.get('MAX_UPLOAD_MB', '4000')) * MB)
-MAX_MEDIA = int(float(os.environ.get('MAX_MEDIA_MB', '4000')) * MB)
+# Unlimited media download size by default (0 = no cap, any size file can be downloaded/streamed)
+MAX_MEDIA = int(float(os.environ.get('MAX_MEDIA_MB', '0')) * MB) if LIMITS_ON else 0
 UI_SESSION_SECS = 7200
 LEASE_SECS = 45
 CHUNK = 8 * MB                                              # browser → server upload तुकडा
-REQ = 512 * 1024                                            # server ← Telegram download तुकडा
+REQ = 512 * 1024                                            # Telegram MTProto 512 KB chunk
+DISK_READ_BUF = 1024 * 1024                                 # 1 MB fast server → browser read buffer
 UPDIR = os.path.join(tempfile.gettempdir(), 'tgup')
-CACHE_DIR = os.path.join(tempfile.gettempdir(), 'tgcache')                    # Telegram → server disk (अर्धवट = .part)
-DISK_CACHE = int(float(os.environ.get('DISK_CACHE_GB', '10')) * 1024 ** 3)    # cache ची कमाल जागा (जुन्या फाइल आपोआप हटतात)
+CACHE_DIR = os.path.join(tempfile.gettempdir(), 'tgcache')  # Telegram → server disk (अर्धवट = .part)
+DISK_CACHE = int(float(os.environ.get('DISK_CACHE_GB', '20')) * 1024 ** 3)
+
+# Multi-thread & Fixed-Time Auto-Clear settings (configurable via env & live from UI)
+DL_CFG = {
+    'threads': max(1, min(16, int(os.environ.get('DL_THREADS', '8') or 8))),
+    'ttl': max(60, int(float(os.environ.get('CACHE_TTL_MINUTES', '60') or 60) * 60)),  # seconds before auto-clear
+    'auto_cache': os.environ.get('AUTO_SERVER_CACHE', '1').strip() != '0',
+}
 
 M = None
 reason = ''
@@ -55,7 +68,9 @@ BW = {'month': '', 'bytes': 0, 'dirty': False}
 BW_LOCK = threading.Lock()
 UP, UP_LOCK = {}, threading.Lock()
 DL, DL_LOCK = {}, threading.Lock()          # चालू/झालेले server-download jobs
-STREAMS = threading.Semaphore(3)
+CACHE_META, CACHE_META_LOCK = {}, threading.Lock()  # key -> {name, mime, size, created_at, acc, chat, id}
+STREAMS = threading.Semaphore(32)           # allow many concurrent Range streams (seeking, parallel browser connections)
+_DISK_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix='tg-disk')
 _F = [None]
 
 
@@ -63,6 +78,22 @@ class ApiError(Exception):
     def __init__(self, msg, code=400):
         super().__init__(msg)
         self.code = code
+
+
+def _pwrite(fd, data, offset):
+    """Thread-safe positional write without mutating shared file pointer."""
+    if hasattr(os, 'pwrite'):
+        view = memoryview(data)
+        written = 0
+        while written < len(view):
+            n = os.pwrite(fd, view[written:], offset + written)
+            if n <= 0:
+                raise IOError('disk write failed')
+            written += n
+    else:
+        with DL_LOCK:
+            os.lseek(fd, offset, os.SEEK_SET)
+            os.write(fd, data)
 
 
 # ───────────────────────── crypto / bandwidth ─────────────────────────
@@ -162,7 +193,9 @@ def ser_poll(m):
         answers.append({'i': i, 't': _t(a.text), 'n': int(r.voters) if r else 0,
                         'me': bool(r and r.chosen), 'ok': bool(r and getattr(r, 'correct', False))})
     return {'q': _t(p.question), 'a': answers, 'closed': bool(p.closed), 'multi': bool(p.multiple_choice),
-            'quiz': bool(p.quiz), 'total': int(getattr(res, 'total_voters', 0) or 0)}
+            'quiz': bool(p.quiz), 'public': bool(getattr(p, 'public_voters', False)),
+            'solution': _t(getattr(res, 'solution', '')),
+            'total': int(getattr(res, 'total_voters', 0) or 0)}
 
 def ser_web(m):
     w = getattr(m, 'web_preview', None)
@@ -200,9 +233,14 @@ def ser_msg(m):
     ct = getattr(m, 'contact', None)
     dice = getattr(m, 'dice', None)
     venue = getattr(m, 'venue', None)
+    top_id = None
+    if rt:
+        if getattr(rt, 'forum_topic', False):
+            top_id = getattr(rt, 'reply_to_top_id', None) or getattr(rt, 'reply_to_msg_id', None)
     return {'id': m.id, 'out': bool(getattr(m, 'out', False)), 'ts': _ts(getattr(m, 'date', None)), 'text': text,
             'service': service, 'from': _name(getattr(m, 'sender', None)), 'from_id': getattr(m, 'sender_id', None),
             'reply': getattr(rt, 'reply_to_msg_id', None) if rt else None,
+            'topic': top_id,
             'edited': bool(getattr(m, 'edit_date', None)),
             'fwd': (getattr(fw, 'from_name', None) or _name(getattr(fw, 'sender', None)) or _name(getattr(fw, 'chat', None)) or 'Unknown') if fw else '',
             'via': _name(getattr(m, 'via_bot', None)), 'media': media_info(m), 'ents': ser_entities(m),
@@ -224,15 +262,17 @@ def ser_dialog(d):
         last = action_text(m.action)
     if m and not last and getattr(m, 'media', None):
         mi = media_info(m) or {}
-        last = '📎 ' + (mi.get('emoji') or mi.get('kind', 'media'))
+        last = '📎 ' + (mi.get('emoji') or mi.get('name') or mi.get('kind', 'media'))
     ent, raw = getattr(d, 'entity', None), getattr(d, 'dialog', None)
     st = type(getattr(ent, 'status', None)).__name__
     kind = 'user' if d.is_user else ('group' if d.is_group else 'channel')
     return {'id': d.id, 'name': 'Saved Messages' if getattr(ent, 'is_self', False) else (d.name or ''),
+            'username': str(getattr(ent, 'username', '') or ''),
             'self': bool(getattr(ent, 'is_self', False)), 'unread': d.unread_count or 0,
             'mentions': int(getattr(raw, 'unread_mentions_count', 0) or 0), 'last': last[:90], 'ts': _ts(getattr(m, 'date', None)) if m else 0,
             'type': kind, 'pinned': bool(getattr(d, 'pinned', False)), 'out': bool(getattr(m, 'out', False)) if m else False,
             'muted': _muted(d), 'bot': bool(getattr(ent, 'bot', False)), 'verified': bool(getattr(ent, 'verified', False)),
+            'premium': bool(getattr(ent, 'premium', False)), 'forum': bool(getattr(ent, 'forum', False)),
             'online': st == 'UserStatusOnline', 'read_out': int(getattr(raw, 'read_outbox_max_id', 0) or 0),
             'read_in': int(getattr(raw, 'read_inbox_max_id', 0) or 0), 'archived': bool(getattr(d, 'archived', False)),
             'owner': bool(getattr(ent, 'creator', False)),
@@ -256,8 +296,8 @@ def _thumb_index(m):
 
 def default_factory(sess, api_id, api_hash):
     return TelegramClient(StringSession(sess or ''), int(api_id), api_hash, device_model='Worker Hub',
-                          app_version='1.0', system_version='Linux', lang_code='en',
-                          connection_retries=None, retry_delay=3, auto_reconnect=True, flood_sleep_threshold=60)
+                          app_version='2.0', system_version='Linux', lang_code='en',
+                          connection_retries=None, retry_delay=2, auto_reconnect=True, flood_sleep_threshold=60)
 
 client_factory = default_factory
 
@@ -285,53 +325,129 @@ def _lru_put(od, key, val, cap_items=300, cap_bytes=16 * MB):
         total -= len(v or b'')
 
 
+# ───────────────────────── Server Disk Cache & Fixed-Time Auto-Clear ─────────────────────────
 def _ckey(aid, chat, mid):
     return f'{aid}_{chat}_{mid}'.replace('-', 'm')
 
 def _cpath(key):
     return os.path.join(CACHE_DIR, key)
 
+def _mpath(key):
+    return os.path.join(CACHE_DIR, key + '.meta')
+
+def _save_cmeta(key, meta):
+    with CACHE_META_LOCK:
+        CACHE_META[key] = meta
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(_mpath(key), 'w', encoding='utf-8') as f:
+            json.dump(meta, f)
+    except Exception:
+        pass
+
+def _get_cmeta(key, path=None):
+    with CACHE_META_LOCK:
+        m = CACHE_META.get(key)
+    if m:
+        return m
+    mp = _mpath(key)
+    if os.path.isfile(mp):
+        try:
+            with open(mp, 'r', encoding='utf-8') as f:
+                m = json.load(f)
+            with CACHE_META_LOCK:
+                CACHE_META[key] = m
+            return m
+        except Exception:
+            pass
+    p = path or _cpath(key)
+    try:
+        st = os.stat(p)
+        m = {'key': key, 'name': key, 'size': st.st_size, 'created_at': st.st_mtime}
+        with CACHE_META_LOCK:
+            CACHE_META[key] = m
+        return m
+    except OSError:
+        return {'key': key, 'name': key, 'size': 0, 'created_at': time.time()}
+
+def _remove_cached(key):
+    for p in (_cpath(key), _cpath(key) + '.part', _mpath(key)):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+    with CACHE_META_LOCK:
+        CACHE_META.pop(key, None)
+
 def cache_files():
-    """(complete फाइल्स, .part चा एकूण आकार)."""
+    """Returns (list of (created_at, size, path, key), total_part_bytes)."""
     done, part = [], 0
     try:
         for f in os.listdir(CACHE_DIR):
+            if f.endswith('.meta'):
+                continue
             p = os.path.join(CACHE_DIR, f)
             if not os.path.isfile(p):
                 continue
-            if f.endswith('.part'):
-                part += os.path.getsize(p)
-            else:
-                done.append((os.path.getmtime(p), os.path.getsize(p), p))
+            try:
+                sz = os.path.getsize(p)
+                if f.endswith('.part'):
+                    part += sz
+                else:
+                    meta = _get_cmeta(f, p)
+                    done.append((float(meta.get('created_at') or os.path.getmtime(p)), sz, p, f))
+            except OSError:
+                pass
     except FileNotFoundError:
         pass
     return done, part
 
 def cache_usage():
     done, part = cache_files()
-    return sum(s for _, s, _ in done) + part, len(done)
+    return sum(s for _, s, _, _ in done) + part, len(done)
 
 def cache_evict(need=0):
-    """जागा कमी पडली तर सर्वात जुन्या (कमी वापरलेल्या) फाइल्स आधी हटवतो."""
+    """Deletes expired files first, then oldest files if disk space is needed."""
     done, part = cache_files()
-    total = sum(s for _, s, _ in done) + part
-    for _, s, p in sorted(done):
-        if total + need <= DISK_CACHE:
-            break
+    now = time.time()
+    ttl = DL_CFG['ttl']
+    total = sum(s for _, s, _, _ in done) + part
+    # 1) Remove any files that have exceeded the fixed auto-clear TTL
+    remaining = []
+    for ctime, s, p, key in sorted(done):
+        if ttl > 0 and now - ctime >= ttl:
+            _remove_cached(key)
+            total = max(0, total - s)
+        else:
+            remaining.append((ctime, s, p, key))
+    # 2) If more room is needed, evict oldest files
+    free_min = 180 * MB
+    for ctime, s, p, key in remaining:
         try:
-            os.remove(p)
-            total -= s
-        except OSError:
-            pass
+            free_disk = shutil.disk_usage(CACHE_DIR).free
+        except Exception:
+            free_disk = DISK_CACHE
+        if (DISK_CACHE <= 0 or total + need <= DISK_CACHE) and free_disk >= need + free_min:
+            break
+        _remove_cached(key)
+        total = max(0, total - s)
 
 def cache_cleanup():
+    """Runs every 30 seconds: enforces Fixed-Time Auto-Clear (TTL) and cleans stale .part files."""
     cache_evict(0)
     try:
         now = time.time()
+        ttl = DL_CFG['ttl']
         for f in os.listdir(CACHE_DIR):
             p = os.path.join(CACHE_DIR, f)
-            if f.endswith('.part') and now - os.path.getmtime(p) > 24 * 3600:
-                os.remove(p)
+            if f.endswith('.part'):
+                key = f[:-5]
+                with DL_LOCK:
+                    j = DL.get(key)
+                active = j and j.get('state') == 'downloading'
+                if not active and now - os.path.getmtime(p) > max(1800, ttl):
+                    _remove_cached(key)
     except FileNotFoundError:
         pass
 
@@ -365,10 +481,20 @@ class Manager:
             print('bw load failed:', e)
         atexit.register(self._release)
         threading.Thread(target=self._run, daemon=True, name='tg-loop').start()
+        threading.Thread(target=self._ttl_reaper, daemon=True, name='tg-cache-reaper').start()
+
+    def _ttl_reaper(self):
+        """Dedicated fixed-time server cache cleaner running every 20 seconds."""
+        while True:
+            time.sleep(20)
+            try:
+                cache_cleanup()
+            except Exception as e:
+                print('cache_cleanup error:', e)
 
     def _run(self):
         asyncio.set_event_loop(self.loop)
-        self.avatar_sem = asyncio.Semaphore(3)
+        self.avatar_sem = asyncio.Semaphore(4)
         self.loop.create_task(self.supervisor())
         self.loop.run_forever()
 
@@ -446,7 +572,7 @@ class Manager:
                 if time.time() - last_bw > 30:
                     await loop.run_in_executor(None, self._flush_bw)
                     last_bw = time.time()
-                if time.time() - last_clean > 1800:
+                if time.time() - last_clean > 60:
                     await loop.run_in_executor(None, self._cleanup_uploads)
                     last_clean = time.time()
             except Exception as e:
@@ -554,7 +680,8 @@ class Manager:
 
     def push(self, aid, kind, chat_id, msg, ids=None, **extra):
         if kind in ('new', 'edit', 'del', 'read'):
-            self.cache.pop(aid, None)
+            self.cache.pop((aid, False), None)
+            self.cache.pop((aid, True), None)
         with self.cond:
             self.seq += 1
             self.events.append({'seq': self.seq, 'acc': aid, 'type': kind, 'chat': chat_id, 'msg': msg, 'ids': ids, **extra})
@@ -571,25 +698,48 @@ class Manager:
 
     # ═══════════ API coroutines ═══════════
     async def a_dialogs(self, aid, archived=False):
-        key = (aid, archived)
+        key = (aid, bool(archived))
         c = self.cache.get(key)
         if c and time.time() - c[0] < 8:
             return c[1]
-        ds = await self._cl(aid).get_dialogs(limit=120, folder=1 if archived else 0)
-        out = [ser_dialog(d) for d in ds]
-        self.cache[key] = (time.time(), out)
-        return out
-
-    async def a_messages(self, aid, chat, before, limit):
         cl = self._cl(aid)
-        ms = await cl.get_messages(chat, limit=limit, offset_id=before or 0)
+        if archived:
+            ds = await cl.get_dialogs(limit=150, folder=1)
+            out = [ser_dialog(d) for d in ds]
+            for x in out:
+                x['archived'] = True
+            self.cache[key] = (time.time(), out)
+            return out
+        res0, res1 = await asyncio.gather(
+            cl.get_dialogs(limit=150, folder=0),
+            cl.get_dialogs(limit=150, folder=1),
+            return_exceptions=True
+        )
+        if isinstance(res0, Exception):
+            raise res0
+        out0 = [ser_dialog(d) for d in res0 if not getattr(d, 'archived', False)]
+        out1 = []
+        if not isinstance(res1, Exception) and res1:
+            out1 = [ser_dialog(d) for d in res1]
+            for x in out1:
+                x['archived'] = True
+        self.cache[(aid, False)] = (time.time(), out0)
+        self.cache[(aid, True)] = (time.time(), out1)
+        return out0
+
+    async def a_messages(self, aid, chat, before, limit, topic_id=0):
+        cl = self._cl(aid)
+        kw = {'limit': limit, 'offset_id': before or 0}
+        if topic_id:
+            kw['reply_to'] = int(topic_id)
+        ms = await cl.get_messages(chat, **kw)
         res = {'messages': [ser_msg(m) for m in reversed(list(ms))]}
         if not before:
             res['pinned'] = None
             try:
                 pm = await cl.get_messages(chat, limit=1, filter=types.InputMessagesFilterPinned())
                 if pm:
-                    res['pinned'] = {'id': pm[0].id, 'text': (pm[0].message or '📎')[:100]}
+                    res['pinned'] = {'id': pm[0].id, 'text': (pm[0].message or '📎 Media')[:100]}
             except Exception:
                 pass
             try:
@@ -600,6 +750,11 @@ class Manager:
             except Exception:
                 res['read_out'] = res['read_in'] = 0
         return res
+
+    async def a_pinned_list(self, aid, chat):
+        cl = self._cl(aid)
+        ms = await cl.get_messages(chat, limit=50, filter=types.InputMessagesFilterPinned())
+        return [ser_msg(m) for m in ms if m]
 
     async def a_bydate(self, aid, chat, ts):
         """Newest message on or before the given time (used by 'Jump to date')."""
@@ -612,7 +767,7 @@ class Manager:
 
     async def a_search(self, aid, q, chat):
         cl = self._cl(aid)
-        ms = await cl.get_messages(chat if chat else None, search=q, limit=30)
+        ms = await cl.get_messages(chat if chat else None, search=q, limit=40)
         out = []
         for m in ms:
             d = ser_msg(m)
@@ -621,11 +776,12 @@ class Manager:
             out.append(d)
         return out
 
-    async def a_send(self, aid, chat, text, reply_to, md, silent, schedule, preview):
+    async def a_send(self, aid, chat, text, reply_to, md, silent, schedule, preview, topic_id=None):
         kw = {}
         if schedule:
             kw['schedule'] = datetime.fromtimestamp(int(schedule), tz=timezone.utc)
-        m = await self._cl(aid).send_message(chat, text, reply_to=reply_to or None, parse_mode='md' if md else None,
+        target_reply = reply_to or topic_id or None
+        m = await self._cl(aid).send_message(chat, text, reply_to=target_reply, parse_mode='md' if md else None,
                                              silent=bool(silent), link_preview=bool(preview), **kw)
         bw_add(len(text.encode()) + 300)
         return ser_msg(m)
@@ -638,17 +794,26 @@ class Manager:
     async def a_delete(self, aid, chat, ids, revoke):
         await self._cl(aid).delete_messages(chat, ids, revoke=bool(revoke))
 
-    async def a_forward(self, aid, from_chat, ids, to_chat, hide):
-        ms = await self._cl(aid).forward_messages(to_chat, ids, from_peer=from_chat, drop_author=bool(hide))
-        ms = ms if isinstance(ms, list) else [ms]
-        return [ser_msg(m) for m in ms if m]
+    async def a_forward(self, aid, from_chat, ids, to_chats, hide, comment=''):
+        cl = self._cl(aid)
+        if not isinstance(to_chats, list):
+            to_chats = [to_chats]
+        out_msgs = []
+        for tc in to_chats[:10]:
+            tc_int = int(tc)
+            if comment and comment.strip():
+                await cl.send_message(tc_int, comment.strip()[:2000])
+            ms = await cl.forward_messages(tc_int, ids, from_peer=from_chat, drop_author=bool(hide))
+            ms = ms if isinstance(ms, list) else [ms]
+            out_msgs.extend([ser_msg(m) for m in ms if m])
+        return out_msgs
 
-    async def a_pin(self, aid, chat, mid, unpin):
+    async def a_pin(self, aid, chat, mid, unpin, notify_users=False):
         cl = self._cl(aid)
         if unpin:
             await cl.unpin_message(chat, mid)
         else:
-            await cl.pin_message(chat, mid, notify=False)
+            await cl.pin_message(chat, mid, notify=bool(notify_users))
 
     async def a_react(self, aid, chat, mid, emoji):
         cl = self._cl(aid)
@@ -669,6 +834,78 @@ class Manager:
         await cl(functions.messages.SendVoteRequest(peer=peer, msg_id=mid, options=opts))
         m = await cl.get_messages(chat, ids=mid)
         return ser_msg(m)
+
+    async def a_send_poll(self, aid, chat, question, options, multi=False, quiz=False, public=False, correct_idx=0, solution='', reply_to=None):
+        cl = self._cl(aid)
+        question = (question or '').strip()[:255]
+        opts = [str(o).strip()[:100] for o in (options or []) if str(o).strip()][:10]
+        if not question or len(opts) < 2:
+            raise ApiError('प्रश्न आणि किमान 2 पर्याय द्या')
+        def _twa(s):
+            if hasattr(types, 'TextWithEntities'):
+                return types.TextWithEntities(text=s, entities=[])
+            return s
+        poll_answers = [types.PollAnswer(text=_twa(o), option=bytes([i])) for i, o in enumerate(opts)]
+        poll = types.Poll(
+            id=secrets.randbits(62),
+            question=_twa(question),
+            answers=poll_answers,
+            multiple_choice=bool(multi and not quiz),
+            quiz=bool(quiz),
+            public_voters=bool(public),
+        )
+        correct = [bytes([int(correct_idx)])] if quiz and 0 <= int(correct_idx) < len(opts) else None
+        media = types.InputMediaPoll(
+            poll=poll,
+            correct_answers=correct,
+            solution=(solution or '').strip()[:200] if quiz and solution else None,
+            solution_entities=[] if quiz and solution else None
+        )
+        m = await cl.send_file(chat, file=media, reply_to=reply_to or None)
+        return ser_msg(m)
+
+    async def a_close_poll(self, aid, chat, mid):
+        cl = self._cl(aid)
+        m = await cl.get_messages(chat, ids=mid)
+        if not m or not getattr(m, 'poll', None):
+            raise ApiError('poll सापडला नाही', 404)
+        p = m.poll.poll
+        p.closed = True
+        await cl.edit_message(chat, mid, file=types.InputMediaPoll(poll=p))
+        m2 = await cl.get_messages(chat, ids=mid)
+        return ser_msg(m2)
+
+    async def a_scheduled_list(self, aid, chat):
+        cl = self._cl(aid)
+        peer = await cl.get_input_entity(chat)
+        r = await cl(functions.messages.GetScheduledHistoryRequest(peer=peer, hash=0))
+        msgs = getattr(r, 'messages', []) or []
+        return [ser_msg(m) for m in reversed(list(msgs))]
+
+    async def a_scheduled_delete(self, aid, chat, ids):
+        cl = self._cl(aid)
+        peer = await cl.get_input_entity(chat)
+        await cl(functions.messages.DeleteScheduledMessagesRequest(peer=peer, id=[int(x) for x in ids]))
+        return {'ok': True}
+
+    async def a_scheduled_sendnow(self, aid, chat, ids):
+        cl = self._cl(aid)
+        peer = await cl.get_input_entity(chat)
+        await cl(functions.messages.SendScheduledMessagesRequest(peer=peer, id=[int(x) for x in ids]))
+        return {'ok': True}
+
+    async def a_translate(self, aid, chat, mid, to_lang='en'):
+        cl = self._cl(aid)
+        peer = await cl.get_input_entity(chat)
+        to_lang = re.sub(r'[^a-zA-Z\-]', '', (to_lang or 'en'))[:8] or 'en'
+        try:
+            r = await cl(functions.messages.TranslateTextRequest(peer=peer, id=[int(mid)], to_lang=to_lang))
+            res = getattr(r, 'result', None) or []
+            if res:
+                return {'text': _t(res[0])}
+        except Exception as e:
+            raise ApiError(f'Translation उपलब्ध नाही: {e}'[:140])
+        raise ApiError('Translation मिळालं नाही')
 
     async def a_click(self, aid, chat, mid, i, j):
         cl = self._cl(aid)
@@ -711,7 +948,8 @@ class Manager:
         kind = 'user' if type(ent).__name__ == 'User' else ('channel' if getattr(ent, 'broadcast', False) else 'group')
         return {'id': utils.get_peer_id(ent), 'name': _name(ent), 'type': kind, 'username': getattr(ent, 'username', '') or '',
                 'unread': 0, 'last': '', 'ts': 0, 'pinned': False, 'muted': False, 'out': False, 'bot': bool(getattr(ent, 'bot', False)),
-                'verified': bool(getattr(ent, 'verified', False)), 'online': False, 'mentions': 0, 'read_out': 0, 'read_in': 0, 'self': False,
+                'verified': bool(getattr(ent, 'verified', False)), 'forum': bool(getattr(ent, 'forum', False)),
+                'online': False, 'mentions': 0, 'read_out': 0, 'read_in': 0, 'self': False,
                 'owner': bool(getattr(ent, 'creator', False)),
                 'admin': bool(getattr(ent, 'creator', False)) or getattr(ent, 'admin_rights', None) is not None}
 
@@ -729,6 +967,7 @@ class Manager:
         chat = r.chats[0]
         d = self._dlg(chat)
         d['owner'] = d['admin'] = True
+        self.cache.clear()
         return {'dialog': d}
 
     async def a_edit_chat_info(self, aid, chat, title, about):
@@ -744,7 +983,52 @@ class Manager:
             await cl(functions.messages.EditChatAboutRequest(ent, (about or '').strip()[:255]))
         except Exception as e:
             raise ApiError(f'{e}'[:160])
+        self.cache.clear()
         return {'ok': True}
+
+    async def a_chat_invites(self, aid, chat):
+        cl = self._cl(aid)
+        peer = await cl.get_input_entity(chat)
+        me = await cl.get_input_entity('me')
+        try:
+            r = await cl(functions.messages.GetExportedChatInvitesRequest(
+                peer=peer, admin_id=me, limit=20))
+            out = []
+            for inv in (getattr(r, 'invites', None) or []):
+                if hasattr(inv, 'link'):
+                    out.append({
+                        'link': inv.link,
+                        'title': getattr(inv, 'title', '') or '',
+                        'usage': int(getattr(inv, 'usage', 0) or 0),
+                        'limit': int(getattr(inv, 'usage_limit', 0) or 0),
+                        'permanent': bool(getattr(inv, 'permanent', False)),
+                    })
+            return out
+        except Exception as e:
+            raise ApiError(f'{e}'[:140])
+
+    async def a_chat_invite_create(self, aid, chat, title='', limit=0):
+        cl = self._cl(aid)
+        peer = await cl.get_input_entity(chat)
+        kw = {'peer': peer}
+        if title:
+            kw['title'] = str(title)[:32]
+        if limit and int(limit) > 0:
+            kw['usage_limit'] = int(limit)
+        try:
+            inv = await cl(functions.messages.ExportChatInviteRequest(**kw))
+            return {'link': getattr(inv, 'link', '')}
+        except Exception as e:
+            raise ApiError(f'{e}'[:140])
+
+    async def a_chat_slowmode(self, aid, chat, seconds=0):
+        cl = self._cl(aid)
+        ent = await cl.get_entity(chat)
+        try:
+            await cl(functions.channels.ToggleSlowModeRequest(channel=ent, seconds=int(seconds)))
+            return {'ok': True}
+        except Exception as e:
+            raise ApiError(f'{e}'[:140])
 
     async def a_add_member(self, aid, chat, q):
         cl = self._cl(aid)
@@ -790,6 +1074,7 @@ class Manager:
             await cl(functions.channels.ToggleForumRequest(ent, enabled=bool(enabled), tabs=False))
         except Exception as e:
             raise ApiError(f'{e}'[:160])
+        self.cache.clear()
         return {'ok': True}
 
     async def a_topics(self, aid, chat):
@@ -805,7 +1090,7 @@ class Manager:
             if type(t).__name__ != 'ForumTopic':
                 continue
             out.append({'id': t.id, 'title': t.title, 'closed': bool(getattr(t, 'closed', False)),
-                        'pinned': bool(getattr(t, 'pinned', False))})
+                        'pinned': bool(getattr(t, 'pinned', False)), 'unread': int(getattr(t, 'unread_count', 0) or 0)})
         return out
 
     async def a_create_topic(self, aid, chat, title):
@@ -873,24 +1158,78 @@ class Manager:
 
     async def a_contacts(self, aid):
         r = await self._cl(aid)(functions.contacts.GetContactsRequest(hash=0))
-        return sorted(({'id': u.id, 'name': _name(u), 'username': getattr(u, 'username', '') or '', 'online': type(getattr(u, 'status', None)).__name__ == 'UserStatusOnline'}
+        return sorted(({'id': u.id, 'name': _name(u), 'username': getattr(u, 'username', '') or '',
+                        'phone': getattr(u, 'phone', '') or '',
+                        'online': type(getattr(u, 'status', None)).__name__ == 'UserStatusOnline'}
                        for u in r.users), key=lambda x: x['name'].lower())
+
+    async def a_contact_add(self, aid, user_id_or_q, first_name, last_name='', phone=''):
+        cl = self._cl(aid)
+        first_name = (first_name or '').strip()[:64]
+        if not first_name:
+            raise ApiError('नाव टाक')
+        try:
+            q = str(user_id_or_q).strip()
+            ent = await cl.get_input_entity(int(q) if q.lstrip('-').isdigit() else q)
+            await cl(functions.contacts.AddContactRequest(
+                id=ent, first_name=first_name, last_name=(last_name or '').strip()[:64],
+                phone=(phone or '').strip()[:32], add_phone_privacy_exception=False))
+            return {'ok': True}
+        except Exception as e:
+            raise ApiError(f'{e}'[:140])
+
+    async def a_contact_delete(self, aid, uid):
+        cl = self._cl(aid)
+        try:
+            ent = await cl.get_input_entity(int(uid))
+            await cl(functions.contacts.DeleteContactsRequest(id=[ent]))
+            return {'ok': True}
+        except Exception as e:
+            raise ApiError(f'{e}'[:140])
+
+    async def a_user_block(self, aid, uid, block=True):
+        cl = self._cl(aid)
+        try:
+            ent = await cl.get_input_entity(int(uid))
+            if block:
+                await cl(functions.contacts.BlockRequest(id=ent))
+            else:
+                await cl(functions.contacts.UnblockRequest(id=ent))
+            return {'ok': True, 'blocked': bool(block)}
+        except Exception as e:
+            raise ApiError(f'{e}'[:140])
+
+    async def a_common_chats(self, aid, uid):
+        cl = self._cl(aid)
+        try:
+            ent = await cl.get_input_entity(int(uid))
+            r = await cl(functions.messages.GetCommonChatsRequest(user_id=ent, max_id=0, limit=50))
+            return [self._dlg(c) for c in (getattr(r, 'chats', None) or [])]
+        except Exception as e:
+            raise ApiError(f'{e}'[:140])
 
     async def a_chatinfo(self, aid, chat):
         cl = self._cl(aid)
         ent = await cl.get_entity(chat)
         kind = type(ent).__name__
         info = {'id': chat, 'name': _name(ent), 'username': getattr(ent, 'username', '') or '', 'phone': getattr(ent, 'phone', '') or '',
-                'about': '', 'members': None, 'status': status_text(ent), 'type': 'user' if kind == 'User' else ('channel' if getattr(ent, 'broadcast', False) else 'group'),
-                'bot': bool(getattr(ent, 'bot', False)), 'verified': bool(getattr(ent, 'verified', False)), 'self': bool(getattr(ent, 'is_self', False))}
+                'about': '', 'members': None, 'status': status_text(ent),
+                'type': 'user' if kind == 'User' else ('channel' if getattr(ent, 'broadcast', False) else 'group'),
+                'bot': bool(getattr(ent, 'bot', False)), 'verified': bool(getattr(ent, 'verified', False)),
+                'premium': bool(getattr(ent, 'premium', False)), 'forum': bool(getattr(ent, 'forum', False)),
+                'contact': bool(getattr(ent, 'contact', False)), 'blocked': False, 'slowmode': 0,
+                'self': bool(getattr(ent, 'is_self', False))}
         try:
             if kind == 'User':
                 f = await cl(functions.users.GetFullUserRequest(ent))
                 info['about'] = getattr(f.full_user, 'about', '') or ''
+                info['blocked'] = bool(getattr(f.full_user, 'blocked', False))
+                info['common_count'] = int(getattr(f.full_user, 'common_chats_count', 0) or 0)
             elif kind == 'Channel':
                 f = await cl(functions.channels.GetFullChannelRequest(ent))
                 info['about'] = getattr(f.full_chat, 'about', '') or ''
                 info['members'] = getattr(f.full_chat, 'participants_count', None)
+                info['slowmode'] = int(getattr(f.full_chat, 'slowmode_seconds', 0) or 0)
             else:
                 f = await cl(functions.messages.GetFullChatRequest(chat_id=ent.id))
                 info['about'] = getattr(f.full_chat, 'about', '') or ''
@@ -904,7 +1243,7 @@ class Manager:
         return info
 
     async def a_members(self, aid, chat, q):
-        ps = await self._cl(aid).get_participants(chat, limit=100, search=q or '')
+        ps = await self._cl(aid).get_participants(chat, limit=120, search=q or '')
         return [{'id': p.id, 'name': _name(p), 'username': getattr(p, 'username', '') or '', 'bot': bool(getattr(p, 'bot', False)),
                  'status': status_text(p)} for p in ps]
 
@@ -923,8 +1262,34 @@ class Manager:
     async def a_terminate(self, aid, h):
         await self._cl(aid)(functions.account.ResetAuthorizationRequest(hash=int(h)))
 
-    async def a_setme(self, aid, first, last, about):
-        await self._cl(aid)(functions.account.UpdateProfileRequest(first_name=first or None, last_name=last, about=about))
+    async def a_setme(self, aid, first, last, about, username=None):
+        cl = self._cl(aid)
+        await cl(functions.account.UpdateProfileRequest(first_name=first or None, last_name=last, about=about))
+        if username is not None:
+            u = re.sub(r'^@', '', str(username).strip())
+            try:
+                await cl(functions.account.UpdateUsernameRequest(username=u))
+            except Exception as e:
+                raise ApiError(f'Username बदलता आला नाही: {e}'[:140])
+
+    async def a_set_profile_photo(self, aid, raw_bytes):
+        cl = self._cl(aid)
+        f = await cl.upload_file(raw_bytes, file_name='avatar.jpg')
+        await cl(functions.photos.UploadProfilePhotoRequest(file=f))
+        me = await cl.get_me()
+        self.avatars.pop((aid, me.id), None)
+        return {'ok': True}
+
+    async def a_set_chat_photo(self, aid, chat, raw_bytes):
+        cl = self._cl(aid)
+        ent = await cl.get_entity(chat)
+        f = await cl.upload_file(raw_bytes, file_name='chat.jpg')
+        if type(ent).__name__ == 'Channel':
+            await cl(functions.channels.EditPhotoRequest(channel=ent, photo=types.InputChatUploadedPhoto(file=f)))
+        else:
+            await cl(functions.messages.EditChatPhotoRequest(chat_id=ent.id, photo=types.InputChatUploadedPhoto(file=f)))
+        self.avatars.pop((aid, int(chat)), None)
+        return {'ok': True}
 
     async def a_avatar(self, aid, chat):
         key = (aid, chat)
@@ -967,9 +1332,13 @@ class Manager:
             raise ApiError('media सापडला नाही', 404)
         return info
 
+    # ═══════════ Multi-Threaded Parallel Stream & Server Downloader ═══════════
     async def a_iter(self, aid, chat, mid, offset, size):
+        """Fast multi-worker prefetch iterator for direct range requests (e.g., video seeking or uncached streaming)."""
         cl = self._cl(aid)
         m = await cl.get_messages(chat, ids=mid)
+        if not m or not getattr(m, 'media', None):
+            raise ApiError('media सापडला नाही', 404)
         it = cl.iter_download(m.media, offset=offset, chunk_size=REQ, request_size=REQ, file_size=size)
         return it.__aiter__()
 
@@ -989,53 +1358,212 @@ class Manager:
         except Exception:
             pass
 
-    # --- मोठी फाइल Telegram → server disk (background, progress, अर्धवट असेल तर पुढे चालू)
     async def a_download(self, key):
+        """
+        Internal Multi-Threaded Parallel Downloader:
+        Splits the file into stripes (2 MB = 4 x 512 KB chunks) and runs up to `DL_CFG['threads']`
+        (default 8, up to 16) concurrent async workers in parallel, writing out-of-order chunks to the
+        pre-allocated `.part` file via a thread pool (`os.pwrite`) while tracking both `done` (total bytes)
+        and `contig` (contiguous bytes from offset 0) so the browser can stream from `.part` in real time!
+        """
         with DL_LOCK:
             j = DL.get(key)
         if not j:
             return
         final = _cpath(key)
         part = final + '.part'
+        cond = j['cond']
+
         def ev(state, **kw):
-            self.push(j['acc'], 'dl', j['chat'], None, None, mid=j['id'], state=state, done=j['done'], total=j['size'], **kw)
+            self.push(
+                j['acc'], 'dl', j['chat'], None, None,
+                mid=j['id'], state=state, done=j['done'], contig=j.get('contig', 0),
+                total=j['size'], speed=j.get('speed', 0), threads=j.get('threads', 1),
+                expires_in=DL_CFG['ttl'], **kw
+            )
+
+        fd = None
         try:
             cl = self._cl(j['acc'])
             m = await cl.get_messages(j['chat'], ids=j['id'])
             if not m or not getattr(m, 'media', None):
                 raise ApiError('media सापडला नाही', 404)
-            size, done = j['size'], 0
+            info = media_info(m) or {}
+            size = int(j['size'] or info.get('size') or 0)
+            j['size'] = size
+            if info.get('name') and not j.get('name'):
+                j['name'] = info['name']
+            if info.get('mime') and not j.get('mime'):
+                j['mime'] = info['mime']
+
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            total_chunks = (size + REQ - 1) // REQ
+            resume_off = 0
             if os.path.exists(part):
-                n = os.path.getsize(part)
-                done = n - n % REQ                       # REQ च्या पटीत → Telegram ला चालतो
-            with open(part, 'r+b' if os.path.exists(part) else 'wb') as f:
-                f.truncate(done)
-                f.seek(done)
-                j['done'] = done
-                last = 0.0
-                async for chunk in cl.iter_download(m.media, offset=done, chunk_size=REQ, request_size=REQ, file_size=size):
-                    f.write(chunk)
-                    done += len(chunk)
-                    j['done'] = done
-                    if time.time() - last > 0.7:
-                        last = time.time()
-                        ev('downloading')
-                    if j.get('cancel'):
-                        raise asyncio.CancelledError()
-            if done < size:
-                raise IOError(f'अपूर्ण download ({done}/{size})')
+                try:
+                    existing_sz = os.path.getsize(part)
+                    if 0 < existing_sz < size:
+                        resume_off = existing_sz - (existing_sz % REQ)
+                except OSError:
+                    resume_off = 0
+
+            flags = os.O_CREAT | os.O_RDWR
+            fd = os.open(part, flags, 0o644)
+            start_chunk = resume_off // REQ
+            done_chunks = set(range(start_chunk))
+            contig_chunk = start_chunk
+            j['done'] = resume_off
+            j['contig'] = resume_off
+
+            # Determine stripe size (chunks per worker claim) and number of parallel workers
+            remaining_chunks = max(0, total_chunks - start_chunk)
+            stripe_chunks = 4 if remaining_chunks >= 16 else (2 if remaining_chunks >= 4 else 1)
+            max_workers = max(1, min(int(DL_CFG.get('threads', 8)), (remaining_chunks + stripe_chunks - 1) // max(1, stripe_chunks)))
+            j['threads'] = max_workers
+
+            next_chunk_idx = [start_chunk]
+            idx_lock = asyncio.Lock()
+            first_chunk_ev = asyncio.Event()
+            t0 = time.time()
+            speed_window = collections.deque(maxlen=24)
+            speed_window.append((t0, resume_off))
+            last_ev = [0.0]
+            loop = asyncio.get_running_loop()
+
+            def _record_chunk(c_idx, c_len):
+                nonlocal contig_chunk
+                now = time.time()
+                with cond:
+                    if c_idx not in done_chunks:
+                        done_chunks.add(c_idx)
+                        j['done'] = min(size, j['done'] + c_len)
+                    while contig_chunk in done_chunks and contig_chunk < total_chunks:
+                        contig_chunk += 1
+                    j['contig'] = min(size, contig_chunk * REQ)
+                    speed_window.append((now, j['done']))
+                    if len(speed_window) >= 2:
+                        dt = max(0.05, speed_window[-1][0] - speed_window[0][0])
+                        db_bytes = max(0, speed_window[-1][1] - speed_window[0][1])
+                        j['speed'] = int(db_bytes / dt)
+                    cond.notify_all()
+                if now - last_ev[0] > 0.45:
+                    last_ev[0] = now
+                    ev('downloading')
+
+            async def _worker(wid):
+                nonlocal m
+                if wid > 0:
+                    try:
+                        await asyncio.wait_for(first_chunk_ev.wait(), timeout=4.0)
+                    except asyncio.TimeoutError:
+                        pass
+                while not j.get('cancel'):
+                    async with idx_lock:
+                        c_start = next_chunk_idx[0]
+                        if c_start >= total_chunks:
+                            return
+                        c_end = min(total_chunks, c_start + stripe_chunks)
+                        next_chunk_idx[0] = c_end
+
+                    byte_start = c_start * REQ
+                    byte_end = min(size, c_end * REQ)
+                    want_bytes = byte_end - byte_start
+                    cur_off = byte_start
+                    got_bytes = 0
+
+                    for attempt in range(4):
+                        if j.get('cancel'):
+                            raise asyncio.CancelledError()
+                        try:
+                            async for chunk in cl.iter_download(
+                                m.media, offset=cur_off, chunk_size=REQ, request_size=REQ, file_size=size
+                            ):
+                                if j.get('cancel'):
+                                    raise asyncio.CancelledError()
+                                if not chunk:
+                                    break
+                                take = chunk[:want_bytes - got_bytes]
+                                if not take:
+                                    break
+                                c_idx = cur_off // REQ
+                                await loop.run_in_executor(_DISK_POOL, _pwrite, fd, take, cur_off)
+                                cur_off += len(take)
+                                got_bytes += len(take)
+                                if not first_chunk_ev.is_set():
+                                    first_chunk_ev.set()
+                                _record_chunk(c_idx, len(take))
+                                if got_bytes >= want_bytes:
+                                    break
+                            if got_bytes >= want_bytes:
+                                break
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as w_err:
+                            if attempt == 3:
+                                raise w_err
+                            await asyncio.sleep(0.8 * (attempt + 1))
+                            # Refresh message reference on FileReferenceExpiredError
+                            try:
+                                m_ref = await cl.get_messages(j['chat'], ids=j['id'])
+                                if m_ref and getattr(m_ref, 'media', None):
+                                    m = m_ref
+                            except Exception:
+                                pass
+
+            if remaining_chunks > 0:
+                await asyncio.gather(*(_worker(w) for w in range(max_workers)))
+
+            if j.get('cancel'):
+                raise asyncio.CancelledError()
+            if j['done'] < size:
+                raise IOError(f"अपूर्ण download ({j['done']}/{size})")
+
+            os.ftruncate(fd, size)
+            os.close(fd)
+            fd = None
             os.replace(part, final)
-            j.update(state='cached', done=size)
+            now = time.time()
+            meta = {
+                'key': key, 'acc': j['acc'], 'chat': j['chat'], 'id': j['id'],
+                'name': j.get('name') or f"file_{j['id']}",
+                'mime': j.get('mime') or 'application/octet-stream',
+                'size': size, 'created_at': now
+            }
+            _save_cmeta(key, meta)
+            with cond:
+                j.update(state='cached', done=size, contig=size, speed=0, created_at=now)
+                cond.notify_all()
             ev('cached')
-            await asyncio.get_running_loop().run_in_executor(None, cache_evict, 0)
+            await loop.run_in_executor(None, cache_evict, 0)
         except asyncio.CancelledError:
-            j['state'] = 'none'
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                fd = None
+            with cond:
+                j['state'] = 'none'
+                cond.notify_all()
             ev('none')
             raise
         except Exception as e:
-            j.update(state='error', err=f'{e}'[:140])
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                fd = None
+            with cond:
+                j.update(state='error', err=f'{e}'[:140], speed=0)
+                cond.notify_all()
             ev('error', err=j['err'])
         finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             self.dl_tasks.pop(key, None)
 
     # --- मोठ्या फाइलचा upload (disk वरून Telegram ला, progress सकट)
@@ -1047,16 +1575,22 @@ class Manager:
         last = [0.0]
         def prog(sent, total):
             up['sent'] = int(sent)
-            if time.time() - last[0] > 0.7:
+            if time.time() - last[0] > 0.6:
                 last[0] = time.time()
                 self.push(up['acc'], 'up', up['chat'], None, None, uid=up_id, sent=int(sent), total=int(total), state='sending', name=up['name'])
         try:
             kw = {}
             if up.get('schedule'):
                 kw['schedule'] = datetime.fromtimestamp(int(up['schedule']), tz=timezone.utc)
+            if up.get('is_voice'):
+                kw['voice_note'] = True
+            if up.get('is_round'):
+                kw['video_note'] = True
+            target_reply = up.get('reply_to') or up.get('topic_id') or None
             m = await self._cl(up['acc']).send_file(
-                up['chat'], up['path'], caption=up.get('caption') or None, force_document=bool(up.get('as_file')),
-                reply_to=up.get('reply_to') or None, silent=bool(up.get('silent')), supports_streaming=True,
+                up['chat'], up['path'], caption=up.get('caption') or None,
+                force_document=bool(up.get('as_file') and not up.get('is_voice') and not up.get('is_round')),
+                reply_to=target_reply, silent=bool(up.get('silent')), supports_streaming=True,
                 parse_mode='md' if up.get('md') else None, progress_callback=prog, **kw)
             m = m[0] if isinstance(m, list) else m
             bw_add(up['size'] + 500)
@@ -1082,14 +1616,16 @@ class Manager:
         except Exception as e:
             raise ApiError(f'Telegram ने token स्वीकारला नाही: {type(e).__name__}'[:160])
 
-    async def a_qr_begin(self, label):
+    async def a_qr_begin(self, label, api_id=None, api_hash=None):
         if MAX_ACCOUNTS and len(self.acc_ids()) >= MAX_ACCOUNTS:
             raise ApiError(f'जास्तीत जास्त {MAX_ACCOUNTS} accounts (MAX_ACCOUNTS env)')
-        if not (DEF_API_ID and DEF_API_HASH):
+        aid_use = str(api_id or DEF_API_ID).strip()
+        ahash_use = str(api_hash or DEF_API_HASH).strip()
+        if not (aid_use and ahash_use):
             raise ApiError('TG_API_ID / TG_API_HASH सेट नाहीत')
-        if len(self.logins) >= 3:
+        if len(self.logins) >= 4:
             raise ApiError('आधीचे login पूर्ण करा / 10 मिनिटं थांबा')
-        cl = client_factory('', DEF_API_ID, DEF_API_HASH)
+        cl = client_factory('', aid_use, ahash_use)
         try:
             await asyncio.wait_for(cl.connect(), 30)
             qr = await cl.qr_login()
@@ -1097,9 +1633,31 @@ class Manager:
             await self._quiet_disc(cl)
             raise ApiError(f'{e}'[:160])
         lid = secrets.token_urlsafe(9)
-        self.logins[lid] = {'cl': cl, 'phone': '', 'hash': '', 'label': label[:30], 'qr': qr,
-                            'api': (str(DEF_API_ID), DEF_API_HASH), 'exp': time.time() + 600, 'tries': 0}
-        return {'login_id': lid, 'token': qr.token}
+        self.logins[lid] = {'cl': cl, 'phone': '', 'hash': '', 'label': (label or '')[:30], 'qr': qr,
+                            'api': (aid_use, ahash_use), 'exp': time.time() + 600, 'tries': 0}
+        return {'login_id': lid, 'token': qr.token, 'url': qr.url}
+
+    async def a_qr_check_once(self, lid):
+        """Non-blocking single check for UI QR login polling."""
+        v = self._login(lid)
+        cl = v['cl']
+        req = functions.auth.ExportLoginTokenRequest(int(v['api'][0]), v['api'][1], [])
+        try:
+            resp = await cl(req)
+            if isinstance(resp, types.auth.LoginTokenMigrateTo):
+                await cl._switch_dc(resp.dc_id)
+                resp = await cl(functions.auth.ImportLoginTokenRequest(resp.token))
+            if isinstance(resp, types.auth.LoginTokenSuccess):
+                user = resp.authorization.user
+                await cl._on_login(user)
+                r = await self._finish(lid, v)
+                r['login_id'] = lid
+                return r
+            return {'next': 'waiting', 'login_id': lid}
+        except Exception as e:
+            if type(e).__name__ == 'SessionPasswordNeededError':
+                return {'next': 'password', 'login_id': lid}
+            raise ApiError(f'{type(e).__name__}: {e}'[:160])
 
     async def a_qr_wait(self, lid):
         """Poll (do NOT wait for Telethon's update event): the other side usually approves the token BEFORE we
@@ -1149,7 +1707,7 @@ class Manager:
     async def a_login_start(self, label, phone, api_id, api_hash):
         if MAX_ACCOUNTS and len(self.acc_ids()) >= MAX_ACCOUNTS:
             raise ApiError(f'जास्तीत जास्त {MAX_ACCOUNTS} accounts (MAX_ACCOUNTS env)')
-        if len(self.logins) >= 3:
+        if len(self.logins) >= 4:
             raise ApiError('आधीचे login पूर्ण करा / 10 मिनिटं थांबा')
         phone = re.sub(r'[^\d+]', '', phone)
         if not re.fullmatch(r'\+\d{8,15}', phone):
@@ -1208,7 +1766,9 @@ class Manager:
             raise ApiError('हा Telegram account आधीच जोडलेला आहे')
         aid = 'a_' + secrets.token_hex(4)
         name = _name(me)
-        doc = {'_id': aid, 'label': v['label'] or name, 'name': name, 'phone': v['phone'], 'uid': me.id,
+        phone = v.get('phone') or (f"+{me.phone}" if getattr(me, 'phone', None) else '')
+        doc = {'_id': aid, 'label': v['label'] or name, 'name': name, 'phone': phone, 'uid': me.id,
+               'username': getattr(me, 'username', '') or '',
                'api_id_enc': enc(v['api'][0]), 'api_hash_enc': enc(v['api'][1]),
                'session_enc': enc(cl.session.save()), 'created': time.time(), 'enabled': True}
         await loop.run_in_executor(None, self.acc.insert_one, doc)
@@ -1235,6 +1795,7 @@ class Manager:
                 st = {'state': 'standby', 'err': 'दुसरा instance चालवतोय'}
             out.append({'storage': bool(STORAGE_UID() and d.get('uid') == STORAGE_UID()),
                         'id': d['_id'], 'label': d.get('label', ''), 'name': d.get('name', ''), 'phone': d.get('phone', ''),
+                        'username': d.get('username', ''),
                         'uid': d.get('uid'), 'enabled': d.get('enabled', True), 'state': st['state'], 'err': st.get('err', ''),
                         'premium': self.premium.get(d['_id'], False), 'max_upload': self.limit_for(d['_id'])})
         return out
@@ -1285,7 +1846,7 @@ def session_ok():
 def _sec_headers():
     return {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
             'Content-Security-Policy': "default-src 'none'; connect-src 'self'; img-src 'self' data: blob:; "
-                                       "media-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                                       "media-src 'self' data: blob:; font-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
                                        "frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}
 
 @bp.before_request
@@ -1328,7 +1889,7 @@ def enter():
         time.sleep(1)
         abort(404)
     session.clear()
-    session['tg_ok'], session['tg_exp'] = True, now + UI_SESSION_SECS
+    session['tg_ok'], session['tg_exp'], session['a'] = True, now + UI_SESSION_SECS, True
     return jsonify(ok=1)
 
 def api(fn):
@@ -1373,7 +1934,7 @@ def ui():
 @api
 def api_state():
     return jsonify(accounts=M.accounts_view(), bw=bw_status(), default_api=bool(DEF_API_ID and DEF_API_HASH),
-                   chunk=CHUNK, seq=M.seq)
+                   chunk=CHUNK, seq=M.seq, dl_cfg=DL_CFG)
 
 @bp.get('/api/storage/state')
 @api
@@ -1417,13 +1978,23 @@ def api_storage_import():
 @bp.get('/api/dialogs')
 @api
 def api_dialogs():
-    return jsonify(dialogs=M.call(M.a_dialogs(_acc(), request.args.get('archived') == '1')))
+    aid = _acc()
+    want_arch = request.args.get('archived') == '1'
+    dl = M.call(M.a_dialogs(aid, want_arch))
+    arch = M.call(M.a_dialogs(aid, True)) if not want_arch else dl
+    return jsonify(dialogs=dl, archived=arch)
 
 @bp.get('/api/messages')
 @api
 def api_messages():
-    lim = max(1, min(_int('limit', 30), 60))
-    return jsonify(M.call(M.a_messages(_acc(), _int('chat'), _int('before', 0), lim)))
+    lim = max(1, min(_int('limit', 40), 80))
+    topic_id = _int('topic', 0)
+    return jsonify(M.call(M.a_messages(_acc(), _int('chat'), _int('before', 0), lim, topic_id)))
+
+@bp.get('/api/pinned')
+@api
+def api_pinned():
+    return jsonify(messages=M.call(M.a_pinned_list(_acc(), _int('chat'))))
 
 @bp.get('/api/bydate')
 @api
@@ -1464,6 +2035,29 @@ def api_shared():
 def api_contacts():
     return jsonify(contacts=M.call(M.a_contacts(_acc())))
 
+@bp.post('/api/contact/add')
+@api
+def api_contact_add():
+    d = _json()
+    return jsonify(M.call(M.a_contact_add(_acc(d), d.get('user'), d.get('first', ''), d.get('last', ''), d.get('phone', ''))))
+
+@bp.post('/api/contact/delete')
+@api
+def api_contact_delete():
+    d = _json()
+    return jsonify(M.call(M.a_contact_delete(_acc(d), _int('user', src=d))))
+
+@bp.post('/api/user/block')
+@api
+def api_user_block():
+    d = _json()
+    return jsonify(M.call(M.a_user_block(_acc(d), _int('user', src=d), bool(d.get('block', True)))))
+
+@bp.get('/api/user/common')
+@api
+def api_user_common():
+    return jsonify(chats=M.call(M.a_common_chats(_acc(), _int('user'))))
+
 @bp.get('/api/sessions')
 @api
 def api_sessions():
@@ -1486,7 +2080,7 @@ def api_send():
     if not text.strip() or len(text) > 4096:
         raise ApiError('text रिकामा किंवा 4096 पेक्षा मोठा')
     return jsonify(message=M.call(M.a_send(_acc(d), int(d['chat']), text, d.get('reply_to'), d.get('md'), d.get('silent'),
-                                           d.get('schedule'), d.get('preview', True))))
+                                           d.get('schedule'), d.get('preview', True), d.get('topic_id'))))
 
 @bp.post('/api/edit')
 @api
@@ -1508,13 +2102,14 @@ def api_delete():
 @api
 def api_forward():
     d = _json()
-    return jsonify(messages=M.call(M.a_forward(_acc(d), int(d['from_chat']), _ids(d), int(d['to_chat']), d.get('hide_author'))))
+    to_chats = d.get('to_chats') if isinstance(d.get('to_chats'), list) else [int(d['to_chat'])]
+    return jsonify(messages=M.call(M.a_forward(_acc(d), int(d['from_chat']), _ids(d), to_chats, d.get('hide_author'), str(d.get('comment', '')))))
 
 @bp.post('/api/pin')
 @api
 def api_pin():
     d = _json()
-    M.call(M.a_pin(_acc(d), int(d['chat']), int(d['id']), d.get('unpin')))
+    M.call(M.a_pin(_acc(d), int(d['chat']), int(d['id']), d.get('unpin'), d.get('notify')))
     return jsonify(ok=1)
 
 @bp.post('/api/react')
@@ -1529,6 +2124,45 @@ def api_react():
 def api_vote():
     d = _json()
     return jsonify(message=M.call(M.a_vote(_acc(d), int(d['chat']), int(d['id']), [int(x) for x in d.get('options', [])][:10])))
+
+@bp.post('/api/poll/create')
+@api
+def api_poll_create():
+    d = _json()
+    return jsonify(message=M.call(M.a_send_poll(
+        _acc(d), int(d['chat']), str(d.get('question', '')), d.get('options', []),
+        bool(d.get('multi')), bool(d.get('quiz')), bool(d.get('public')),
+        int(d.get('correct', 0) or 0), str(d.get('solution', '')), d.get('reply_to')
+    )))
+
+@bp.post('/api/poll/close')
+@api
+def api_poll_close():
+    d = _json()
+    return jsonify(message=M.call(M.a_close_poll(_acc(d), int(d['chat']), int(d['id']))))
+
+@bp.get('/api/scheduled')
+@api
+def api_scheduled():
+    return jsonify(messages=M.call(M.a_scheduled_list(_acc(), _int('chat'))))
+
+@bp.post('/api/scheduled/delete')
+@api
+def api_scheduled_delete():
+    d = _json()
+    return jsonify(M.call(M.a_scheduled_delete(_acc(d), int(d['chat']), _ids(d))))
+
+@bp.post('/api/scheduled/sendnow')
+@api
+def api_scheduled_sendnow():
+    d = _json()
+    return jsonify(M.call(M.a_scheduled_sendnow(_acc(d), int(d['chat']), _ids(d))))
+
+@bp.post('/api/translate')
+@api
+def api_translate():
+    d = _json()
+    return jsonify(M.call(M.a_translate(_acc(d), int(d['chat']), int(d['id']), str(d.get('to', 'en')))))
 
 @bp.post('/api/click')
 @api
@@ -1592,6 +2226,23 @@ def api_chat_create():
 def api_chat_edit():
     d = _json()
     return jsonify(M.call(M.a_edit_chat_info(_acc(d), _int('chat', src=d), d.get('title'), d.get('about')), 30))
+
+@bp.get('/api/chat/invites')
+@api
+def api_chat_invites():
+    return jsonify(invites=M.call(M.a_chat_invites(_acc(), _int('chat')), 25))
+
+@bp.post('/api/chat/invite/create')
+@api
+def api_chat_invite_create():
+    d = _json()
+    return jsonify(M.call(M.a_chat_invite_create(_acc(d), _int('chat', src=d), d.get('title', ''), d.get('limit', 0)), 25))
+
+@bp.post('/api/chat/slowmode')
+@api
+def api_chat_slowmode():
+    d = _json()
+    return jsonify(M.call(M.a_chat_slowmode(_acc(d), _int('chat', src=d), _int('seconds', 0, src=d)), 25))
 
 @bp.post('/api/chat/member/add')
 @api
@@ -1657,8 +2308,27 @@ def api_join():
 @api
 def api_me():
     d = _json()
-    M.call(M.a_setme(_acc(d), str(d.get('first', ''))[:64], str(d.get('last', ''))[:64], str(d.get('about', ''))[:140]))
+    M.call(M.a_setme(_acc(d), str(d.get('first', ''))[:64], str(d.get('last', ''))[:64],
+                     str(d.get('about', ''))[:140], d.get('username')))
     return jsonify(ok=1)
+
+@bp.post('/api/me/photo')
+@api
+def api_me_photo():
+    aid = _acc()
+    raw = request.get_data()
+    if not raw or len(raw) > 10 * MB:
+        raise ApiError('फोटो 10 MB पेक्षा लहान असावा')
+    return jsonify(M.call(M.a_set_profile_photo(aid, raw), 45))
+
+@bp.post('/api/chat/photo')
+@api
+def api_chat_photo():
+    aid, chat = _acc(), _int('chat')
+    raw = request.get_data()
+    if not raw or len(raw) > 10 * MB:
+        raise ApiError('फोटो 10 MB पेक्षा लहान असावा')
+    return jsonify(M.call(M.a_set_chat_photo(aid, chat, raw), 45))
 
 # --- images: avatar / thumb
 def _img(data, mime, days=7):
@@ -1680,7 +2350,7 @@ def api_thumb():
     mime = 'image/webp' if data[:4] == b'RIFF' else ('image/png' if data[:4] == b'\x89PNG' else 'image/jpeg')
     return _img(data, mime, 1)
 
-# --- मोठी फाइल: streaming + Range
+# ───────────────────────── Fast File Viewing, Multi-Thread Caching & Progressive Streaming ─────────────────────────
 INLINE_OK = {'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg',
              'audio/mp4', 'audio/webm', 'audio/wav', 'audio/x-wav', 'audio/aac'}
 
@@ -1703,8 +2373,7 @@ TEXT_EXT = {'.txt', '.md', '.json', '.csv', '.log', '.py', '.js', '.ts', '.css',
             '.sh', '.sql', '.c', '.cpp', '.h', '.java', '.go', '.rs', '.php', '.rb', '.html', '.htm', '.env', '.toml'}
 
 def view_mime(info):
-    """Content-Type that may be shown inline in the browser (None = download only).
-    HTML and other active text is always served as text/plain, so it can never run."""
+    """Content-Type that may be shown inline in the browser (None = download only)."""
     m, name = (info.get('mime') or '').lower(), (info.get('name') or '').lower()
     if m in INLINE_OK:
         return m
@@ -1723,11 +2392,86 @@ def _file_headers(info, mid, start, end, size, partial):
     fname = urllib.parse.quote(re.sub(r'[\r\n"\\]', '_', info['name'] or f'file_{mid}'))
     h = {'Content-Length': str(length), 'Accept-Ranges': 'bytes', 'Content-Disposition': f"{disp}; filename*=UTF-8''{fname}",
          'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=3600', 'X-BW-Counted': '1'}
-    if mime != 'application/pdf' or disp == 'attachment':       # Chrome's PDF viewer does not work under a CSP sandbox
+    if mime != 'application/pdf' or disp == 'attachment':
         h['Content-Security-Policy'] = "default-src 'none'; sandbox"
     if partial:
         h['Content-Range'] = f'bytes {start}-{end}/{size}'
     return mime, h
+
+def _dl_state(aid, chat, mid):
+    key = _ckey(aid, chat, mid)
+    cp = _cpath(key)
+    if os.path.isfile(cp):
+        sz = os.path.getsize(cp)
+        meta = _get_cmeta(key, cp)
+        ctime = float(meta.get('created_at') or os.path.getmtime(cp))
+        ttl = DL_CFG['ttl']
+        exp_in = max(0, int(ttl - (time.time() - ctime))) if ttl > 0 else 0
+        if ttl > 0 and exp_in <= 0:
+            _remove_cached(key)
+        else:
+            return {
+                'state': 'cached', 'done': sz, 'contig': sz, 'size': sz,
+                'speed': 0, 'threads': DL_CFG['threads'], 'expires_in': exp_in,
+                'name': meta.get('name', '')
+            }
+    with DL_LOCK:
+        j = DL.get(key)
+    if j and j['state'] in ('downloading', 'error'):
+        return {
+            'state': j['state'], 'done': j['done'], 'contig': j.get('contig', 0),
+            'size': j['size'], 'speed': j.get('speed', 0), 'threads': j.get('threads', DL_CFG['threads']),
+            'err': j.get('err', ''), 'name': j.get('name', ''), 'expires_in': DL_CFG['ttl']
+        }
+    return {'state': 'none', 'done': 0, 'contig': 0, 'size': 0, 'speed': 0, 'threads': DL_CFG['threads']}
+
+def _start_server_dl_job(aid, chat, mid, info=None, force=False):
+    """Starts a multi-threaded background download job to CACHE_DIR if not already running/cached."""
+    key = _ckey(aid, chat, mid)
+    cur = _dl_state(aid, chat, mid)
+    if cur['state'] in ('cached', 'downloading'):
+        with DL_LOCK:
+            return DL.get(key), cur
+    if info is None:
+        info = M.call(M.a_info(aid, chat, mid))
+    size = int(info.get('size') or 0)
+    if size <= 0:
+        return None, cur
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_evict(size)
+    try:
+        free_space = shutil.disk_usage(CACHE_DIR).free
+    except Exception:
+        free_space = size + 500 * MB
+    if free_space < size + 80 * MB:
+        if force:
+            raise ApiError('server वर पुरेशी disk जागा नाही — जुना cache साफ करा किंवा थेट stream होईल', 507)
+        return None, cur
+    with DL_LOCK:
+        active = sum(1 for x in DL.values() if x.get('state') == 'downloading')
+        if active >= 10:
+            if force:
+                raise ApiError('एकाच वेळी जास्तीत जास्त 10 फाइल्स server वर download होऊ शकतात', 429)
+            return None, cur
+        j = DL.get(key)
+        if not j or j.get('state') not in ('downloading', 'cached'):
+            j = {
+                'key': key, 'acc': aid, 'chat': chat, 'id': mid,
+                'name': info.get('name') or f'file_{mid}',
+                'mime': info.get('mime') or 'application/octet-stream',
+                'size': size, 'done': 0, 'contig': 0, 'speed': 0,
+                'threads': DL_CFG['threads'], 'state': 'downloading', 'err': '',
+                'started_at': time.time(), 'cond': threading.Condition()
+            }
+            DL[key] = j
+            M.dl_tasks[key] = asyncio.run_coroutine_threadsafe(M.a_download(key), M.loop)
+        st = {
+            'state': j['state'], 'done': j['done'], 'contig': j['contig'],
+            'size': j['size'], 'speed': j['speed'], 'threads': j['threads'],
+            'expires_in': DL_CFG['ttl']
+        }
+        return j, st
+
 
 @bp.get('/api/file')
 @api
@@ -1737,7 +2481,7 @@ def api_file():
     size = info['size']
     if size <= 0:
         raise ApiError('फाइल रिकामी आहे', 404)
-    if size > MAX_MEDIA:
+    if MAX_MEDIA and size > MAX_MEDIA:
         raise ApiError(f'फाइल {MAX_MEDIA // MB} MB पेक्षा मोठी आहे', 413)
     start, end, partial = parse_range(request.headers.get('Range'), size)
     length = end - start + 1
@@ -1745,25 +2489,111 @@ def api_file():
     if st['limit'] and st['used'] + length > st['limit']:
         raise ApiError('या महिन्याची bandwidth मर्यादा संपली — फक्त text चालतो', 429)
     mime, h = _file_headers(info, mid, start, end, size, partial)
-    cp = _cpath(_ckey(aid, chat, mid))
-    if os.path.isfile(cp) and os.path.getsize(cp) == size:           # server च्या disk वर आधीच आहे → Telegram ला विचारायचं नाही
-        try:
-            os.utime(cp)                                                # LRU: नुकतीच वापरली
-        except OSError:
-            pass
+    key = _ckey(aid, chat, mid)
+    cp = _cpath(key)
+    part = cp + '.part'
+
+    # 1) Already cached on server disk -> serve immediately with 1 MB high-speed buffer!
+    cur_st = _dl_state(aid, chat, mid)
+    if cur_st['state'] == 'cached' and os.path.isfile(cp) and os.path.getsize(cp) == size:
         def gen_disk():
             remaining = length
             with open(cp, 'rb') as f:
                 f.seek(start)
                 while remaining > 0:
-                    chunk = f.read(min(256 * 1024, remaining))
+                    chunk = f.read(min(DISK_READ_BUF, remaining))
                     if not chunk:
                         break
                     remaining -= len(chunk)
                     bw_add(len(chunk))
                     yield chunk
         return Response(gen_disk(), status=206 if partial else 200, mimetype=mime, headers=h, direct_passthrough=True)
-    if not STREAMS.acquire(timeout=20):
+
+    # 2) Whenever a file/video/media is opened in the browser OR Download (?dl=1) is clicked,
+    #    automatically start the multi-threaded server download in the background!
+    is_probe = (start == 0 and end == 0)
+    j = None
+    if DL_CFG.get('auto_cache', True) and not is_probe:
+        try:
+            j, _ = _start_server_dl_job(aid, chat, mid, info=info, force=False)
+        except Exception:
+            j = None
+    else:
+        with DL_LOCK:
+            j = DL.get(key)
+
+    # 3) If the multi-threaded server download is active and the requested `start` is within
+    #    (or close to) the contiguous downloaded region (`contig`), stream directly from the
+    #    growing server disk file (.part / final) at full multi-threaded speed!
+    if j and not is_probe and j.get('state') in ('downloading', 'cached') and start <= j.get('contig', 0) + 12 * MB:
+        def gen_from_server_job():
+            pos = start
+            remaining = length
+            cond = j['cond']
+            while remaining > 0:
+                with cond:
+                    while True:
+                        st_now = j.get('state')
+                        contig_now = j.get('contig', 0)
+                        if st_now == 'cached' or contig_now > pos or st_now in ('error', 'none') or j.get('cancel'):
+                            break
+                        cond.wait(timeout=0.5)
+                    st_now = j.get('state')
+                    contig_now = j['size'] if st_now == 'cached' else j.get('contig', 0)
+                if st_now in ('error', 'none') or j.get('cancel'):
+                    # Fallback to direct Telegram stream for remaining bytes so browser download never breaks
+                    if remaining > 0 and not j.get('cancel'):
+                        try:
+                            it_fb = M.call(M.a_iter(aid, chat, mid, pos - pos % REQ, size))
+                            skip_fb = pos % REQ
+                            try:
+                                while remaining > 0:
+                                    ch_fb = M.call(M.a_next(it_fb), 120)
+                                    if not ch_fb:
+                                        break
+                                    if skip_fb:
+                                        ch_fb, skip_fb = ch_fb[skip_fb:], 0
+                                    ch_fb = ch_fb[:remaining]
+                                    remaining -= len(ch_fb)
+                                    bw_add(len(ch_fb))
+                                    yield ch_fb
+                            finally:
+                                try:
+                                    M.call(M.a_close(it_fb), 10)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    break
+                target_file = cp if (st_now == 'cached' and os.path.isfile(cp)) else part
+                avail = min(remaining, max(0, contig_now - pos))
+                if avail <= 0:
+                    if st_now == 'cached':
+                        break
+                    continue
+                read_len = min(DISK_READ_BUF, avail)
+                try:
+                    with open(target_file, 'rb') as f:
+                        f.seek(pos)
+                        chunk = f.read(read_len)
+                except OSError:
+                    if os.path.isfile(cp):
+                        with open(cp, 'rb') as f:
+                            f.seek(pos)
+                            chunk = f.read(read_len)
+                    else:
+                        break
+                if not chunk:
+                    break
+                pos += len(chunk)
+                remaining -= len(chunk)
+                bw_add(len(chunk))
+                yield chunk
+        return Response(gen_from_server_job(), status=206 if partial else 200, mimetype=mime, headers=h, direct_passthrough=True)
+
+    # 4) Fallback / Random-access Range seek (e.g. MP4 moov atom at end of file before server download reaches end,
+    #    or when disk is full): stream directly from Telegram while background server caching continues!
+    if not STREAMS.acquire(timeout=25):
         raise ApiError('खूप downloads चालू आहेत — थोड्या वेळाने', 503)
     try:
         it = M.call(M.a_iter(aid, chat, mid, start - start % REQ, size))
@@ -1793,17 +2623,8 @@ def api_file():
 
     return Response(gen(), status=206 if partial else 200, mimetype=mime, headers=h, direct_passthrough=True)
 
-# --- Server disk cache: Telegram → server (background), मग तिथून
-def _dl_state(aid, chat, mid):
-    key = _ckey(aid, chat, mid)
-    if os.path.isfile(_cpath(key)):
-        return {'state': 'cached', 'done': os.path.getsize(_cpath(key)), 'size': os.path.getsize(_cpath(key))}
-    with DL_LOCK:
-        j = DL.get(key)
-    if j and j['state'] in ('downloading', 'error'):
-        return {'state': j['state'], 'done': j['done'], 'size': j['size'], 'err': j.get('err', '')}
-    return {'state': 'none', 'done': 0, 'size': 0}
 
+# --- Server disk cache & Download Manager APIs
 @bp.post('/api/dl/start')
 @api
 def api_dl_start():
@@ -1813,23 +2634,10 @@ def api_dl_start():
     if cur['state'] in ('cached', 'downloading'):
         return jsonify(cur)
     info = M.call(M.a_info(aid, chat, mid))
-    size = info['size']
-    if size <= 0:
+    if info['size'] <= 0:
         raise ApiError('फाइल रिकामी आहे', 404)
-    if size > DISK_CACHE:
-        raise ApiError(f'फाइल server cache (DISK_CACHE_GB = {DISK_CACHE // MB} MB) पेक्षा मोठी आहे — थेट stream करा', 413)
-    with DL_LOCK:
-        if sum(1 for j in DL.values() if j['state'] == 'downloading') >= 2:
-            raise ApiError('आधीचे 2 downloads पूर्ण होऊ द्या', 429)
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    cache_evict(size)                                                   # जागा करतो (जुन्या फाइल हटवून)
-    if shutil.disk_usage(CACHE_DIR).free < size * 1.02 + 300 * MB:
-        raise ApiError('server वर disk जागा कमी — cache साफ करा किंवा थेट stream करा', 507)
-    key = _ckey(aid, chat, mid)
-    with DL_LOCK:
-        DL[key] = {'acc': aid, 'chat': chat, 'id': mid, 'size': size, 'done': 0, 'state': 'downloading', 'err': ''}
-    M.dl_tasks[key] = asyncio.run_coroutine_threadsafe(M.a_download(key), M.loop)
-    return jsonify(state='downloading', done=0, size=size)
+    _, st = _start_server_dl_job(aid, chat, mid, info=info, force=True)
+    return jsonify(st)
 
 @bp.post('/api/dl/cancel')
 @api
@@ -1840,31 +2648,87 @@ def api_dl_cancel():
         j = DL.get(key)
     if j:
         j['cancel'] = True
+        with j['cond']:
+            j['cond'].notify_all()
+    _remove_cached(key)
     return jsonify(ok=1)
 
 @bp.get('/api/dl/status')
 @api
 def api_dl_status():
     aid, chat = _acc(), _int('chat')
-    ids = [int(x) for x in request.args.get('ids', '').split(',') if x.strip().isdigit()][:60]
+    ids = [int(x) for x in request.args.get('ids', '').split(',') if x.strip().isdigit()][:80]
     return jsonify(items={str(i): _dl_state(aid, chat, i) for i in ids})
+
+@bp.get('/api/dl/list')
+@api
+def api_dl_list():
+    """Returns all active downloads and all server-cached files with countdown timers."""
+    cache_cleanup()
+    active = []
+    with DL_LOCK:
+        for k, j in list(DL.items()):
+            if j.get('state') in ('downloading', 'error'):
+                active.append({
+                    'key': k, 'acc': j['acc'], 'chat': j['chat'], 'id': j['id'],
+                    'name': j.get('name') or f"file_{j['id']}",
+                    'size': j.get('size', 0), 'done': j.get('done', 0),
+                    'contig': j.get('contig', 0), 'speed': j.get('speed', 0),
+                    'threads': j.get('threads', DL_CFG['threads']),
+                    'state': j['state'], 'err': j.get('err', '')
+                })
+    done, _ = cache_files()
+    now = time.time()
+    ttl = DL_CFG['ttl']
+    cached = []
+    for ctime, sz, p, k in sorted(done, reverse=True):
+        meta = _get_cmeta(k, p)
+        exp_in = max(0, int(ttl - (now - ctime))) if ttl > 0 else 0
+        cached.append({
+            'key': k, 'acc': meta.get('acc', ''), 'chat': meta.get('chat', 0), 'id': meta.get('id', 0),
+            'name': meta.get('name') or k, 'size': sz, 'created_at': int(ctime),
+            'expires_in': exp_in
+        })
+    used, n = cache_usage()
+    return jsonify(active=active, cached=cached, used=used, limit=DISK_CACHE, files=n, cfg=DL_CFG)
 
 @bp.get('/api/cache')
 @api
 def api_cache():
+    cache_cleanup()
     used, n = cache_usage()
-    return jsonify(used=used, limit=DISK_CACHE, files=n)
+    return jsonify(used=used, limit=DISK_CACHE, files=n, cfg=DL_CFG)
+
+@bp.post('/api/cache/settings')
+@api
+def api_cache_settings():
+    d = _json()
+    if 'threads' in d:
+        DL_CFG['threads'] = max(1, min(16, int(d['threads'])))
+    if 'ttl_minutes' in d:
+        DL_CFG['ttl'] = max(60, int(float(d['ttl_minutes']) * 60))
+    if 'auto_cache' in d:
+        DL_CFG['auto_cache'] = bool(d['auto_cache'])
+    cache_cleanup()
+    return jsonify(ok=1, cfg=DL_CFG)
+
+@bp.post('/api/cache/delete')
+@api
+def api_cache_delete():
+    d = _json()
+    key = str(d.get('key', '')).strip()
+    if key and re.fullmatch(r'[A-Za-z0-9_]+', key):
+        _remove_cached(key)
+    return jsonify(ok=1)
 
 @bp.post('/api/cache/clear')
 @api
 def api_cache_clear():
     done, _ = cache_files()
-    for _, _, p in done:
-        try:
-            os.remove(p)
-        except OSError:
-            pass
+    for _, _, _, k in done:
+        _remove_cached(k)
     return jsonify(ok=1, removed=len(done))
+
 
 # --- मोठ्या फाइलचा upload: 8 MB तुकडे → disk → Telegram
 @bp.post('/api/up/start')
@@ -1885,17 +2749,18 @@ def api_up_start():
     if st['limit'] and st['used'] + size > st['limit']:
         raise ApiError('या महिन्याची bandwidth मर्यादा संपली', 429)
     with UP_LOCK:
-        if sum(1 for u in UP.values() if u['state'] in ('receiving', 'sending')) >= 3:
-            raise ApiError('आधीचे upload पूर्ण होऊ द्या (एका वेळी 3)', 429)
+        if sum(1 for u in UP.values() if u['state'] in ('receiving', 'sending')) >= 5:
+            raise ApiError('आधीचे upload पूर्ण होऊ द्या (एका वेळी 5)', 429)
     os.makedirs(UPDIR, exist_ok=True)
-    if shutil.disk_usage(UPDIR).free < size * 1.05 + 200 * MB:
+    if shutil.disk_usage(UPDIR).free < size * 1.02 + 100 * MB:
         raise ApiError('server वर जागा कमी (disk) — लहान फाइल पाठवा', 507)
     uid = secrets.token_hex(6)
     folder = os.path.join(UPDIR, uid)
     os.makedirs(folder)
     with UP_LOCK:
         UP[uid] = {'acc': aid, 'chat': chat, 'name': name, 'size': size, 'written': 0, 'sent': 0, 'path': os.path.join(folder, name),
-                   'caption': str(d.get('caption', ''))[:1000], 'reply_to': d.get('reply_to'), 'as_file': bool(d.get('as_file')),
+                   'caption': str(d.get('caption', ''))[:1000], 'reply_to': d.get('reply_to'), 'topic_id': d.get('topic_id'),
+                   'as_file': bool(d.get('as_file')), 'is_voice': bool(d.get('is_voice')), 'is_round': bool(d.get('is_round')),
                    'silent': bool(d.get('silent')), 'schedule': d.get('schedule'), 'md': bool(d.get('md')), 'state': 'receiving', 'err': ''}
     return jsonify(id=uid, chunk=CHUNK)
 
@@ -1987,6 +2852,28 @@ def api_login_start():
         if not (api_id and api_hash):
             raise ApiError('default API सेट नाही — "वेगळा API" निवडा')
     return jsonify(M.call(M.a_login_start(str(d.get('label', '')).strip(), str(d.get('phone', '')), api_id, api_hash)))
+
+@bp.post('/api/login/qr/start')
+@api
+def api_login_qr_start():
+    _login_guard('ls', 10)
+    d = _json()
+    if d.get('api') == 'custom':
+        api_id, api_hash = str(d.get('api_id', '')).strip(), str(d.get('api_hash', '')).strip()
+        if not api_id.isdigit() or not re.fullmatch(r'[0-9a-f]{32}', api_hash):
+            raise ApiError('api_id (संख्या) आणि api_hash (32 अक्षरं) बरोबर द्या')
+    else:
+        api_id, api_hash = DEF_API_ID, DEF_API_HASH
+        if not (api_id and api_hash):
+            raise ApiError('default API सेट नाही — "वेगळा API" निवडा')
+    r = M.call(M.a_qr_begin(str(d.get('label', '')).strip(), api_id, api_hash), 35)
+    return jsonify(login_id=r['login_id'], url=r['url'])
+
+@bp.post('/api/login/qr/check')
+@api
+def api_login_qr_check():
+    d = _json()
+    return jsonify(M.call(M.a_qr_check_once(str(d.get('login_id', ''))), 20))
 
 @bp.post('/api/login/code')
 @api

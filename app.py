@@ -55,7 +55,9 @@ def _mem_limit_mb():
 _mem = _mem_limit_mb()
 if 0 < _mem <= 768:
     os.environ.setdefault("MAX_ACCOUNTS", "3")        # each Telegram account ~30-50 MB
-    os.environ.setdefault("DISK_CACHE_GB", "1")       # free-tier disk is small and ephemeral
+os.environ.setdefault("DISK_CACHE_GB", "20")          # allow large multi-GB files; actual free disk check protects disk
+os.environ.setdefault("CACHE_TTL_MINUTES", "60")      # auto-clear cached server files after fixed time (default 60 min)
+os.environ.setdefault("DL_THREADS", "8")              # internal multi-threaded download workers per file
 os.environ.setdefault("BW_LIMIT_GB", "100000")        # this server has no outbound limit
 
 _missing = [k for k in ("BOT_TOKEN", "API_ID", "API_HASH", "WEB_PASSWORD", "ADMIN_PASSWORD",
@@ -142,8 +144,10 @@ if __name__ == "__main__":
     for _p in (os.environ.get("PORT", "").strip(), "8080", "8000"):
         if _p.isdigit() and _p not in ports:
             ports.append(_p)
-    opts = dict(threads=int(os.environ.get("WEB_THREADS", "32")),   # every worker PC holds one long-poll connection
-                connection_limit=300, channel_timeout=300, cleanup_interval=30, send_bytes=1, ident="web")
+    # High-throughput socket buffer (256 KB send_bytes instead of 1 byte) for fast server->browser downloads & video streaming
+    opts = dict(threads=int(os.environ.get("WEB_THREADS", "48")),   # every worker PC + parallel browser streams
+                connection_limit=500, channel_timeout=600, cleanup_interval=30,
+                send_bytes=262144, outbuf_overflow=16777216, ident="web")
     # 1) open the port FIRST — the platform's TCP health check passes immediately,
     #    even if Mongo / Telegram are slow on a small 512 MB instance.
     try:

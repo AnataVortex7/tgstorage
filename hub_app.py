@@ -546,7 +546,8 @@ def on_callback(cbid, uid, chat, mid, data):
             t.start()
     elif kind == 'bt':
         # Browser terminal via server — no need for PC to be online right now
-        term_url = f"{root_url()}/app/pc/{pcid}/term"
+        tok = new_token(uses=4, ttl=600)
+        term_url = f"{root_url()}/app/pc/{pcid}/term?k={tok}"
         ans('✅ Terminal link')
         r = tg('sendMessage', chat_id=chat, parse_mode='HTML', disable_web_page_preview=True, text=(
             f"💻 <b>{esc(pc['name'])}</b> Browser Terminal\n"
@@ -1370,11 +1371,26 @@ term.writeln('\x1b[90mPC online नसेल तर commands queue होता�
 """
 
 def _pc_term_auth():
-    """Hub च्या cookie session ने check करतो — admin logged in असायला हवा."""
-    from flask import session
-    if not session.get('a'):
-        from flask import abort
-        abort(403)
+    """Hub च्या cookie session किंवा one-time token (?k=) ने check करतो — admin logged in असायला हवा."""
+    tok = request.args.get('k', '').strip()
+    if tok:
+        now = time.time()
+        ok = False
+        with LOCK:
+            for k in [k for k, v in TOKENS.items() if v['exp'] < now or v['left'] <= 0]:
+                del TOKENS[k]
+            for k, v in TOKENS.items():
+                if eq(k, tok):
+                    v['left'] -= 1
+                    ok = True
+        if ok:
+            session['a'] = True
+            session['tg_ok'] = True
+            session['tg_exp'] = now + 7200
+            return
+    if session.get('a') or (session.get('tg_ok') and time.time() < session.get('tg_exp', 0)):
+        return
+    abort(403)
 
 @app.get('/app/pc/<pcid>/term')
 def pc_term_page(pcid):

@@ -3257,10 +3257,11 @@ def _content_disposition(kind, name):
 # The cache is DISPOSABLE: if the disk is wiped (Render free restarts/redeploys),
 # nothing is lost — a file is simply fetched from Telegram again on next use.
 CACHE_DIR       = os.environ.get("CACHE_DIR", "/var/tmp/tg_cache")
-CACHE_MAX_BYTES = int(float(os.environ.get("CACHE_MAX_GB", "8")) * 1024 ** 3)
-CACHE_MAX_FILE  = int(float(os.environ.get("CACHE_MAX_FILE_MB", "1024")) * 1024 ** 2)
+CACHE_MAX_BYTES = int(float(os.environ.get("CACHE_MAX_GB", "20")) * 1024 ** 3)
+CACHE_MAX_FILE  = int(float(os.environ.get("CACHE_MAX_FILE_MB", "0")) * 1024 ** 2)  # 0 = unlimited file size
+CACHE_TTL_SECS  = int(float(os.environ.get("CACHE_TTL_MINUTES", "60")) * 60)        # fixed-time auto-clear on server
 CACHE_ENABLED   = os.environ.get("CACHE_ENABLED", "1") != "0"
-CACHE_MIN_FREE  = 300 * 1024 ** 2          # always keep this much of the disk free
+CACHE_MIN_FREE  = 200 * 1024 ** 2          # always keep this much of the disk free
 try:
     os.makedirs(CACHE_DIR, exist_ok=True)
 except OSError as _e:
@@ -3311,8 +3312,8 @@ def _cache_make_room(need):
             except OSError:
                 pass
         now = time.time()
-        for f in files:                     # stale half-downloads
-            if f[3] and now - f[0] > 7200:
+        for f in files:                     # stale half-downloads OR fixed-time TTL expired files
+            if (f[3] and now - f[0] > 7200) or (not f[3] and CACHE_TTL_SECS > 0 and now - f[0] > CACHE_TTL_SECS):
                 try: os.unlink(f[2])
                 except OSError: pass
                 f[1] = 0
@@ -3333,7 +3334,7 @@ def _cache_make_room(need):
 def cache_fill(gid, msg_id, size, timeout=3600):
     """Download the file from Telegram into the cache. -> path or None.
     Only one fetch per file at a time; others wait and then hit the cache."""
-    if not CACHE_ENABLED or not size or size > CACHE_MAX_FILE:
+    if not CACHE_ENABLED or not size or (CACHE_MAX_FILE > 0 and size > CACHE_MAX_FILE):
         return None
     key = (gid, msg_id)
     with _cache_mutex:
@@ -3371,7 +3372,7 @@ def cache_fill(gid, msg_id, size, timeout=3600):
 
 def cache_fill_bg(gid, msg_id, size):
     """Start a background fill unless already cached / running / too many already in flight."""
-    if not CACHE_ENABLED or not size or size > CACHE_MAX_FILE or cache_get(gid, msg_id, size):
+    if not CACHE_ENABLED or not size or (CACHE_MAX_FILE > 0 and size > CACHE_MAX_FILE) or cache_get(gid, msg_id, size):
         return
     with _cache_mutex:
         lk = _cache_keylocks.setdefault((gid, msg_id), threading.Lock())
@@ -3385,6 +3386,40 @@ def cache_fill_bg(gid, msg_id, size):
         finally:
             _bg_fill_sem.release()
     threading.Thread(target=_run, daemon=True, name="cache_fill").start()
+
+def _cache_ttl_reaper():
+    """Automatically clears server-cached files and temp downloads after fixed CACHE_TTL_SECS."""
+    while True:
+        time.sleep(30)
+        if not CACHE_ENABLED or CACHE_TTL_SECS <= 0:
+            continue
+        now = time.time()
+        with _cache_mutex:
+            try:
+                for n in os.listdir(CACHE_DIR):
+                    p = os.path.join(CACHE_DIR, n)
+                    try:
+                        st = os.stat(p)
+                        if not n.endswith(".part") and now - st.st_mtime > CACHE_TTL_SECS:
+                            os.unlink(p)
+                        elif n.endswith(".part") and now - st.st_mtime > 7200:
+                            os.unlink(p)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        try:
+            for n in os.listdir(TMP_DIR):
+                p = os.path.join(TMP_DIR, n)
+                try:
+                    if now - os.path.getmtime(p) > max(3600, CACHE_TTL_SECS):
+                        os.unlink(p)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+threading.Thread(target=_cache_ttl_reaper, daemon=True, name="storage_cache_reaper").start()
 
 @app.route("/api/cache")
 @require_api
@@ -3435,7 +3470,7 @@ def download(msg_id, filename):
             pass
 
     try:
-        ok = tg(_dl(), timeout=180)
+        ok = tg(_dl(), timeout=7200)
     except Exception as e:
         _cleanup()
         return jsonify({"error": str(e)}), 500
@@ -3447,7 +3482,7 @@ def download(msg_id, filename):
         try:
             with open(tmp_path, "rb") as f:
                 while True:
-                    chunk = f.read(65536)
+                    chunk = f.read(1048576)
                     if not chunk:
                         break
                     yield chunk
@@ -4201,9 +4236,8 @@ _TERM_ASSETS = {"xterm.js": "application/javascript", "xterm.css": "text/css",
                 "addon-fit.js": "application/javascript"}
 
 @app.route("/term/assets/<name>")
-@require_auth
 def term_assets(name):
-    if not TERMINAL_ENABLED or name not in _TERM_ASSETS:
+    if name not in _TERM_ASSETS:
         return Response(status=404)
     from flask import send_from_directory
     return send_from_directory(_TERM_ASSETS_DIR, name, mimetype=_TERM_ASSETS[name], max_age=86400)
