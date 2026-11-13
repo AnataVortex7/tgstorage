@@ -2167,8 +2167,8 @@ def st_manifest():
     body = _json.dumps(m).encode("utf-8")
     return Response(body, mimetype="application/manifest+json", headers={"Content-Length": str(len(body)), "Cache-Control": "public, max-age=300"})
 
-_ST_SW_JS = """const CACHE_NAME = 'tgstorage-pwa-v5';
-const SHELL_ASSETS = ['/manifest.json', '/icon-192.png', '/icon-512.png', '/icon.svg'];
+_ST_SW_JS = """const CACHE_NAME = 'tgstorage-pwa-v6';
+const SHELL_ASSETS = ['/manifest.json', '/manifest.json?v=5', '/icon-192.png', '/icon-512.png', '/icon-maskable-192.png', '/icon-maskable-512.png', '/icon.svg'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(SHELL_ASSETS)).catch(() => {}));
   self.skipWaiting();
@@ -2181,12 +2181,36 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  if (SHELL_ASSETS.includes(url.pathname)) {
+  if (SHELL_ASSETS.includes(url.pathname) || SHELL_ASSETS.includes(url.pathname + url.search)) {
     e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
     return;
   }
+  if (url.pathname.startsWith('/api/list') || url.pathname.startsWith('/api/groups') || url.pathname.startsWith('/api/recent')) {
+    e.respondWith(caches.open(CACHE_NAME).then(async c => {
+      try {
+        const res = await fetch(e.request);
+        if (res && res.ok) c.put(e.request, res.clone());
+        return res;
+      } catch (err) {
+        const cached = await c.match(e.request);
+        if (cached) return cached;
+        throw err;
+      }
+    }));
+    return;
+  }
   if (e.request.mode === 'navigate') {
-    e.respondWith(fetch(e.request).catch(() => new Response('Offline - check connection', {status: 200, headers: {'Content-Type': 'text/plain'}})));
+    e.respondWith(caches.open(CACHE_NAME).then(async c => {
+      try {
+        const res = await fetch(e.request);
+        if (res && res.ok) c.put('/browse/__shell__', res.clone());
+        return res;
+      } catch (err) {
+        const shell = await c.match('/browse/__shell__');
+        if (shell) return shell;
+        return new Response('Offline - check connection', {status: 200, headers: {'Content-Type': 'text/plain'}});
+      }
+    }));
   }
 });
 """
@@ -3012,6 +3036,8 @@ $('#lo').onclick = () => { location.href = '/logout'; };
 let stDeferredPrompt = null;
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); stDeferredPrompt = e; const b = $('#pwab'); if (b) b.style.color = '#10b981'; });
+window.addEventListener('online', () => { toast('🟢 Back online — syncing files…'); softRefresh(false); pollStatus(); });
+window.addEventListener('offline', () => { toast('📡 Offline Mode — showing cached folders & files', true); });
 $('#pwab').onclick = async () => {
   if (stDeferredPrompt) { stDeferredPrompt.prompt(); await stDeferredPrompt.userChoice; stDeferredPrompt = null; return; }
   await dialog({ title: '📲 Install Backup Explorer App (WebAPK)', text: 'Mobile वर: Chrome च्या ⋮ मेन्यूवर टॅप करून "Install app" निवडा ("Create shortcut" निवडू नका!). जर आधी जुना Shortcut बनवला असेल तर तो आधी Home Screen वरून काढून टाका.\nPC वर: Address bar मधल्या 📲 Install बटनावर क्लिक करा.', ok: 'OK' });

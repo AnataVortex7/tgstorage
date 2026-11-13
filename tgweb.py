@@ -2120,31 +2120,75 @@ _APP_MANIFEST = {
     ]
 }
 
-_APP_SW_JS = """const CACHE_NAME = 'tghub-pwa-v5';
-const SHELL_ASSETS = ['/app/manifest.json', '/app/icon-192.png', '/app/icon-512.png', '/app/icon.svg'];
+_APP_SW_JS = """const CACHE_NAME = 'tghub-pwa-v6';
+const DATA_CACHE = 'tghub-data-v6';
+const SHELL_ASSETS = ['/app/manifest.json', '/app/manifest.json?v=5', '/app/icon-192.png', '/app/icon-512.png', '/app/icon-maskable-192.png', '/app/icon-maskable-512.png', '/app/icon.svg'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(SHELL_ASSETS)).catch(() => {}));
   self.skipWaiting();
 });
 self.addEventListener('activate', e => {
   e.waitUntil((
-    caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
+    caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE_NAME && k !== DATA_CACHE).map(k => caches.delete(k))))
   ).then(() => self.clients.claim()));
 });
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  if (SHELL_ASSETS.includes(url.pathname)) {
-    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+  // 1) Static PWA icons & manifest: Cache-first
+  if (SHELL_ASSETS.includes(url.pathname) || SHELL_ASSETS.includes(url.pathname + url.search)) {
+    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request).then(res => {
+      if (res && res.ok) { const cl = res.clone(); caches.open(CACHE_NAME).then(c => c.put(e.request, cl)); }
+      return res;
+    })));
     return;
   }
-  if (e.request.mode === 'navigate') {
-    e.respondWith(
-      fetch(e.request).catch(() => new Response(
-        '<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>TG Hub Offline</title><body style="background:#0b121a;color:#f1f5f9;font:15px system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center"><div><h3>📡 You are offline</h3><p>Check your internet connection and tap retry.</p><button onclick="location.reload()" style="padding:10px 18px;border-radius:8px;border:0;background:#2481cc;color:#fff;font-weight:700">🔄 Retry</button></div></body>',
-        {status: 200, headers: {'Content-Type': 'text/html; charset=utf-8'}}
-      ))
-    );
+  // 2) Avatars & Thumbnails: Stale-while-revalidate so profile pics & media thumbs work offline
+  if (url.pathname === '/app/api/avatar' || url.pathname === '/app/api/thumb') {
+    e.respondWith(caches.open(DATA_CACHE).then(async c => {
+      const cached = await c.match(e.request);
+      const net = fetch(e.request).then(res => {
+        if (res && (res.status === 200 || res.status === 204)) c.put(e.request, res.clone());
+        return res;
+      }).catch(() => cached || new Response('', {status: 204}));
+      return cached || net;
+    }));
+    return;
+  }
+  // 3) Read-only JSON APIs (state, dialogs, messages, chatinfo, topics): Network-first with offline cache fallback
+  if (['/app/api/state', '/app/api/dialogs', '/app/api/messages', '/app/api/chatinfo', '/app/api/chat/topics', '/app/api/pinned'].includes(url.pathname)) {
+    e.respondWith(caches.open(DATA_CACHE).then(async c => {
+      try {
+        const res = await fetch(e.request);
+        if (res && res.ok) c.put(e.request, res.clone());
+        return res;
+      } catch (err) {
+        const cached = await c.match(e.request);
+        if (cached) return cached;
+        throw err;
+      }
+    }));
+    return;
+  }
+  // 4) Navigation to /app/ or /app: Network-first, caches main UI_PAGE shell so opening app offline loads full Telegram UI!
+  if (e.request.mode === 'navigate' && url.pathname.startsWith('/app')) {
+    e.respondWith(caches.open(CACHE_NAME).then(async c => {
+      try {
+        const res = await fetch(e.request);
+        if (res && res.ok) {
+          const cl = res.clone();
+          cl.text().then(txt => { if (txt.includes('id="app"')) c.put('/app/__shell__', new Response(txt, {status: 200, headers: {'Content-Type': 'text/html; charset=utf-8'}})); }).catch(() => {});
+        }
+        return res;
+      } catch (err) {
+        const shell = await c.match('/app/__shell__');
+        if (shell) return shell;
+        return new Response(
+          '<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>TG Hub Offline</title><body style="background:#0b121a;color:#f1f5f9;font:15px system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center"><div><h3>📡 You are offline</h3><p>Open the app once while online so your chats are cached for offline use.</p><button onclick="location.reload()" style="padding:10px 18px;border-radius:8px;border:0;background:#2481cc;color:#fff;font-weight:700">🔄 Retry</button></div></body>',
+          {status: 200, headers: {'Content-Type': 'text/html; charset=utf-8'}}
+        );
+      }
+    }));
   }
 });
 """
