@@ -1,8 +1,8 @@
-# backup.ps1 - PC data backup to Telegram via server
-# Run from the bot button "PC Backup command" (Win+R -> paste -> Enter). The link is short-lived;
-# the server fills in __BASE__, __SELF__ and the token below - you never type or store a token.
+# backup.ps1 - As-It-Is Folder-Wise Topic & One-by-One File Sync to Telegram Storage
+# Creates Forum Topics matching your PC folders & uploads every file one-by-one as-it-is (no zipping!)
+# so you can browse folders, view videos/PDFs/photos/docs, and download individual files in the Storage Browser.
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 
@@ -10,105 +10,212 @@ $Base  = '__BASE__'
 $Self  = '__SELF__'
 $Token = '__TOKEN__'
 
-# --- Self-elevate if not admin (re-runs the same short-lived link) ---
-$id      = [Security.Principal.WindowsIdentity]::GetCurrent()
-$isAdmin = (New-Object Security.Principal.WindowsPrincipal $id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    # no -NonInteractive: the final "Press Enter" needs an interactive window
-    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm '$Self' | iex`""
-    exit
-}
-
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $env:PYTHONUTF8 = '1'
+$Host.UI.RawUI.WindowTitle = 'TG Storage - Folder & File Sync (As-It-Is)'
 
-$Host.UI.RawUI.WindowTitle = 'PC Backup - running...'
-
-function Log($msg) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $msg" }
-function Send-Backup($ZipPath, $Name) {
-    $bytes   = [IO.File]::ReadAllBytes($ZipPath)
-    $headers = @{ Authorization = "Bearer $Token" }
-    $uri     = "$Base/hapi/backup/$Name"
-    Log "Uploading $Name ($([math]::Round($bytes.Length/1MB,1)) MB) to server..."
-    try {
-        $r = Invoke-WebRequest -Uri $uri -Method POST -Body $bytes `
-             -Headers $headers -ContentType 'application/gzip' -UseBasicParsing
-        Log "Upload OK: $Name -> $($r.StatusCode)"
-        return $true
-    } catch {
-        Log "Upload FAILED for $Name : $_"
-        return $false
-    }
+function Log($msg, $color = 'White') {
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $msg" -ForegroundColor $color
 }
 
-$Tmp  = Join-Path $env:TEMP "pc_backup_$(Get-Random)"
-New-Item -ItemType Directory -Force $Tmp | Out-Null
-
-# Folders to back up: Documents, Desktop, Pictures, Downloads, AppData\Roaming (config/creds)
-$HostName = $env:COMPUTERNAME -replace '[^a-zA-Z0-9_-]', '_'
-$Stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
-
-$Targets = @(
-    @{ name = "$HostName-Documents-$Stamp"; path = [Environment]::GetFolderPath('MyDocuments') },
-    @{ name = "$HostName-Desktop-$Stamp";   path = [Environment]::GetFolderPath('Desktop') },
-    @{ name = "$HostName-Pictures-$Stamp";  path = [Environment]::GetFolderPath('MyPictures') },
-    @{ name = "$HostName-Downloads-$Stamp"; path = (Join-Path $env:USERPROFILE 'Downloads') },
-    @{ name = "$HostName-AppData-$Stamp";   path = $env:APPDATA }
-)
-
-$ok = 0; $fail = 0
-
-foreach ($t in $Targets) {
-    $src = $t.path
-    if (-not (Test-Path $src)) { Log "Skipping (not found): $src"; continue }
-
-    $zipFile = Join-Path $Tmp "$($t.name).zip"
-    Log "Zipping: $src -> $zipFile"
+function Send-Status($state, $detail) {
     try {
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [IO.Compression.ZipFile]::CreateFromDirectory($src, $zipFile, 'Optimal', $false)
-    } catch {
-        Log "Zip failed for $src : $_"
-        $fail++
-        continue
+        $body = @{ pc = $env:COMPUTERNAME; state = $state; detail = $detail } | ConvertTo-Json -Compress
+        $headers = @{ Authorization = "Bearer $Token"; "Content-Type" = "application/json; charset=utf-8" }
+        Invoke-RestMethod -Uri "$Base/hapi/backup_status" -Method POST -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -Headers $headers -TimeoutSec 15 | Out-Null
+    } catch {}
+}
+
+function Get-ExistingSet($FolderPath, $FileList) {
+    $skipSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    try {
+        $items = @($FileList | ForEach-Object { @{ name = $_.Name; size = [int64]$_.Length } })
+        $body = @{ folder = $FolderPath; files = $items } | ConvertTo-Json -Compress -Depth 4
+        $headers = @{ Authorization = "Bearer $Token"; "Content-Type" = "application/json; charset=utf-8" }
+        $r = Invoke-RestMethod -Uri "$Base/hapi/pc_check" -Method POST -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -Headers $headers -TimeoutSec 30
+        if ($r.ok -and $r.skip) {
+            foreach ($s in $r.skip) { [void]$skipSet.Add([string]$s) }
+        }
+    } catch {}
+    return $skipSet
+}
+
+function Upload-SingleFile($FileObj, $FolderPath, $Index, $Total) {
+    $name = $FileObj.Name
+    $sizeBytes = [int64]$FileObj.Length
+    if ($sizeBytes -le 0) {
+        Log "  [$Index/$Total] Skipping empty (0 B) file: $FolderPath/$name" 'DarkGray'
+        return 'skipped'
     }
+    $sizeMB = [math]::Round($sizeBytes / 1MB, 2)
+    $sizeStr = if ($sizeBytes -ge 1048576) { "$sizeMB MB" } else { "$([math]::Max(1, [math]::Round($sizeBytes / 1KB))) KB" }
 
-    $sizeMB = [math]::Round((Get-Item $zipFile).Length / 1MB, 1)
-    Log "Zip done: $sizeMB MB"
+    $encFolder = [uri]::EscapeDataString($FolderPath)
+    $encName   = [uri]::EscapeDataString($name)
+    $uri       = "$Base/hapi/pc_upload?folder=$encFolder&name=$encName"
+    $headers   = @{ Authorization = "Bearer $Token" }
 
-    # If zip > 190 MB split it into parts so it fits server's BACKUP_MAX_MB
-    $maxBytes = 190 * 1024 * 1024
-    $zipSize  = (Get-Item $zipFile).Length
+    Write-Host "  [$Index/$Total] ⬆ Uploading: " -NoNewline -ForegroundColor Cyan
+    Write-Host "$FolderPath/" -NoNewline -ForegroundColor Yellow
+    Write-Host "$name ($sizeStr) ... " -NoNewline -ForegroundColor White
 
-    if ($zipSize -le $maxBytes) {
-        if (Send-Backup $zipFile $t.name) { $ok++ } else { $fail++ }
-    } else {
-        Log "File too large ($sizeMB MB) - splitting into parts..."
-        $bytes   = [IO.File]::ReadAllBytes($zipFile)
-        $parts   = [math]::Ceiling($bytes.Length / $maxBytes)
-        for ($i = 0; $i -lt $parts; $i++) {
-            $start   = $i * $maxBytes
-            $len     = [math]::Min($maxBytes, $bytes.Length - $start)
-            $chunk   = [byte[]]::new($len)
-            [Array]::Copy($bytes, $start, $chunk, 0, $len)
-            $partFile = Join-Path $Tmp "$($t.name)-part$($i+1).bin"
-            [IO.File]::WriteAllBytes($partFile, $chunk)
-            $partName = "$($t.name)-part$($i+1)of$parts"
-            if (Send-Backup $partFile $partName) { $ok++ } else { $fail++ }
-            Remove-Item $partFile -Force -ErrorAction SilentlyContinue
+    # Copy to a temporary unlocked file if the file is currently open in another app
+    $sendPath = $FileObj.FullName
+    $tempCopy = $null
+    try {
+        $testStream = [System.IO.File]::Open($FileObj.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $testStream.Close()
+    } catch {
+        try {
+            $tempCopy = Join-Path $env:TEMP "tgup_$(Get-Random)_$name"
+            $inFs = New-Object System.IO.FileStream($FileObj.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+            $outFs = [System.IO.File]::Create($tempCopy)
+            try { $inFs.CopyTo($outFs) } finally { $outFs.Close(); $inFs.Close() }
+            $sendPath = $tempCopy
+        } catch {
+            Write-Host "LOCKED (Skipped)" -ForegroundColor DarkYellow
+            return 'failed'
         }
     }
 
-    Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+    try {
+        $r = Invoke-RestMethod -Uri $uri -Method POST -InFile $sendPath -Headers $headers -ContentType 'application/octet-stream' -TimeoutSec 1800
+        if ($r.ok) {
+            if ($r.skipped) {
+                Write-Host "✔ Already in Storage" -ForegroundColor DarkGreen
+                return 'skipped'
+            } else {
+                Write-Host "✅ Done (msg_id=$($r.msg_id))" -ForegroundColor Green
+                return 'uploaded'
+            }
+        } else {
+            Write-Host "❌ Failed ($($r.msg))" -ForegroundColor Red
+            return 'failed'
+        }
+    } catch {
+        $errMsg = $_.Exception.Message
+        try {
+            $sr = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+            $errMsg = $sr.ReadToEnd()
+        } catch {}
+        Write-Host "❌ Error: $errMsg" -ForegroundColor Red
+        return 'failed'
+    } finally {
+        if ($tempCopy -and (Test-Path $tempCopy)) {
+            Remove-Item $tempCopy -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
-# Clean up temp dir
-Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "   TG STORAGE PRO - AS-IT-IS FOLDER & FILE BACKUP ($($env:COMPUTERNAME))" -ForegroundColor Cyan
+Write-Host "   • Creates Forum Topics matching your exact folder structure" -ForegroundColor Gray
+Write-Host "   • Uploads files ONE-BY-ONE as-it-is (View & Download directly!)" -ForegroundColor Gray
+Write-Host "   • Automatically skips files that are already backed up" -ForegroundColor Gray
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Press ENTER to back up default folders (Desktop, Documents, Pictures, Downloads)" -ForegroundColor Yellow
+Write-Host "OR paste a specific folder path (e.g. D:\Study or C:\Users\...\Desktop) and press ENTER:" -ForegroundColor Yellow
+$customPath = Read-Host "Folder path (Leave blank for default PC folders)"
 
-Log ""
-Log "===== BACKUP COMPLETE: $ok succeeded, $fail failed ====="
-Log "Check your Telegram backup group for the files."
-Log ""
+$Roots = @()
+if ($customPath -and $customPath.Trim() -ne "") {
+    $cp = $customPath.Trim().Trim('"')
+    if (-not (Test-Path $cp)) {
+        Log "ERROR: Folder not found: $cp" 'Red'
+        Read-Host 'Press Enter to close'
+        exit
+    }
+    $folderLabel = Split-Path $cp -Leaf
+    if (-not $folderLabel) { $folderLabel = "Drive" }
+    $Roots += @{ label = $folderLabel; path = $cp }
+} else {
+    $Roots = @(
+        @{ label = "Desktop";   path = [Environment]::GetFolderPath('Desktop') },
+        @{ label = "Documents"; path = [Environment]::GetFolderPath('MyDocuments') },
+        @{ label = "Pictures";  path = [Environment]::GetFolderPath('MyPictures') },
+        @{ label = "Downloads"; path = (Join-Path $env:USERPROFILE 'Downloads') }
+    )
+}
 
-$Host.UI.RawUI.WindowTitle = "PC Backup - DONE ($ok ok, $fail failed)"
-Read-Host 'Press Enter to close'
+Send-Status "started" "As-It-Is Folder Backup started on $($env:COMPUTERNAME)"
+
+$uploadedCount = 0
+$skippedCount  = 0
+$failedCount   = 0
+
+foreach ($root in $Roots) {
+    $basePath = $root.path
+    $baseLabel = $root.label
+    if (-not $basePath -or -not (Test-Path $basePath)) {
+        Log "Skipping missing folder: $baseLabel ($basePath)" 'DarkYellow'
+        continue
+    }
+
+    Write-Host ""
+    Log "Scanning folder tree: $baseLabel ($basePath) ..." 'Cyan'
+
+    $allFiles = @(Get-ChildItem -Path $basePath -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object {
+        $_.Length -gt 0 -and
+        $_.Length -le (1950 * 1024 * 1024) -and
+        $_.Name -notmatch '^(thumbs\.db|desktop\.ini|\.~.*|~\$.*)$' -and
+        $_.FullName -notmatch '\\(\.git|node_modules|__pycache__|Temp|Cache|Code Cache|GPUCache|\.venv|venv)\\'
+    })
+
+    $totalInRoot = $allFiles.Count
+    if ($totalInRoot -eq 0) {
+        Log "  -> No files found in $baseLabel." 'DarkGray'
+        continue
+    }
+    Log "  -> Found $totalInRoot file(s) inside $baseLabel. Grouping by subfolder..." 'Green'
+
+    # Group files by their relative subfolder path so each subfolder gets its own Forum Topic
+    $basePrefix = $basePath.TrimEnd('\')
+    $grouped = $allFiles | Group-Object {
+        $dir = $_.DirectoryName.TrimEnd('\')
+        if ($dir.Length -le $basePrefix.Length) {
+            return $baseLabel
+        } else {
+            $relSub = $dir.Substring($basePrefix.Length).TrimStart('\').Replace('\', '/')
+            return "$baseLabel/$relSub"
+        }
+    }
+
+    $idx = 0
+    foreach ($grp in $grouped) {
+        $topicFolder = $grp.Name
+        $folderFiles = @($grp.Group)
+        Write-Host ""
+        Log "📁 Topic / Folder: $topicFolder ($($folderFiles.Count) files)" 'Yellow'
+
+        # Check which files in this folder are already in Storage
+        $existingSet = Get-ExistingSet $topicFolder $folderFiles
+
+        foreach ($f in $folderFiles) {
+            $idx++
+            if ($existingSet.Contains($f.Name)) {
+                Write-Host "  [$idx/$totalInRoot] ✔ Already in Storage: $topicFolder/$($f.Name)" -ForegroundColor DarkGreen
+                $skippedCount++
+                continue
+            }
+            $st = Upload-SingleFile $f $topicFolder $idx $totalInRoot
+            if ($st -eq 'uploaded') { $uploadedCount++ }
+            elseif ($st -eq 'skipped') { $skippedCount++ }
+            else { $failedCount++ }
+        }
+    }
+}
+
+Send-Status "done" "As-It-Is Sync Complete on $($env:COMPUTERNAME): $uploadedCount uploaded, $skippedCount already in storage, $failedCount failed"
+
+Write-Host ""
+Write-Host "======================================================================" -ForegroundColor Green
+Log "SYNC COMPLETE!" 'Green'
+Log "  • Newly Uploaded : $uploadedCount file(s)" 'Green'
+Log "  • Already Synced : $skippedCount file(s) (Skipped)" 'Cyan'
+Log "  • Failed/Locked  : $failedCount file(s)" $(if ($failedCount -gt 0) { 'Yellow' } else { 'Gray' })
+Write-Host ""
+Log "Open $Base/browse/ to browse your folders (Desktop, Documents, Pictures, Downloads) and View/Download any file directly!" 'Cyan'
+Write-Host "======================================================================" -ForegroundColor Green
+$Host.UI.RawUI.WindowTitle = "TG Storage Sync - DONE ($uploadedCount uploaded, $skippedCount skipped)"
+Read-Host 'Press Enter to close this window'

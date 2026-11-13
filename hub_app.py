@@ -513,12 +513,14 @@ def on_callback(cbid, uid, chat, mid, data):
     if kind == 'bk':
         # short-lived link made only for the logged-in admin; the script served on it carries the
         # server-side BACKUP_TOKEN, so the PC command itself never contains a permanent secret.
-        t = new_token(uses=3, ttl=600)          # script fetch + one self-elevation re-fetch (+1 spare)
-        cmd = f'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm {root_url()}/b/{t} | iex"'
+        t = new_token(uses=10, ttl=1800)        # 30 mins & 10 uses so UAC elevation + retries always work
+        cmd = f'powershell -NoExit -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; irm {root_url()}/b/{t} | iex"'
         ans('✅ Command पाठवतोय')
-        send_ephemeral(chat, '💾 <b>PC Backup</b>\n\nWin+R → खालची command paste → Enter\n\n'
+        send_ephemeral(chat, '💾 <b>PC Backup (Live Progress सह)</b>\n\n1️⃣ PC वर <b>Win+R</b> दाबा\n2️⃣ खालची command paste करून <b>Enter</b> दाबा (UAC आल्यास Yes करा):\n\n'
                              f'<code>{esc(cmd)}</code>\n\n'
-                             '⏱ 10 मिनिटं आणि फक्त 3 वेळा चालते. हा message 90 सेकंदांत आपोआप delete होईल.')
+                             '📍 <b>बॅकअप कुठे दिसेल?</b>\n'
+                             '• PC वर काळ्या/निळ्या PowerShell विंडोमध्ये लाईव्ह प्रोग्रेस दिसेल.\n'
+                             '• पूर्ण होताच याच Bot वर मेसेज येईल आणि Storage वेबसाईटवर <b>💾 PC Backups (hermes-backup)</b> व <b>🕘 Recent</b> मध्ये सर्वात वर दिसेल!')
         return
     if kind == 'ua':
         PENDING[uid] = ('seturl', 'ALL')

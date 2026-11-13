@@ -2377,6 +2377,9 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
     <input id="q" type="search" placeholder="Search files…" autocomplete="off">
   </div>
   <div class="bar cmd">
+    <button class="cb" id="c-pcbk" style="background:rgba(36,129,204,.15);color:var(--acc);font-weight:700" title="Open Latest PC Backups folder (Newest First)"><span>💾</span><span class="lbl">PC Backups</span></button>
+    <button class="cb" id="c-rec" style="font-weight:600" title="Show Newest Uploaded Files across all folders"><span>🕘</span><span class="lbl">Recent</span></button>
+    <span class="vsep"></span>
     <button class="cb" id="c-cut"><span>✂</span><span class="lbl">Cut</span></button>
     <button class="cb" id="c-copy"><span>⧉</span><span class="lbl">Copy</span></button>
     <button class="cb" id="c-paste"><span>📋</span><span class="lbl">Paste</span></button>
@@ -2847,9 +2850,16 @@ async function revealTree(path) {
   }
   if (S.path === path) { $$('#tree .tn.cur').forEach(n => n.classList.remove('cur')); cur.classList.add('cur'); cur.scrollIntoView({ block: 'nearest' }); }
 }
+async function openPcBackups() {
+  S.sort = 'new'; S.desc = false; store.set('xsort', 'new'); store.set('xdesc', '');
+  await go('');
+  toast('💾 सर्व PC फोल्डर्स (Desktop, Documents, Pictures, Downloads) खालील यादीत जसेच्या तसे (As-It-Is) दिसतात!');
+}
 async function initTree() {
-  $('#tree').innerHTML = '<div class="tn" data-path="" style="--d:0"><span class="ar">▾</span><span class="tl">🏠 Backup</span></div><div class="tc"></div>';
-  const root = $('#tree .tn'); await openNode(root);
+  $('#tree').innerHTML = '<div class="tn" data-special="pcbk" style="--d:0;color:var(--acc);font-weight:700"><span class="ar"></span><span class="tl">💾 PC Backups (Latest)</span></div>' +
+    '<div class="tn" data-special="recent" style="--d:0;font-weight:600"><span class="ar"></span><span class="tl">🕘 Recent Uploads</span></div>' +
+    '<div class="tn" data-path="" style="--d:0"><span class="ar">▾</span><span class="tl">🏠 All Folders</span></div><div class="tc"></div>';
+  const root = $('#tree .tn[data-path=""]'); if (root) await openNode(root);
 }
 const closeNav = () => $('#nav').classList.remove('open');
 
@@ -2907,8 +2917,12 @@ window.addEventListener('resize', hideMenu);
 $('#addr').addEventListener('click', e => { const a = e.target.closest('a[data-p]'); if (a) go(a.dataset.p); });
 $('#tree').addEventListener('click', e => {
   const tn = e.target.closest('.tn'); if (!tn) return;
+  if (tn.dataset.special === 'pcbk') { openPcBackups(); closeNav(); return; }
+  if (tn.dataset.special === 'recent') { showRecent(); closeNav(); return; }
   if (e.target.closest('.ar')) toggleNode(tn); else { go(tn.dataset.path); openNode(tn); }
 });
+$('#c-pcbk').onclick = openPcBackups;
+$('#c-rec').onclick = showRecent;
 $('#navbtn').onclick = e => { e.stopPropagation(); $('#nav').classList.toggle('open'); };
 $('#bk').onclick = () => history.back();
 $('#fw').onclick = () => history.forward();
@@ -4001,17 +4015,25 @@ BACKUP_TOPIC  = os.environ.get("BACKUP_TOPIC", "hermes-backup")
 BACKUP_KEEP   = max(1, _env_int("BACKUP_KEEP", 5))
 BACKUP_MAX_MB = _env_int("BACKUP_MAX_MB", 200)
 BACKUP_GID    = _env_int("BACKUP_GROUP", 0) or LEGACY_GID
-_BK_NAME      = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_BK_NAME      = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
 _backup_lock  = threading.Lock()
+_LIVE_BK_STATUS = {"state": "idle", "pc": "", "detail": "", "ts": 0, "last_file": "", "last_msg_id": 0}
+
+def _resolve_backup_gid():
+    if BACKUP_GID and db_one("SELECT 1 FROM groups WHERE group_id=?", (BACKUP_GID,)):
+        return BACKUP_GID
+    r = db_one("SELECT group_id FROM groups ORDER BY added_at LIMIT 1")
+    return r["group_id"] if r else BACKUP_GID
 
 def _bk_auth():
     """None if the bearer token is valid, else an error response."""
-    if len(BACKUP_TOKEN) < 24:
-        return jsonify({"ok": False, "msg": "backup API disabled (set BACKUP_TOKEN, 24+ chars)"}), 503
+    tok_env = os.environ.get("BACKUP_TOKEN", "").strip() or BACKUP_TOKEN
+    if len(tok_env) < 16:
+        return jsonify({"ok": False, "msg": "backup API disabled (set BACKUP_TOKEN)"}), 503
     h = request.headers.get("Authorization", "")
     tok = h[7:].strip() if h.startswith("Bearer ") else ""
     a = hashlib.sha256(tok.encode()).digest()
-    b = hashlib.sha256(BACKUP_TOKEN.encode()).digest()
+    b = hashlib.sha256(tok_env.encode()).digest()
     if not hmac.compare_digest(a, b):
         time.sleep(1.5)                       # slow down guessing
         return jsonify({"ok": False, "msg": "unauthorized"}), 401
@@ -4019,7 +4041,7 @@ def _bk_auth():
 
 def _bk_rows(gid, name):
     """Backups of <name>, newest first."""
-    rx = re.compile(rf"^{re.escape(name)}-\d{{8}}-\d{{6}}\.tar\.gz$")
+    rx = re.compile(rf"^{re.escape(name)}-\d{{8}}-\d{{6}}\.(?:tar\.gz|zip|bin)$")
     rows = db_many("SELECT msg_id, filename, size, topic_id FROM files WHERE group_id=? "
                    "AND topic_id=(SELECT topic_id FROM topics WHERE group_id=? AND name=? LIMIT 1) "
                    "ORDER BY msg_id DESC", (gid, gid, BACKUP_TOPIC))
@@ -4030,6 +4052,10 @@ def _bk_topic(gid):
     r = db_one("SELECT topic_id FROM topics WHERE group_id=? AND name=?", (gid, BACKUP_TOPIC))
     if r:
         return r["topic_id"]
+    row_g = db_one("SELECT is_forum FROM groups WHERE group_id=?", (gid,))
+    if row_g and not row_g["is_forum"]:
+        _save_topic(gid, 1, BACKUP_TOPIC)
+        return 1
     async def _mk():
         import inspect                       # the raw field is `channel` in older layers, `peer` in newer ones
         _p = inspect.signature(tg_raw.functions.messages.CreateForumTopic.__init__).parameters
@@ -4041,16 +4067,185 @@ def _bk_topic(gid):
             if m is not None and getattr(m, "id", None):
                 return m.id
         raise RuntimeError("topic created but its id was not returned")
-    tid = tg(_mk(), timeout=30)
+    try:
+        tid = tg(_mk(), timeout=30)
+    except Exception:
+        tid = 1
     _save_topic(gid, tid, BACKUP_TOPIC)
     return tid
 
 def _bk_ready():
     if not _tg_ready.is_set():
         return jsonify({"ok": False, "msg": "telegram not connected yet"}), 503
-    if not BACKUP_GID or not db_one("SELECT 1 FROM groups WHERE group_id=?", (BACKUP_GID,)):
+    gid = _resolve_backup_gid()
+    if not gid or not db_one("SELECT 1 FROM groups WHERE group_id=?", (gid,)):
         return jsonify({"ok": False, "msg": "backup group not configured"}), 503
     return None
+
+def _notify_owner_bk(text):
+    chat_id = _owner_chat()
+    if not chat_id or not _tg_ready.is_set():
+        return
+    async def _send():
+        try:
+            await _tg_client.send_message(chat_id, text)
+        except Exception:
+            pass
+    try:
+        asyncio.run_coroutine_threadsafe(_send(), _tg_loop)
+    except Exception:
+        pass
+
+
+PC_FILE_MAX_MB = _env_int("PC_FILE_MAX_MB", 2000)
+_topic_create_lock = threading.Lock()
+
+def _get_or_create_folder_topic(gid, folder_path):
+    """Finds or creates a Forum Topic matching the exact folder path (e.g. 'Desktop', 'Documents/MPSC/Notes')."""
+    norm = _norm_path(folder_path or "PC-Backup")[:120] or "PC-Backup"
+    with _topic_create_lock:
+        r = db_one("SELECT topic_id FROM topics WHERE group_id=? AND path=? COLLATE NOCASE LIMIT 1", (gid, norm))
+        if r and r["topic_id"]:
+            return r["topic_id"], norm
+        row_g = db_one("SELECT is_forum FROM groups WHERE group_id=?", (gid,))
+        if row_g and not row_g["is_forum"]:
+            _save_topic(gid, 0, norm)
+            return 0, norm
+        async def _mk_topic():
+            import inspect
+            for attempt in range(3):
+                try:
+                    _p = inspect.signature(tg_raw.functions.messages.CreateForumTopic.__init__).parameters
+                    _kw = {("peer" if "peer" in _p else "channel"): await _tg_client.resolve_peer(gid),
+                           "title": norm, "random_id": _tg_client.rnd_id()}
+                    res = await _tg_client.invoke(tg_raw.functions.messages.CreateForumTopic(**_kw))
+                    for u in res.updates:
+                        m = getattr(u, "message", None)
+                        if m is not None and getattr(m, "id", None):
+                            return m.id
+                    raise RuntimeError("topic id not returned")
+                except FloodWait as fw:
+                    wait_s = int(getattr(fw, "value", getattr(fw, "x", 5)) or 5) + 1
+                    print(f"[pc-sync] Topic create FloodWait {wait_s}s for {norm}", flush=True)
+                    await asyncio.sleep(wait_s)
+            raise RuntimeError(f"Could not create topic for {norm}")
+        tid = tg(_mk_topic(), timeout=120)
+        _save_topic(gid, tid, norm)
+        return tid, norm
+
+@app.route("/hapi/pc_check", methods=["POST"])
+def hapi_pc_check():
+    """Checks which files in a folder already exist in Storage (by folder_path, filename, and size)."""
+    bad = _bk_auth() or _bk_ready()
+    if bad:
+        return bad
+    d = request.get_json(silent=True) or {}
+    gid = _resolve_backup_gid()
+    folder = _norm_path(str(d.get("folder", "") or "PC-Backup"))[:120] or "PC-Backup"
+    items = d.get("files") or []
+    existing = {}
+    for r in db_many("SELECT filename, size, msg_id FROM files WHERE group_id=? AND folder_path=? COLLATE NOCASE", (gid, folder)):
+        existing[(r["filename"].lower(), int(r["size"] or 0))] = r["msg_id"]
+    skip = []
+    for it in items:
+        nm = str(it.get("name", "")).strip()
+        sz = int(it.get("size", 0) or 0)
+        if (nm.lower(), sz) in existing:
+            skip.append(nm)
+    return jsonify({"ok": True, "folder": folder, "skip": skip})
+
+@app.route("/hapi/pc_upload", methods=["POST", "PUT"])
+def hapi_pc_upload():
+    """Uploads one file AS-IT-IS into its exact folder Forum Topic so it can be viewed & downloaded directly in Storage."""
+    bad = _bk_auth() or _bk_ready()
+    if bad:
+        return bad
+    folder_raw = request.args.get("folder") or request.headers.get("X-Folder-Path") or "PC-Backup"
+    fname_raw  = request.args.get("name") or request.headers.get("X-File-Name") or "file"
+    folder = _norm_path(str(folder_raw))[:120] or "PC-Backup"
+    fname  = os.path.basename(str(fname_raw).replace("\\", "/")).strip()[:180] or "file"
+    try:
+        length = int(request.headers.get("Content-Length", "0"))
+    except ValueError:
+        length = 0
+    if length <= 0:
+        return jsonify({"ok": False, "msg": "empty file or missing Content-Length"}), 400
+    if length > PC_FILE_MAX_MB * 1024 * 1024:
+        return jsonify({"ok": False, "msg": f"file exceeds {PC_FILE_MAX_MB} MB limit"}), 413
+
+    gid = _resolve_backup_gid()
+    # Check if exact same file (name + size) is already in this folder
+    dup = db_one("SELECT msg_id FROM files WHERE group_id=? AND folder_path=? COLLATE NOCASE AND filename=? COLLATE NOCASE AND size=? LIMIT 1",
+                 (gid, folder, fname, length))
+    if dup and request.args.get("force") != "1":
+        return jsonify({"ok": True, "skipped": True, "file": fname, "folder": folder, "msg_id": dup["msg_id"]})
+
+    tmp_dir = os.path.join(TMP_DIR, f"pcup_{secrets.token_hex(6)}")
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_file = os.path.join(tmp_dir, fname)
+    inp, left = request.environ["wsgi.input"], length
+    try:
+        with open(tmp_file, "wb") as f:
+            while left > 0:
+                chunk = inp.read(min(1 << 20, left))
+                if not chunk:
+                    break
+                f.write(chunk)
+                left -= len(chunk)
+        if left > 0:
+            return jsonify({"ok": False, "msg": "upload stream incomplete"}), 400
+
+        mime = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+        tid, norm_folder = _get_or_create_folder_topic(gid, folder)
+        _LIVE_BK_STATUS.update(state="uploading", detail=f"Uploading {norm_folder}/{fname} ({fmt_size(length)})", ts=time.time())
+
+        async def _send_as_is():
+            for attempt in range(4):
+                try:
+                    kw = dict(file_name=fname, force_document=True, caption=f"📁 {norm_folder}/{fname}")
+                    if tid and tid > 1:
+                        kw["message_thread_id"] = tid
+                    m = await _tg_client.send_document(gid, tmp_file, **kw)
+                    return m.id
+                except FloodWait as fw:
+                    wait_s = int(getattr(fw, "value", getattr(fw, "x", 5)) or 5) + 1
+                    print(f"[pc-sync] Upload FloodWait {wait_s}s for {fname}", flush=True)
+                    await asyncio.sleep(wait_s)
+            raise RuntimeError(f"FloodWait exceeded while uploading {fname}")
+
+        mid = tg(_send_as_is(), timeout=1800)
+        db_exec("""INSERT OR IGNORE INTO files (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (gid, mid, tid, norm_folder, fname, length, mime))
+        _recount(gid, [tid])
+        _changed(gid)
+        global _snapshot_dirty
+        _snapshot_dirty = True
+        _LIVE_BK_STATUS.update(state="stored", detail=f"{norm_folder}/{fname} ({fmt_size(length)})", last_file=f"{norm_folder}/{fname}", last_msg_id=mid, ts=time.time())
+        print(f"[pc-sync] stored as-is: {norm_folder}/{fname} ({length} bytes) topic={tid} msg={mid}", flush=True)
+        return jsonify({"ok": True, "skipped": False, "file": fname, "folder": norm_folder, "topic_id": tid, "size": length, "msg_id": mid})
+    except Exception as e:
+        print(f"[pc-sync] upload failed for {folder}/{fname}: {e}", flush=True)
+        return jsonify({"ok": False, "msg": f"{type(e).__name__}: {e}"}), 500
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+@app.route("/hapi/backup_status", methods=["GET", "POST"])
+def hapi_backup_status():
+    if request.method == "GET":
+        return jsonify({"ok": True, "status": _LIVE_BK_STATUS, "topic": BACKUP_TOPIC})
+    bad = _bk_auth()
+    if bad:
+        return bad
+    d = request.get_json(silent=True) or {}
+    state = str(d.get("state", "running"))[:32]
+    pc = str(d.get("pc", "PC"))[:40]
+    detail = str(d.get("detail", ""))[:200]
+    _LIVE_BK_STATUS.update(state=state, pc=pc, detail=detail, ts=time.time())
+    if state in ("started", "done"):
+        ic = "🚀" if state == "started" else "✅"
+        _notify_owner_bk(f"{ic} [PC Backup - {pc}] {detail}")
+    return jsonify({"ok": True})
 
 @app.route("/hapi/backup/<name>", methods=["POST", "PUT"])
 def hapi_backup_put(name):
@@ -4058,9 +4253,7 @@ def hapi_backup_put(name):
     if bad:
         return bad
     if not _BK_NAME.match(name):
-        return jsonify({"ok": False, "msg": "bad name (A-Z a-z 0-9 _ -, max 40)"}), 400
-    if not _index_status.get("last_run"):
-        return jsonify({"ok": False, "msg": "index not ready yet — retry later"}), 503
+        return jsonify({"ok": False, "msg": "bad name (A-Z a-z 0-9 _ . -, max 120)"}), 400
     try:
         length = int(request.headers.get("Content-Length", "0"))
     except ValueError:
@@ -4069,8 +4262,7 @@ def hapi_backup_put(name):
         return jsonify({"ok": False, "msg": "Content-Length required"}), 411
     if length > BACKUP_MAX_MB * 1024 * 1024:
         return jsonify({"ok": False, "msg": f"too large (max {BACKUP_MAX_MB} MB)"}), 413
-    gid = BACKUP_GID
-    fname = f"{name}-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}.tar.gz"
+    gid = _resolve_backup_gid()
     tmp = os.path.join(TMP_DIR, f"up_{secrets.token_hex(6)}")
     inp, left = request.environ["wsgi.input"], length     # MAX_CONTENT_LENGTH (1 MB) only guards normal requests
     try:
@@ -4080,22 +4272,35 @@ def hapi_backup_put(name):
                 if not chunk:
                     break
                 f.write(chunk); left -= len(chunk)
+        if left > 0:
+            return jsonify({"ok": False, "msg": "upload incomplete"}), 400
         with open(tmp, "rb") as f:
-            magic = f.read(2)
-        if left or magic != b"\x1f\x8b":
-            return jsonify({"ok": False, "msg": "upload incomplete or not a .tar.gz"}), 400
+            magic = f.read(4)
+        req_ext = (request.args.get("ext") or request.headers.get("X-Backup-Ext") or "").strip(".").lower()
+        if magic[:2] == b"\x1f\x8b":
+            ext, mime = "tar.gz", "application/gzip"
+        elif magic[:2] == b"PK" or req_ext == "zip":
+            ext, mime = "zip", "application/zip"
+        else:
+            ext, mime = (req_ext if req_ext in ("bin", "zip", "tar.gz", "7z") else "bin"), "application/octet-stream"
+        clean_base = re.sub(r"\.(?:zip|tar\.gz|bin)$", "", name, flags=re.I)
+        fname = f"{clean_base}-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}.{ext}"
+        _LIVE_BK_STATUS.update(state="uploading", detail=f"Uploading {fname} ({length // 1048576} MB) to Telegram…", ts=time.time())
         with _backup_lock:
             tid = _bk_topic(gid)
             async def _up():
-                m = await _tg_client.send_document(gid, tmp, file_name=fname, force_document=True,
-                                                   caption=f"backup {fname}", message_thread_id=tid)
+                kw = dict(file_name=fname, force_document=True, caption=f"💾 PC Backup: {fname} ({fmt_size(length)})")
+                if tid and tid > 1:
+                    kw["message_thread_id"] = tid
+                m = await _tg_client.send_document(gid, tmp, **kw)
                 return m.id
             mid = tg(_up(), timeout=900)
             trow = db_one("SELECT path FROM topics WHERE group_id=? AND topic_id=?", (gid, tid))
+            folder_path = trow["path"] if trow else BACKUP_TOPIC
             db_exec("""INSERT OR IGNORE INTO files (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
-                       VALUES (?, ?, ?, ?, ?, ?, 'application/gzip')""",
-                    (gid, mid, tid, trow["path"] if trow else BACKUP_TOPIC, fname, length))
-            old = [r["msg_id"] for r in _bk_rows(gid, name)[BACKUP_KEEP:]]
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (gid, mid, tid, folder_path, fname, length, mime))
+            old = [r["msg_id"] for r in _bk_rows(gid, clean_base)[BACKUP_KEEP:]]
             if old:                                           # keep only the newest BACKUP_KEEP
                 try:
                     tg(_tg_client.delete_messages(gid, old), timeout=60)
@@ -4104,8 +4309,12 @@ def hapi_backup_put(name):
                 except Exception as e:
                     print(f"[backup] prune failed: {e}", flush=True)
             _recount(gid, [tid]); _changed(gid)
+            global _snapshot_dirty
+            _snapshot_dirty = True
+        _LIVE_BK_STATUS.update(state="stored", detail=f"Latest backup saved: {fname} ({fmt_size(length)})", last_file=fname, last_msg_id=mid, ts=time.time())
+        _notify_owner_bk(f"💾 PC Backup सेव्ह झाला!\n📄 {fname} ({fmt_size(length)})\n📁 Folder: {folder_path}")
         print(f"[backup] stored {fname} ({length} bytes) msg={mid}", flush=True)
-        return jsonify({"ok": True, "file": fname, "size": length, "msg_id": mid})
+        return jsonify({"ok": True, "file": fname, "folder": folder_path, "size": length, "msg_id": mid})
     except Exception as e:
         print(f"[backup] upload failed: {e}", flush=True)
         return jsonify({"ok": False, "msg": f"{type(e).__name__}: {e}"}), 500

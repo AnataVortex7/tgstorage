@@ -59,6 +59,10 @@ os.environ.setdefault("DISK_CACHE_GB", "20")          # allow large multi-GB fil
 os.environ.setdefault("CACHE_TTL_MINUTES", "60")      # auto-clear cached server files after fixed time (default 60 min)
 os.environ.setdefault("DL_THREADS", "4")              # safe default multi-threaded workers per file (account ban protection)
 os.environ.setdefault("BW_LIMIT_GB", "100000")        # this server has no outbound limit
+if len(os.environ.get("BACKUP_TOKEN", "").strip()) < 24:
+    import hashlib as _hb
+    _seed = "|".join(os.environ.get(k, "") for k in ("SECRET_KEY", "COLAB_SECRET", "ADMIN_PASSWORD", "BOT_TOKEN"))
+    os.environ["BACKUP_TOKEN"] = _hb.sha256(("tgstorage-bk-" + _seed).encode()).hexdigest()[:48]
 
 _missing = [k for k in ("BOT_TOKEN", "API_ID", "API_HASH", "WEB_PASSWORD", "ADMIN_PASSWORD",
                         "COLAB_SECRET", "PANEL_PASSWORD") if not os.environ.get(k, "").strip()]
