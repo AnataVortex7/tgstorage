@@ -164,10 +164,13 @@ if __name__ == "__main__":
     for _p in (os.environ.get("PORT", "").strip(), "8080", "8000"):
         if _p.isdigit() and _p not in ports:
             ports.append(_p)
-    # High-throughput socket buffer (256 KB send_bytes instead of 1 byte) for fast server->browser downloads & video streaming
-    opts = dict(threads=int(os.environ.get("WEB_THREADS", "48")),   # every worker PC + parallel browser streams
-                connection_limit=500, channel_timeout=600, cleanup_interval=30,
-                send_bytes=262144, outbuf_overflow=16777216, ident="web")
+    import gc
+    gc.set_threshold(400, 5, 5)           # aggressive garbage collection to keep RAM usage low on 512 MB instances
+    def_threads = "24" if (0 < _mem <= 768) else "40"
+    # High-throughput socket buffer (256 KB send_bytes) with 4 MB overflow (spills to disk above 4 MB to save RAM)
+    opts = dict(threads=int(os.environ.get("WEB_THREADS", def_threads)),
+                connection_limit=300, channel_timeout=600, cleanup_interval=30,
+                send_bytes=262144, outbuf_overflow=4194304, ident="web")
     # 1) open the port FIRST — the platform's TCP health check passes immediately,
     #    even if Mongo / Telegram are slow on a small 512 MB instance.
     try:

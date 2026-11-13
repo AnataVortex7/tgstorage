@@ -55,7 +55,7 @@ TG_LIMIT, TG_LIMIT_PREMIUM = 2000 * MB, 4000 * MB          # Telegram ची ख
 MAX_UPLOAD = int(float(os.environ.get('MAX_UPLOAD_MB', '4000')) * MB)
 # Unlimited media download size by default (0 = no cap, any size file can be downloaded/streamed)
 MAX_MEDIA = int(float(os.environ.get('MAX_MEDIA_MB', '0')) * MB) if LIMITS_ON else 0
-UI_SESSION_SECS = 604800
+UI_SESSION_SECS = 86400 * 30
 LEASE_SECS = 45
 CHUNK = 8 * MB                                              # browser → server upload तुकडा
 REQ = 512 * 1024                                            # Telegram MTProto 512 KB chunk
@@ -74,7 +74,7 @@ DL_CFG = {
 SHARE_LINKS, SHARE_LOCK = {}, threading.Lock()   # token -> {acc, chat, id, exp, name}
 AUTO_REPLY = {}                                  # aid -> {'enabled': False, 'text': '', 'only_private': True, 'sent_to': {}}
 MSG_RECENT = collections.OrderedDict()           # (aid, chat, mid) -> msg_dict (last 3000 messages for Anti-Delete Vault)
-DELETED_VAULT = collections.deque(maxlen=300)    # recently deleted messages captured by Ghost Mode
+DELETED_VAULT = collections.deque(maxlen=100)    # recently deleted messages captured by Ghost Mode
 
 M = None
 reason = ''
@@ -476,7 +476,7 @@ class Manager:
         self.loop = asyncio.new_event_loop()
         self.clients, self.state, self.next_try = {}, {}, {}
         self.logins, self.cache = {}, {}
-        self.events = collections.deque(maxlen=800)
+        self.events = collections.deque(maxlen=300)
         self.seq = 0
         self.cond = threading.Condition()
         self.lease = False
@@ -682,7 +682,7 @@ class Manager:
             cid = getattr(ev, 'chat_id', None)
             if cid and sm.get('id'):
                 MSG_RECENT[(aid, cid, sm['id'])] = dict(sm, chat=cid, acc=aid)
-                while len(MSG_RECENT) > 3000:
+                while len(MSG_RECENT) > 800:
                     MSG_RECENT.popitem(last=False)
             self.push(aid, 'new', cid, sm)
             # Smart Auto-Reply in private chats
@@ -800,7 +800,7 @@ class Manager:
         s_list = [ser_msg(m) for m in reversed(list(ms))]
         for sm in s_list:
             MSG_RECENT[(aid, int(chat), sm['id'])] = dict(sm, chat=int(chat), acc=aid)
-        while len(MSG_RECENT) > 3000:
+        while len(MSG_RECENT) > 800:
             MSG_RECENT.popitem(last=False)
         res = {'messages': s_list}
         if not before:
@@ -1368,7 +1368,7 @@ class Manager:
             cl = self._cl(aid)
             peer = await cl.get_input_entity(chat)
             data = await cl.download_profile_photo(peer, file=bytes, download_big=False)
-        _lru_put(self.avatars, key, data or b'', 500, 20 * MB)
+        _lru_put(self.avatars, key, data or b'', 250, 6 * MB)
         return data or b''
 
     async def a_thumb(self, aid, chat, mid):
@@ -1935,23 +1935,74 @@ def session_ok():
 
 def _sec_headers():
     return {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
-            'Content-Security-Policy': "default-src 'none'; connect-src 'self'; img-src 'self' data: blob:; "
-                                       "media-src 'self' data: blob:; font-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-                                       "frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}
+            'Content-Security-Policy': "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; "
+                                       "media-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                                       "script-src 'self' 'unsafe-inline'; worker-src 'self'; manifest-src 'self'; "
+                                       "frame-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"}
+
+_APP_ICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#2AABEE"/><stop offset="100%" stop-color="#229ED9"/></linearGradient></defs>
+<rect width="512" height="512" rx="115" fill="url(#g)"/>
+<path d="M119 251l234-90c11-4 20 3 17 19l-40 188c-3 13-11 16-22 10l-62-46-30 29c-3 3-6 6-13 6l4-63 115-104c5-4-1-7-8-3L172 287l-61-19c-13-4-13-13 8-17z" fill="#fff"/>
+</svg>'''
+
+_APP_MANIFEST = {
+    "name": "Telegram Hub Pro",
+    "short_name": "TG Hub",
+    "description": "Multi-Account Telegram Manager & High-Speed Downloader",
+    "start_url": "/app/",
+    "scope": "/app/",
+    "display": "standalone",
+    "orientation": "any",
+    "background_color": "#0b121a",
+    "theme_color": "#151f2b",
+    "icons": [
+        {"src": "/app/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
+        {"src": "/app/icon.svg", "sizes": "192x192", "type": "image/svg+xml"},
+        {"src": "/app/icon.svg", "sizes": "512x512", "type": "image/svg+xml"}
+    ]
+}
+
+_APP_SW_JS = '''self.addEventListener("install", e => { self.skipWaiting(); });
+self.addEventListener("activate", e => { e.waitUntil(self.clients.claim()); });
+self.addEventListener("fetch", e => { return; });
+'''
+
+@bp.get('/manifest.json')
+def pwa_manifest():
+    return Response(json.dumps(_APP_MANIFEST), mimetype='application/manifest+json', headers={'Cache-Control': 'public, max-age=3600'})
+
+@bp.get('/sw.js')
+def pwa_sw():
+    return Response(_APP_SW_JS, mimetype='application/javascript', headers={'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/app/'})
+
+@bp.get('/icon.svg')
+def pwa_icon():
+    return Response(_APP_ICON_SVG, mimetype='image/svg+xml', headers={'Cache-Control': 'public, max-age=86400'})
 
 @bp.before_request
 def gate():
     if M is None:
         abort(404)
     p = request.path.rstrip('/')
-    if request.method == 'GET' and p == '/app' and request.args.get('k'):
+    if request.method == 'GET' and p in ('/app/manifest.json', '/app/sw.js', '/app/icon.svg'):
+        return None
+    if request.method == 'GET' and p == '/app' and (request.args.get('k') or request.args.get('dt')):
         return Response(ENTER_PAGE, mimetype='text/html', headers=_sec_headers())
     if request.method == 'GET' and p.startswith('/app/s/'):
         return None
     if request.method == 'POST' and p == '/app/enter':
         return None
     if not session_ok():
+        # If the user opened the installed PWA icon (/app or /app/) and their cookie expired,
+        # return ENTER_PAGE so it can auto-restore session using saved localStorage pwa_tok or prompt for link!
+        if request.method == 'GET' and p == '/app':
+            return Response(ENTER_PAGE, mimetype='text/html', headers=_sec_headers())
         abort(404)
+    # Auto-extend session expiry so installed Mobile/PC app stays logged in
+    if session.get('tg_ok') and time.time() - (session.get('tg_exp', 0) - UI_SESSION_SECS) > 3600:
+        session.permanent = True
+        session['tg_exp'] = time.time() + UI_SESSION_SECS
     if request.method == 'POST':
         if request.headers.get('X-Requested-With') != 'app':
             abort(404)
@@ -1963,10 +2014,16 @@ def gate():
 @bp.post('/enter')
 def enter():
     d = request.get_json(silent=True) or {}
-    tok, k, now = str(d.get('k', '')), _ip(), time.time()
+    tok, dt_tok, k, now = str(d.get('k', '')).strip(), str(d.get('dt', '')).strip(), _ip(), time.time()
     FAILS[k] = [t for t in FAILS[k] if now - t < 300]
-    if len(FAILS[k]) >= 5:
+    if len(FAILS[k]) >= 8:
         abort(404)
+    # Allow re-authenticating installed PWA via saved valid dt_tok (HMAC signed)
+    if dt_tok and _verify_dl_tok(dt_tok):
+        session.clear()
+        session.permanent = True
+        session['tg_ok'], session['tg_exp'], session['a'] = True, now + UI_SESSION_SECS, True
+        return jsonify(ok=1, dt=_make_dl_tok(UI_SESSION_SECS))
     hit = None
     with TOKENS_LOCK:
         for t in [t for t, e in TOKENS.items() if e < now]:
@@ -1981,8 +2038,9 @@ def enter():
         time.sleep(1)
         abort(404)
     session.clear()
+    session.permanent = True
     session['tg_ok'], session['tg_exp'], session['a'] = True, now + UI_SESSION_SECS, True
-    return jsonify(ok=1)
+    return jsonify(ok=1, dt=_make_dl_tok(UI_SESSION_SECS))
 
 def api(fn):
     import functools

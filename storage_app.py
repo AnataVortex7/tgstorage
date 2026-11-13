@@ -153,7 +153,7 @@ def _security_headers(resp):
                      "default-src 'self'; script-src 'self' 'unsafe-inline'; "
                      "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
                      "media-src 'self' blob:; frame-src 'self'; object-src 'self'; "
-                     "connect-src 'self'; base-uri 'none'; form-action 'self'; "
+                     "connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'self'; form-action 'self'; "
                      "frame-ancestors 'self'")
         h.setdefault("Cache-Control", "no-store")
     if request.path.startswith("/api/"):
@@ -2048,12 +2048,48 @@ def healthz():
 def favicon():
     return Response(status=204)
 
+_ST_ICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="110" fill="#161b22"/>
+<path d="M96 156a32 32 0 0 1 32-32h96l40 40h152a32 32 0 0 1 32 32v188a32 32 0 0 1-32 32H128a32 32 0 0 1-32-32z" fill="#f0b93a"/>
+<path d="M96 220h320v164a32 32 0 0 1-32 32H128a32 32 0 0 1-32-32z" fill="#fcd462"/>
+</svg>'''
+
+@app.route("/icon.svg")
+def st_icon():
+    return Response(_ST_ICON_SVG, mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
+
+@app.route("/manifest.json")
+def st_manifest():
+    import json as _json
+    m = {
+        "name": "Telegram Backup Explorer",
+        "short_name": "TG Storage",
+        "description": "Browse & Stream Telegram Backup Groups",
+        "start_url": "/browse/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#191919",
+        "theme_color": "#202020",
+        "icons": [
+            {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
+            {"src": "/icon.svg", "sizes": "192x192", "type": "image/svg+xml"},
+            {"src": "/icon.svg", "sizes": "512x512", "type": "image/svg+xml"}
+        ]
+    }
+    return Response(_json.dumps(m), mimetype="application/manifest+json")
+
+@app.route("/sw.js")
+def st_sw():
+    return Response('self.addEventListener("install",e=>self.skipWaiting());self.addEventListener("activate",e=>e.waitUntil(self.clients.claim()));self.addEventListener("fetch",e=>{});', mimetype="application/javascript")
+
 
 EXPLORER_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#191919"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.json"><link rel="icon" href="/icon.svg" type="image/svg+xml">
 <title>Backup Explorer</title>
 <style>
 :root{--bg:#f3f3f3;--content:#fff;--text:#1b1b1b;--muted:#6b6b6b;--line:#e1e1e1;--hover:#eaf3fb;--sel:#cce8ff;--selb:#99d1ff;--menu:#fff;--shadow:0 8px 24px rgba(0,0,0,.18);--acc:#0067c0}
@@ -2197,6 +2233,7 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
     <select id="grp" title="Group"></select>
     <button class="ib" id="gadd" title="Add group">＋</button>
     <div class="addr" id="addr"></div>
+    <button class="ib" id="pwab" title="Install Backup Explorer App (Mobile / PC)">📲</button>
     <button class="ib" id="th" title="Theme: auto / light / dark">🌓</button>
     <button class="ib" id="lo" title="Logout">⏻</button>
     <input id="q" type="search" placeholder="Search files…" autocomplete="off">
@@ -2849,6 +2886,13 @@ async function removeGroup() {
 $('#grp').onchange = e => switchGroup(e.target.value);
 $('#gadd').onclick = addGroup;
 $('#lo').onclick = () => { location.href = '/logout'; };
+let stDeferredPrompt = null;
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); stDeferredPrompt = e; });
+$('#pwab').onclick = async () => {
+  if (stDeferredPrompt) { stDeferredPrompt.prompt(); await stDeferredPrompt.userChoice; stDeferredPrompt = null; return; }
+  await dialog({ title: '📲 Install Backup Explorer App', text: 'Mobile वर: Browser च्या ⋮ मेन्यूवर टॅप करून "Install app" किंवा "Add to Home screen" निवडा.\nPC वर: Address bar मधल्या 📲 Install बटनावर क्लिक करा.', ok: 'OK' });
+};
 
 /* ---------- index status / auto-check ---------- */
 async function setIntervalDlg() {

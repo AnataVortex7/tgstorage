@@ -874,6 +874,8 @@ AUTH = Auth(make_store())
 
 app.secret_key = hashlib.sha256(
     f"flask|{os.environ.get('SESSION_KEY') or COLAB_SECRET}|{TG_TOKEN}".encode()).hexdigest()
+from datetime import timedelta as _td
+app.permanent_session_lifetime = _td(days=30)
 app.config.update(SESSION_COOKIE_NAME='hub_session',           # storage_app uses the default 'session' cookie
                   SESSION_COOKIE_SECURE=os.environ.get('COOKIE_SECURE', '1') == '1',
                   SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax')

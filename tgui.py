@@ -1,15 +1,44 @@
 """tgui.py — Official Telegram Web सारखा आधुनिक UI + Multi-Threaded Download & Server Cache Manager."""
 
 ENTER_PAGE = r'''<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>…</title><body style="font:16px system-ui;background:#0e1621;color:#f5f5f5;padding:30px">⏳
+<link rel="manifest" href="/app/manifest.json"><meta name="theme-color" content="#151f2b">
+<title>Telegram Hub</title><body style="font:15px system-ui;background:#0b121a;color:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px">
+<div id="box" style="background:#151f2b;border:1px solid #223042;border-radius:16px;padding:28px;max-width:380px;width:100%;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.5)">⏳ Connecting…</div>
 <script>
-const k=new URLSearchParams(location.search).get('k');history.replaceState(null,'','/app/');
-fetch('/app/enter',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'app'},body:JSON.stringify({k})})
- .then(r=>r.ok?location.replace('/app/'):document.body.textContent='✖ Link संपला किंवा आधीच वापरला').catch(()=>document.body.textContent='✖ error');
-</script>'''
+const sp=new URLSearchParams(location.search),k=sp.get('k')||'';
+let dt=sp.get('dt')||'';
+try{if(!dt)dt=JSON.parse(localStorage.getItem('tg_pwa_dt')||'""')}catch(e){}
+history.replaceState(null,'','/app/');
+function tryEnter(payload){
+ fetch('/app/enter',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'app'},body:JSON.stringify(payload)})
+  .then(async r=>{
+   if(r.ok){
+    try{const d=await r.json();if(d.dt)localStorage.setItem('tg_pwa_dt',JSON.stringify(d.dt))}catch(e){}
+    location.replace('/app/');
+   }else{
+    showPrompt();
+   }
+  }).catch(()=>showPrompt());
+}
+function showPrompt(){
+ const b=document.getElementById('box');
+ b.innerHTML='<div style="font-size:38px;margin-bottom:8px">📲</div><h3 style="margin:0 0 8px;color:#5eb5f7">Telegram Hub App</h3><p style="color:#7c90a6;font-size:13.5px;margin:0 0 14px">Bot मधून मिळालेला नवीन UI Link किंवा Token खाली पेस्ट करा (एकदा लॉगिन केल्यावर हे App ३० दिवस आपोआप चालू राहील):</p><input id="in" placeholder="Paste /app?k=... link or token" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid #2b3d52;background:#0b121a;color:#fff;margin-bottom:10px;box-sizing:border-box"><button id="go" style="width:100%;padding:10px;border-radius:8px;border:0;background:#2481cc;color:#fff;font-weight:700;cursor:pointer">🔓 Open App</button>';
+ document.getElementById('go').onclick=()=>{
+  const v=document.getElementById('in').value.trim();
+  if(!v)return;
+  const m=v.match(/[?&]k=([^&\s]+)/);
+  tryEnter({k:m?m[1]:v});
+ };
+}
+if(k||dt)tryEnter({k,dt});else showPrompt();
+</script></body>'''
 
 UI_PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Telegram</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#151f2b"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json"><link rel="icon" href="/app/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/app/icon.svg">
+<title>Telegram</title>
 <style>
 :root{--bg:#e4ebf0;--side:#ffffff;--in:#ffffff;--out:#e3fdd6;--acc:#2481cc;--acc2:#1a6fb3;--fg:#0f172a;--mut:#64748b;--bd:#e2e8f0;--hov:#f1f5f9;--sel:#2481cc;--bdg:#2481cc;--bdgm:#94a3b8;--ink:#fff;--sh:0 1px 3px rgba(0,0,0,.08);--pat:rgba(0,0,0,.035);--glass:rgba(255,255,255,.92)}
 [data-theme=dark]{--bg:#0b121a;--side:#151f2b;--in:#1c2938;--out:#244d75;--acc:#5eb5f7;--acc2:#3b9de8;--fg:#f1f5f9;--mut:#7c90a6;--bd:#0d1620;--hov:#1e2c3c;--sel:#25496d;--bdg:#3b9de8;--bdgm:#3a4f66;--ink:#fff;--sh:0 2px 5px rgba(0,0,0,.35);--pat:rgba(255,255,255,.028);--glass:rgba(21,31,43,.92)}
@@ -117,6 +146,7 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
   <div class="hd">
    <button class="ib" id="menu" title="Menu">☰</button>
    <input id="search" placeholder="Search chats or @username…" autocomplete="off">
+   <button class="ib" id="pwa-btn" title="Install as Mobile APK / PC Desktop App">📲</button>
    <button class="ib" id="dlmgr" title="Multi-Thread Downloads & Server Cache">⚡<span class="bd-dot" id="dlcnt" style="display:none">0</span></button>
   </div>
   <div id="accbar"></div>
@@ -306,7 +336,7 @@ async function loadState(){
  const s=await api('/app/api/state');
  S.accs=s.accounts;S.bw=s.bw;S.defApi=s.default_api;S.chunk=s.chunk;
  if(s.dl_cfg)S.dlCfg=s.dl_cfg;
- if(s.dl_tok)S.dlTok=s.dl_tok;
+ if(s.dl_tok){S.dlTok=s.dl_tok;LS.set('pwa_dt',s.dl_tok)}
  if(s.downloads){
   for(const[k,st]of Object.entries(s.downloads)){
    S.dls[k]=st;
@@ -331,6 +361,7 @@ function showEmpty(){$('#cbar').style.display='none';$('#tbar').style.display='n
 async function openByQuery(q){try{const r=await api('/app/api/resolve',A({q}));openChat(r.dialog)}catch(e){toast(e.message)}}
 async function openById(chat,mid){let d=S.dl.find(x=>x.id===chat)||(S.adl||[]).find(x=>x.id===chat)||{id:chat,name:'Chat',type:'user'};await openChat(d,mid)}
 async function openChat(d,jump){
+ document.querySelectorAll('#mi video,#mi audio').forEach(el=>{try{el.pause();el.removeAttribute('src');el.load()}catch(e){}});
  if(S.chat&&$('#txt'))S.drafts[S.chat]=$('#txt').value;
  S.chat=d.id;S.cd=d;S.topic=0;S.topics=[];S.msgs=[];S.noMore=false;S.sel.clear();S.reply=null;S.edit=null;S.pinned=null;S.q='';$('#search').value='';S.gsearch=[];S.gres=null;
  document.body.classList.add('chat');$('#cbar').style.display='flex';$('#tbar').style.display='none';$('#comp').style.display='block';$('#txt').value=S.drafts[d.id]||'';autosize();barUpdate();selUpdate();
@@ -1262,6 +1293,7 @@ function openDrawer(noRefresh){const dr=$('#dr'),c=cur(),st=S.st||{};dr.replaceC
    c.id&&!c.storage?stBtn('Use "'+(c.label||c.name)+'" for Storage scanning',()=>linkStorage(c.id)):null):null,
   h('div',{class:'it',on:{click(){closeDrawer();addAccount()}}},'＋','Add Telegram Account'),
   h('hr',{style:'border:0;border-top:1px solid var(--bd);width:100%'}),
+  h('div',{class:'it',on:{click(){closeDrawer();installPwaModal()}}},'📲','Install App (Mobile APK / PC)'),
   h('div',{class:'it',on:{click(){closeDrawer();openDlManager()}}},'⚡','Downloads & Server Cache'),
   h('div',{class:'it',on:{click(){closeDrawer();openGhostAndAutoReply()}}},'👻','Ghost Vault & Auto-Reply'),
   h('div',{class:'it',on:{click(){closeDrawer();openCrossSearch()}}},'🌐','Cross-Account Search'),
@@ -1380,6 +1412,51 @@ function handleEvent(e){
 async function poll(){for(;;){try{const r=await api('/app/api/events?'+Q({since:S.seq,wait:20}));S.seq=r.seq;for(const e of r.events)handleEvent(e)}catch(e){await sleep(3500)}}}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeMenu();closeFv();$('#lb').style.display='none';const ov=document.querySelector('.ov');if(ov)ov.remove();if(S.sel.size){S.sel.clear();selUpdate();drawMsgs('keep')}}});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&S.chat)markRead()});
+
+/* ---------- 📲 Installable Mobile APK (WebAPK) & PC Desktop App (PWA) ---------- */
+let deferredPrompt=null;
+if('serviceWorker' in navigator){
+ navigator.serviceWorker.register('/app/sw.js',{scope:'/app/'}).catch(()=>{});
+}
+window.addEventListener('beforeinstallprompt',e=>{
+ e.preventDefault();
+ deferredPrompt=e;
+ const b=$('#pwa-btn');
+ if(b)b.style.color='var(--acc)';
+});
+window.addEventListener('appinstalled',()=>{
+ deferredPrompt=null;
+ toast('✅ App installed on your device!');
+});
+$('#pwa-btn').onclick=()=>installPwaModal();
+async function installPwaModal(){
+ if(deferredPrompt){
+  deferredPrompt.prompt();
+  const choice=await deferredPrompt.userChoice;
+  if(choice&&choice.outcome==='accepted'){deferredPrompt=null;toast('✅ Installing app…')}
+  return;
+ }
+ const isStandalone=window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone;
+ modal('📲 Install as Mobile APK / PC App',[
+  h('div',{class:'dl-card'},
+   h('b',{style:'color:var(--acc);font-size:14px',text:isStandalone?'✅ Already Running as Installed App!':'📲 Lightweight Native App Mode (Low RAM)'}),
+   h('div',{style:'font-size:13px;line-height:1.45',text:isStandalone?'You are currently using Telegram Hub in standalone full-screen app mode with persistent 30-day login.':'Install Telegram Hub directly on your Mobile Home Screen (like an APK) or Windows/Mac Desktop — opens full-screen without browser bars and uses minimal RAM!'})
+  ),
+  h('div',{class:'dl-card'},
+   h('b',{style:'font-size:13px',text:'📱 Android (Chrome / Brave / Edge / Samsung):'}),
+   h('div',{class:'mut',style:'font-size:12.5px',text:'Tap the browser ⋮ menu (top-right) → click "Install app" or "Add to Home screen". Android automatically builds and installs a native WebAPK icon on your phone!'})
+  ),
+  h('div',{class:'dl-card'},
+   h('b',{style:'font-size:13px',text:'💻 PC / Laptop (Chrome / Edge):'}),
+   h('div',{class:'mut',style:'font-size:12.5px',text:'Click the 📲 Install icon on the right side of the browser address bar (or ⋮ menu → Save and share → Install page as app).'})
+  ),
+  h('div',{class:'dl-card'},
+   h('b',{style:'font-size:13px',text:'🍎 iPhone / iPad (Safari):'}),
+   h('div',{class:'mut',style:'font-size:12.5px',text:'Tap the Share button (⬆️) at the bottom → select "Add to Home Screen".'})
+  )
+ ],[{t:'Close'}]);
+}
+
 /* ---------- start ---------- */
 (async()=>{applyTheme();if(window.matchMedia)try{matchMedia('(prefers-color-scheme: dark)').addEventListener('change',applyTheme)}catch(e){}
  $('#md').style.color=S.set.md?'var(--acc)':'';
