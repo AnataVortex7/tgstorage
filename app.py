@@ -100,11 +100,18 @@ def _is_hub(path):
 
 def application(environ, start_response):
     path = environ.get("PATH_INFO", "")
-    if not _loaded:                      # still booting: health checks pass, the rest waits
-        ok = path in ("/healthz", "/health")
-        start_response("200 OK" if ok else "503 Service Unavailable",
-                       [("Content-Type", "text/plain"), ("Retry-After", "5")])
-        return [b"ok" if ok else b"starting"]
+    if not _loaded:                      # still booting: health checks on /, /health, /healthz pass with 200 OK
+        if path in ("/", "/healthz", "/health"):
+            accept = environ.get("HTTP_ACCEPT", "")
+            if path == "/" and "text/html" in accept:
+                body = b"<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=2><title>Starting...</title><body style=\"background:#0d1117;color:#e6edf3;font:15px system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">Starting server...</body>"
+                start_response("200 OK", [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store")])
+                return [body]
+            start_response("200 OK", [("Content-Type", "text/plain"), ("Cache-Control", "no-store")])
+            return [b"ok"]
+        start_response("503 Service Unavailable",
+                       [("Content-Type", "text/plain"), ("Retry-After", "3"), ("Cache-Control", "no-store")])
+        return [b"starting"]
     target = hub_app.app if _is_hub(path) else storage_app.app
     return target(environ, start_response)
 

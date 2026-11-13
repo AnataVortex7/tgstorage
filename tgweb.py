@@ -1928,7 +1928,7 @@ def _verify_dl_tok(tok):
 def session_ok():
     if bool(session.get('tg_ok')) and time.time() < session.get('tg_exp', 0):
         return True
-    if request.method == 'GET' and request.path.rstrip('/') in ('/app/api/file', '/app/api/thumb', '/app/api/avatar'):
+    if request.method in ('GET', 'HEAD') and request.path.rstrip('/') in ('/app/api/file', '/app/api/thumb', '/app/api/avatar'):
         if _verify_dl_tok(request.args.get('dt', '')):
             return True
     return False
@@ -1946,57 +1946,120 @@ _APP_ICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"
 <path d="M119 251l234-90c11-4 20 3 17 19l-40 188c-3 13-11 16-22 10l-62-46-30 29c-3 3-6 6-13 6l4-63 115-104c5-4-1-7-8-3L172 287l-61-19c-13-4-13-13 8-17z" fill="#fff"/>
 </svg>'''
 
+
+def _make_apk_png(size=192, bg=(36, 129, 204), fg=(255, 255, 255)):
+    """Ultra-fast (< 5ms) pure-Python RGBA PNG generator for 192x192 & 512x512 WebAPK icons."""
+    import zlib, struct
+    w = h = int(size)
+    bg_px = bytes((bg[0], bg[1], bg[2], 255))
+    fg_px = bytes((fg[0], fg[1], fg[2], 255))
+    # Build solid background row & center square/diamond emblem using fast byte repetition
+    full_bg_row = b"\x00" + bg_px * w
+    rows = []
+    m0, m1 = int(h * 0.26), int(h * 0.74)
+    cx = w // 2
+    half_span = int(w * 0.24)
+    for y in range(h):
+        if m0 <= y < m1:
+            # Draw a clean white play/telegram arrow triangle in the center
+            rel = abs(y - (h // 2)) / float(max(1, (m1 - m0) // 2))
+            x_start = int(w * 0.32)
+            x_end = max(x_start + 2, int(w * 0.72 - rel * (w * 0.36)))
+            left = x_start
+            mid = x_end - x_start
+            right = w - x_end
+            rows.append(b"\x00" + bg_px * left + fg_px * mid + bg_px * right)
+        else:
+            rows.append(full_bg_row)
+    raw = b"".join(rows)
+    def _chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw, 1)) + _chunk(b"IEND", b"")
+
+_PNG_CACHE = {}
+def _get_apk_png(size, bg=(36, 129, 204)):
+    k = (size, bg)
+    if k not in _PNG_CACHE:
+        _PNG_CACHE[k] = _make_apk_png(size, bg=bg)
+    return _PNG_CACHE[k]
+
 _APP_MANIFEST = {
+    "id": "/app/",
     "name": "Telegram Hub Pro",
     "short_name": "TG Hub",
     "description": "Multi-Account Telegram Manager & High-Speed Downloader",
     "start_url": "/app/",
     "scope": "/app/",
     "display": "standalone",
-    "orientation": "any",
+    "orientation": "portrait",
     "background_color": "#0b121a",
     "theme_color": "#151f2b",
+    "prefer_related_applications": False,
     "icons": [
-        {"src": "/app/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
-        {"src": "/app/icon.svg", "sizes": "192x192", "type": "image/svg+xml"},
-        {"src": "/app/icon.svg", "sizes": "512x512", "type": "image/svg+xml"}
+        {"src": "/app/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": "/app/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+        {"src": "/app/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
     ]
 }
 
-_APP_SW_JS = '''self.addEventListener("install", e => { self.skipWaiting(); });
-self.addEventListener("activate", e => { e.waitUntil(self.clients.claim()); });
-self.addEventListener("fetch", e => { return; });
-'''
+_APP_SW_JS = """self.addEventListener('install', e => { self.skipWaiting(); });
+self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); });
+self.addEventListener('fetch', e => {
+  if (e.request.method !== 'GET') return;
+  if (e.request.mode === 'navigate') {
+    e.respondWith(fetch(e.request).catch(() => new Response('Offline - check connection', {status: 503, headers: {'Content-Type': 'text/plain'}})));
+  }
+});
+"""
 
 @bp.get('/manifest.json')
 def pwa_manifest():
-    return Response(json.dumps(_APP_MANIFEST), mimetype='application/manifest+json', headers={'Cache-Control': 'public, max-age=3600'})
+    body = json.dumps(_APP_MANIFEST).encode('utf-8')
+    return Response(body, mimetype='application/manifest+json',
+                    headers={'Content-Length': str(len(body)), 'Cache-Control': 'public, max-age=300'})
 
 @bp.get('/sw.js')
 def pwa_sw():
-    return Response(_APP_SW_JS, mimetype='application/javascript', headers={'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/app/'})
+    body = _APP_SW_JS.encode('utf-8')
+    return Response(body, mimetype='application/javascript',
+                    headers={'Content-Length': str(len(body)), 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/app/'})
 
 @bp.get('/icon.svg')
 def pwa_icon():
-    return Response(_APP_ICON_SVG, mimetype='image/svg+xml', headers={'Cache-Control': 'public, max-age=86400'})
+    body = _APP_ICON_SVG.encode('utf-8')
+    return Response(body, mimetype='image/svg+xml',
+                    headers={'Content-Length': str(len(body)), 'Cache-Control': 'public, max-age=86400'})
+
+@bp.get('/icon-192.png')
+def pwa_icon_192():
+    body = _get_apk_png(192)
+    return Response(body, mimetype='image/png',
+                    headers={'Content-Length': str(len(body)), 'Cache-Control': 'public, max-age=86400'})
+
+@bp.get('/icon-512.png')
+def pwa_icon_512():
+    body = _get_apk_png(512)
+    return Response(body, mimetype='image/png',
+                    headers={'Content-Length': str(len(body)), 'Cache-Control': 'public, max-age=86400'})
 
 @bp.before_request
 def gate():
     if M is None:
         abort(404)
     p = request.path.rstrip('/')
-    if request.method == 'GET' and p in ('/app/manifest.json', '/app/sw.js', '/app/icon.svg'):
+    is_read = request.method in ('GET', 'HEAD')
+    if is_read and p in ('/app/manifest.json', '/app/sw.js', '/app/icon.svg', '/app/icon-192.png', '/app/icon-512.png'):
         return None
-    if request.method == 'GET' and p == '/app' and (request.args.get('k') or request.args.get('dt')):
+    if is_read and p == '/app' and (request.args.get('k') or request.args.get('dt')):
         return Response(ENTER_PAGE, mimetype='text/html', headers=_sec_headers())
-    if request.method == 'GET' and p.startswith('/app/s/'):
+    if is_read and p.startswith('/app/s/'):
         return None
     if request.method == 'POST' and p == '/app/enter':
         return None
     if not session_ok():
-        # If the user opened the installed PWA icon (/app or /app/) and their cookie expired,
-        # return ENTER_PAGE so it can auto-restore session using saved localStorage pwa_tok or prompt for link!
-        if request.method == 'GET' and p == '/app':
+        # Allow GET/HEAD on /app (/app/) so Android WebAPK installer & installed Home Screen icon always get 200 OK!
+        if is_read and p == '/app':
             return Response(ENTER_PAGE, mimetype='text/html', headers=_sec_headers())
         abort(404)
     # Auto-extend session expiry so installed Mobile/PC app stays logged in

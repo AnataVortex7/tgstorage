@@ -37,12 +37,12 @@ UI_PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#151f2b"><meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json"><link rel="icon" href="/app/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/app/icon.svg">
+<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json"><link rel="icon" href="/app/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/app/icon-192.png">
 <title>Telegram</title>
 <style>
 :root{--bg:#e4ebf0;--side:#ffffff;--in:#ffffff;--out:#e3fdd6;--acc:#2481cc;--acc2:#1a6fb3;--fg:#0f172a;--mut:#64748b;--bd:#e2e8f0;--hov:#f1f5f9;--sel:#2481cc;--bdg:#2481cc;--bdgm:#94a3b8;--ink:#fff;--sh:0 1px 3px rgba(0,0,0,.08);--pat:rgba(0,0,0,.035);--glass:rgba(255,255,255,.92)}
 [data-theme=dark]{--bg:#0b121a;--side:#151f2b;--in:#1c2938;--out:#244d75;--acc:#5eb5f7;--acc2:#3b9de8;--fg:#f1f5f9;--mut:#7c90a6;--bd:#0d1620;--hov:#1e2c3c;--sel:#25496d;--bdg:#3b9de8;--bdgm:#3a4f66;--ink:#fff;--sh:0 2px 5px rgba(0,0,0,.35);--pat:rgba(255,255,255,.028);--glass:rgba(21,31,43,.92)}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{height:100%;margin:0;overflow:hidden}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{height:100%;height:100dvh;margin:0;overflow:hidden;overscroll-behavior:none;user-select:none;-webkit-user-select:none}.mt,input,textarea,pre{user-select:text;-webkit-user-select:text}
 body{background:var(--bg);color:var(--fg);font:var(--fs,15px)/1.38 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-thumb{background:rgba(128,128,128,.32);border-radius:4px}
 button,input,textarea,select{font:inherit;color:inherit}button{cursor:pointer;background:none;border:0;transition:background .15s,transform .1s,opacity .15s}button:active{transform:scale(.96)}
@@ -110,7 +110,7 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
 .bt{display:flex;flex-direction:column;gap:4px;margin-top:6px;min-width:210px}.bt div{display:flex;gap:4px}.bt button{flex:1;background:rgba(0,0,0,.28);color:#fff;border-radius:8px;padding:7px 6px;font-size:13.5px;font-weight:600}
 #dn{position:absolute;right:18px;bottom:14px;display:none;width:44px;height:44px;border-radius:50%;background:var(--side);box-shadow:0 3px 12px rgba(0,0,0,.28);font-size:18px;color:var(--mut);z-index:6}#dn .bd{position:absolute;top:-8px;right:-4px}
 #ups{max-width:800px;margin:0 auto;width:100%;padding:0 12px}.up{background:var(--side);border-radius:10px;padding:7px 11px;margin:4px 0;font-size:13px;box-shadow:var(--sh)}.up .pb{height:5px;border-radius:3px;background:var(--bd);margin-top:5px;overflow:hidden}.up .pb i{display:block;height:100%;background:var(--acc);width:0;transition:width .2s}
-#comp{background:var(--bg)}#cin{max-width:800px;margin:0 auto;padding:6px 12px 10px}#bar2{display:none;background:var(--side);border-radius:12px 12px 0 0;padding:6px 12px;gap:8px;align-items:center;border-bottom:1px solid var(--bd)}
+#comp{background:var(--bg);padding-bottom:env(safe-area-inset-bottom,0px)}#cin{max-width:800px;margin:0 auto;padding:6px 12px 10px}#bar2{display:none;background:var(--side);border-radius:12px 12px 0 0;padding:6px 12px;gap:8px;align-items:center;border-bottom:1px solid var(--bd)}
 #box{display:flex;gap:8px;align-items:flex-end}#pillbox{flex:1;display:flex;align-items:flex-end;background:var(--side);border-radius:24px;padding:2px 6px;box-shadow:var(--sh)}
 #txt{flex:1;border:0;background:none;outline:0;resize:none;max-height:180px;padding:10px 6px;line-height:1.35}#send,#mic{width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-size:19px;flex:none;box-shadow:var(--sh)}
 #mic.rec{background:#ef4444;animation:pulse 1s infinite}
@@ -364,6 +364,7 @@ async function openChat(d,jump){
  document.querySelectorAll('#mi video,#mi audio').forEach(el=>{try{el.pause();el.removeAttribute('src');el.load()}catch(e){}});
  if(S.chat&&$('#txt'))S.drafts[S.chat]=$('#txt').value;
  S.chat=d.id;S.cd=d;S.topic=0;S.topics=[];S.msgs=[];S.noMore=false;S.sel.clear();S.reply=null;S.edit=null;S.pinned=null;S.q='';$('#search').value='';S.gsearch=[];S.gres=null;
+ if(!document.body.classList.contains('chat'))history.pushState({tgView:'chat'},'');
  document.body.classList.add('chat');$('#cbar').style.display='flex';$('#tbar').style.display='none';$('#comp').style.display='block';$('#txt').value=S.drafts[d.id]||'';autosize();barUpdate();selUpdate();
  const cav=$('#cav');cav.replaceChildren(avatar(d.id,d.name,40,d.online));cav.onclick=$('#ctt').onclick=()=>toggleInfo();$('#ctt b').textContent=(d.verified?'✔ ':'')+(d.forum?'💬 ':'')+d.name;setStatus(d.type==='user'?(d.online?'online':''):'');drawList();
  if(d.forum){loadChatTopics(d.id)}
@@ -421,6 +422,30 @@ function flash(el){if(el.scrollIntoView)el.scrollIntoView({block:'center'});el.c
 function markRead(){if(S.msgs.length&&S.cd&&(S.cd.unread||0)>=0){const mx=S.msgs[S.msgs.length-1].id;api('/app/api/read',A({chat:S.chat,max_id:mx})).catch(()=>{});const d=S.dl.find(x=>x.id===S.chat);if(d&&d.unread){d.unread=0;d.mentions=0;drawList()}}}
 
 /* ---------- message rendering + auto server caching on view/download ---------- */
+
+let _wakeLock=null;
+async function holdWakeLock(on){
+ if(!('wakeLock' in navigator))return;
+ try{if(on&&!_wakeLock)_wakeLock=await navigator.wakeLock.request('screen');else if(!on&&_wakeLock){await _wakeLock.release();_wakeLock=null}}catch(e){}
+}
+function bindMediaSession(el,m){
+ el.addEventListener('play',()=>{
+  holdWakeLock(true);
+  if('mediaSession' in navigator&&window.MediaMetadata){
+   const x=m.media||{};
+   navigator.mediaSession.metadata=new MediaMetadata({
+    title:x.name||(m.text?m.text.slice(0,60):'Telegram Media'),
+    artist:(S.cd&&S.cd.name)||m.from||'Telegram Hub',
+    artwork:[{src:'/app/icon-192.png',sizes:'192x192',type:'image/png'}]
+   });
+   navigator.mediaSession.setActionHandler('play',()=>el.play());
+   navigator.mediaSession.setActionHandler('pause',()=>el.pause());
+  }
+ });
+ el.addEventListener('pause',()=>holdWakeLock(false));
+ el.addEventListener('ended',()=>holdWakeLock(false));
+}
+
 function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:S.chat,id:m.id},file=fileUrl(b,false),th='/app/api/thumb?'+Q(b);
  if(x.kind==='photo'){const w=h('div',{class:'ph',on:{click(e){if(S.sel.size||e.shiftKey)return;lightbox(m.id)}}});if(x.w&&x.h)w.style.aspectRatio=x.w+'/'+x.h;
   if(S.set.previews){const i=h('img',{alt:'',loading:'lazy',src:th,on:{error(){w.replaceChildren(h('div',{style:'padding:30px;text-align:center',text:'📷 Photo · '+sz(x.size)+' · tap'}))}}});w.append(i)}else w.append(h('div',{style:'padding:30px;text-align:center',text:'📷 Photo · '+sz(x.size)+' · tap to load'}));return w}
@@ -433,7 +458,7 @@ function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:
    if(e)e.stopPropagation();
    // Immediately trigger multi-threaded server download in background AND start streaming video right away!
    serverDownload(m,false).catch(()=>{});
-   const v=h('video',{src:file,playsinline:true,preload:'auto'});
+   const v=h('video',{src:file,playsinline:true,preload:'auto'});bindMediaSession(v,m);
    if(x.kind==='gif'){v.loop=true;v.muted=true;v.autoplay=true}else v.controls=true;
    const spdBtn=h('button',{text:'1x',title:'Playback speed',on:{click(ev){ev.stopPropagation();const rates=[1,1.25,1.5,1.75,2,2.5,0.5];const nx=rates[(rates.indexOf(v.playbackRate)+1)%rates.length];v.playbackRate=nx;spdBtn.textContent=nx+'x'}}});
    const snapBtn=h('button',{text:'📸',title:'Capture HD Screenshot of Video Frame',on:{click(ev){ev.stopPropagation();snapVideo(v,x.name||('video_'+m.id))}}});
@@ -612,7 +637,10 @@ function bubbleRow(m,first,last,showName,album){const out=m.out;const row=h('div
  if(album&&album.length>1){const g=h('div',{style:`display:grid;grid-template-columns:repeat(${album.length>3?2:Math.min(album.length,2)},1fr);gap:2px;margin:-2px -4px 3px`});album.forEach(a=>g.append(mediaNode(a)));b.append(g);const tx=album.find(a=>a.text);if(tx)b.append(...bodyNode(Object.assign({},tx,{media:null,reply:null,fwd:'',via:'',react:tx.react,btn:null})))}
  else b.append(...bodyNode(m));
  b.append(h('span',{class:'meta'},m._deleted?h('b',{style:'color:#ef4444',text:'👻 deleted'}):null,m.pinned?'📌':null,m.views?'👁 '+m.views:null,m.edited?'edited':null,tm(m.ts),ticks(m)));b.append(h('div',{style:'clear:both'}));
- b.addEventListener('contextmenu',e=>{e.preventDefault();msgMenu(e.clientX,e.clientY,m)});let lp;b.addEventListener('touchstart',e=>{const t=e.touches[0];lp=setTimeout(()=>msgMenu(t.clientX,t.clientY,m),550)},{passive:true});['touchend','touchmove'].forEach(ev=>b.addEventListener(ev,()=>clearTimeout(lp),{passive:true}));
+ b.addEventListener('contextmenu',e=>{e.preventDefault();msgMenu(e.clientX,e.clientY,m)});let lp;let tx0=0,ty0=0,swiped=false;
+ b.addEventListener('touchstart',e=>{const t=e.touches[0];tx0=t.clientX;ty0=t.clientY;swiped=false;lp=setTimeout(()=>msgMenu(t.clientX,t.clientY,m),520)},{passive:true});
+ b.addEventListener('touchmove',e=>{clearTimeout(lp);const t=e.touches[0],dx=t.clientX-tx0,dy=Math.abs(t.clientY-ty0);if(dy<28&&Math.abs(dx)>22){b.style.transform=`translateX(${Math.max(-55,Math.min(55,dx*0.5))}px)`;swiped=Math.abs(dx)>48}},{passive:true});
+ b.addEventListener('touchend',()=>{clearTimeout(lp);b.style.transform='';if(swiped){if(navigator.vibrate)try{navigator.vibrate(15)}catch(e){}setReply(m);swiped=false}},{passive:true});
  b.addEventListener('click',e=>{if(S.sel.size||e.shiftKey)toggleSel(m.id);else if(e.detail===2)setReply(m)});row.append(b);return row}
 
 function drawMsgs(mode,jumpId){const box=$('#msgs'),mi=$('#mi'),keep=box.scrollHeight-box.scrollTop;const kids=[];let prev=null;const L=S.msgs;
@@ -664,7 +692,8 @@ function msgMenu(x,y,m){
  showMenu(x,y,[
   {ic:'↩',t:'Reply',fn:()=>setReply(m)},
   m.media&&m.media.kind!=='sticker'?{ic:'👁',t:'Open & Cache on Server',fn:()=>openFile(m)}:null,
-  m.media&&m.media.kind!=='sticker'?{ic:'⬇',t:'Fast Download to Browser',fn:()=>downloadMsg(m)}:null,
+  m.media&&m.media.kind!=='sticker'?{ic:'⬇',t:'Download to Device',fn:()=>downloadMsg(m)}:null,
+  (m.media&&m.media.kind!=='sticker'&&navigator.share)?{ic:'📱',t:'Share to Phone / Apps (WhatsApp, Files…)',fn:()=>shareFileMobile(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'🔗',t:'Public Share / VLC Stream Link',fn:()=>shareLinkModal(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'📦',t:'Backup to Storage Group',fn:()=>backupToStorageModal(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'⚡',t:'Pre-Download on Server ('+S.dlCfg.threads+'T)',fn:()=>serverDownload(m,false).then(()=>toast('⚡ Server multi-thread download started'))}:null,
@@ -860,14 +889,46 @@ async function probeFile(url){try{const r=await fetch(url,{headers:{Range:'bytes
 async function downloadMsg(m){
  const x=m.media;if(!x)return;
  const u=fileUrl({acc:S.acc,chat:S.chat,id:m.id},true);
- // Start server multi-threaded download with keepalive:true so closing/refreshing the page never stops it!
+ // 1) Start server multi-threaded download with keepalive:true so closing/refreshing the app never stops it!
  serverDownload(m,false).catch(()=>{});
- const a=h('a',{href:u,download:x.name||'file',target:'tg_dl_frame',rel:'noopener',style:'display:none'});
- document.body.append(a);a.click();a.remove();
- toast('⚡ Download started (continues even if page is refreshed or closed)');
+ // 2) On installed mobile WebAPK (standalone mode), direct top-level attachment link hands off straight to Android System DownloadManager
+ //    without navigating away because Content-Disposition: attachment is set! On desktop, hidden iframe prevents unload.
+ const isStandalone=window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone||innerWidth<=820;
+ const a=h('a',{href:u,download:x.name||('file_'+m.id),target:isStandalone?'_self':'tg_dl_frame',rel:'noopener',style:'display:none'});
+ document.body.append(a);a.click();setTimeout(()=>a.remove(),1000);
+ if(navigator.vibrate)try{navigator.vibrate(20)}catch(e){}
+ toast('⬇ Downloading to device… (Check notification bar / Downloads)');
+}
+async function shareFileMobile(m){
+ const x=m.media;if(!x)return;
+ if(!navigator.share){downloadMsg(m);return}
+ const u=fileUrl({acc:S.acc,chat:S.chat,id:m.id},true);
+ if(x.size<=45*1048576&&navigator.canShare){
+  toast('📱 Preparing file for native mobile share…',5000);
+  try{
+   const r=await fetch(u,{credentials:'same-origin'});
+   const blob=await r.blob();
+   const file=new File([blob],x.name||('file_'+m.id),{type:x.mime||blob.type||'application/octet-stream'});
+   if(navigator.canShare({files:[file]})){await navigator.share({title:x.name||'Telegram File',files:[file]});return}
+  }catch(e){if(e.name==='AbortError')return}
+ }
+ // For huge files (>45 MB), generate a direct share link and open native Android Share sheet
+ try{
+  const sr=await api('/app/api/share/create',A({chat:S.chat,id:m.id,hours:24}));
+  await navigator.share({title:x.name||'Telegram File',text:x.name||'Telegram File',url:location.origin+sr.path+'?dl=1'});
+ }catch(e){if(e.name!=='AbortError')downloadMsg(m)}
 }
 function closeFv(fromPop){const fv=$('#fv');if(fv.style.display==='none')return;fv.style.display='none';fv.dataset.dl='';$('#fvb').replaceChildren();$('#fvst').textContent='';if(!fromPop&&history.state&&history.state.fv)history.back()}
-window.addEventListener('popstate',()=>closeFv(true));$('#fvx').onclick=()=>closeFv();
+window.addEventListener('popstate',()=>{
+ const ov=document.querySelector('.ov');if(ov){ov.remove();return}
+ if($('#lb').style.display==='flex'){$('#lb').style.display='none';LB=null;return}
+ if($('#fv').style.display!=='none'){closeFv(true);return}
+ if($('#drawer').classList.contains('on')){closeDrawer();return}
+ if(S.info){toggleInfo();return}
+ if(S.sel.size){S.sel.clear();selUpdate();drawMsgs('keep');return}
+ if(document.body.classList.contains('chat')){document.body.classList.remove('chat');return}
+});
+$('#fvx').onclick=()=>closeFv();
 async function openFile(m){
  const x=m.media;if(!x)return;
  const k=dlKey(m),url=fileUrl({acc:S.acc,chat:S.chat,id:m.id},false),kind=fileKind(x),body=$('#fvb');
@@ -881,7 +942,7 @@ async function openFile(m){
  const fail=async()=>{const er=await probeFile(url);body.replaceChildren(h('div',{style:'text-align:center;max-width:420px'},h('div',{style:'font-size:44px',text:'⚠'}),h('div',{text:er||"Can't preview this format directly"}),h('div',{class:'mut',style:'margin-top:8px',text:'The file is being cached on the server — click ⬇ Download to save it directly.'}),h('button',{style:'margin-top:12px;background:var(--acc);color:#fff;border-radius:8px;padding:10px 18px;font-weight:600',text:'⬇ Fast Download',on:{click(){downloadMsg(m)}}})))};
  if(kind==='image')body.replaceChildren(h('img',{alt:'',src:url,on:{error:fail}}));
  else if(kind==='video'){
-  const v=h('video',{src:url,controls:true,autoplay:true,playsinline:true,on:{error:fail}});
+  const v=h('video',{src:url,controls:true,autoplay:true,playsinline:true,on:{error:fail}});bindMediaSession(v,m);
   body.replaceChildren(v);
  }
  else if(kind==='audio')body.replaceChildren(h('audio',{src:url,controls:true,autoplay:true,style:'width:min(92vw,520px)',on:{error:fail}}));
@@ -1388,7 +1449,19 @@ function addAccount(){
 
 /* ---------- live events / notifications ---------- */
 function beep(){if(!S.set.sound)return;try{const C=window.AudioContext||window.webkitAudioContext;if(!C)return;const c=new C(),o=c.createOscillator(),g=c.createGain();o.frequency.value=880;g.gain.value=.05;o.connect(g);g.connect(c.destination);o.start();setTimeout(()=>{o.stop();c.close()},120)}catch(e){}}
-function notify(e){const d=S.dl.find(x=>x.id===e.chat)||(S.adl||[]).find(x=>x.id===e.chat);if(d&&d.muted)return;if(document.hidden||e.chat!==S.chat){beep();if(S.set.notif&&window.Notification&&Notification.permission==='granted'){try{new Notification((d&&d.name)||e.msg.from||'Telegram',{body:(e.msg.text||'📎 Media').slice(0,120),silent:true})}catch(er){}}}}
+function notify(e){
+ const d=S.dl.find(x=>x.id===e.chat)||(S.adl||[]).find(x=>x.id===e.chat);
+ if(d&&d.muted)return;
+ if(document.hidden||e.chat!==S.chat){
+  beep();
+  if(S.set.notif&&window.Notification&&Notification.permission==='granted'){
+   const title=(d&&d.name)||e.msg.from||'Telegram',opts={body:(e.msg.text||'📎 Media').slice(0,120),icon:'/app/icon-192.png',badge:'/app/icon-192.png',tag:'chat_'+e.chat,renotify:true};
+   if(navigator.serviceWorker&&navigator.serviceWorker.ready){
+    navigator.serviceWorker.ready.then(reg=>reg.showNotification(title,opts)).catch(()=>{try{new Notification(title,opts)}catch(_){}});
+   }else{try{new Notification(title,opts)}catch(_){}}
+  }
+ }
+}
 let dt=null;const soon=()=>{clearTimeout(dt);dt=setTimeout(()=>{loadDialogs();loadState().catch(()=>{})},700)};
 function handleEvent(e){
  if(e.type==='dl'){
@@ -1430,29 +1503,29 @@ window.addEventListener('appinstalled',()=>{
 });
 $('#pwa-btn').onclick=()=>installPwaModal();
 async function installPwaModal(){
- if(deferredPrompt){
+ const isStandalone=window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone;
+ const fsBtn=h('button',{style:'background:var(--acc);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;width:100%',text:document.fullscreenElement?'🗗 Exit Fullscreen App Mode':'📱 Open Fullscreen App Mode Now (Instant)',on:{click(){
+  if(document.fullscreenElement){document.exitFullscreen().catch(()=>{})}
+  else if(document.documentElement.requestFullscreen){document.documentElement.requestFullscreen().catch(e=>toast(e.message))}
+  const ov=document.querySelector('.ov');if(ov)ov.remove();
+ }}});
+ const natBtn=deferredPrompt?h('button',{style:'background:#10b981;color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;width:100%',text:'📲 Install Native App on Device (1-Click)',on:{async click(){
+  if(!deferredPrompt)return;
   deferredPrompt.prompt();
   const choice=await deferredPrompt.userChoice;
-  if(choice&&choice.outcome==='accepted'){deferredPrompt=null;toast('✅ Installing app…')}
-  return;
- }
- const isStandalone=window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone;
- modal('📲 Install as Mobile APK / PC App',[
+  if(choice&&choice.outcome==='accepted'){deferredPrompt=null;toast('✅ Installing app — check Home Screen in 5-10s')}
+ }}}):null;
+ modal('📲 Mobile APK / PC App Mode',[
+  natBtn,
+  fsBtn,
   h('div',{class:'dl-card'},
-   h('b',{style:'color:var(--acc);font-size:14px',text:isStandalone?'✅ Already Running as Installed App!':'📲 Lightweight Native App Mode (Low RAM)'}),
-   h('div',{style:'font-size:13px;line-height:1.45',text:isStandalone?'You are currently using Telegram Hub in standalone full-screen app mode with persistent 30-day login.':'Install Telegram Hub directly on your Mobile Home Screen (like an APK) or Windows/Mac Desktop — opens full-screen without browser bars and uses minimal RAM!'})
-  ),
-  h('div',{class:'dl-card'},
-   h('b',{style:'font-size:13px',text:'📱 Android (Chrome / Brave / Edge / Samsung):'}),
-   h('div',{class:'mut',style:'font-size:12.5px',text:'Tap the browser ⋮ menu (top-right) → click "Install app" or "Add to Home screen". Android automatically builds and installs a native WebAPK icon on your phone!'})
+   h('b',{style:'color:var(--acc);font-size:13.5px',text:isStandalone?'✅ Running as Installed Native App!':'📱 Android वर "Installing..." अडकल्यास काय करावे?'}),
+   h('div',{style:'font-size:12.5px;line-height:1.45',text:'1) Xiaomi / Redmi / Vivo / Oppo / Realme फोनवर: Phone Settings → Apps → Chrome → Permissions → "Home screen shortcuts" (किंवा "Install unknown apps") ON करा.
+2) किंवा Chrome च्या ⋮ मेन्यूमध्ये "Add to Home screen" → "Create shortcut" निवडा — १ सेकंदात Home Screen वर आयकॉन तयार होईल!'})
   ),
   h('div',{class:'dl-card'},
    h('b',{style:'font-size:13px',text:'💻 PC / Laptop (Chrome / Edge):'}),
-   h('div',{class:'mut',style:'font-size:12.5px',text:'Click the 📲 Install icon on the right side of the browser address bar (or ⋮ menu → Save and share → Install page as app).'})
-  ),
-  h('div',{class:'dl-card'},
-   h('b',{style:'font-size:13px',text:'🍎 iPhone / iPad (Safari):'}),
-   h('div',{class:'mut',style:'font-size:12.5px',text:'Tap the Share button (⬆️) at the bottom → select "Add to Home Screen".'})
+   h('div',{class:'mut',style:'font-size:12.5px',text:'Click the 📲 Install icon in the address bar (already working on your PC!).'})
   )
  ],[{t:'Close'}]);
 }

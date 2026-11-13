@@ -2058,25 +2058,77 @@ _ST_ICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
 def st_icon():
     return Response(_ST_ICON_SVG, mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
 
+
+def _make_apk_png(size=192, bg=(36, 129, 204), fg=(255, 255, 255)):
+    """Ultra-fast (< 5ms) pure-Python RGBA PNG generator for 192x192 & 512x512 WebAPK icons."""
+    import zlib, struct
+    w = h = int(size)
+    bg_px = bytes((bg[0], bg[1], bg[2], 255))
+    fg_px = bytes((fg[0], fg[1], fg[2], 255))
+    # Build solid background row & center square/diamond emblem using fast byte repetition
+    full_bg_row = b"\x00" + bg_px * w
+    rows = []
+    m0, m1 = int(h * 0.26), int(h * 0.74)
+    cx = w // 2
+    half_span = int(w * 0.24)
+    for y in range(h):
+        if m0 <= y < m1:
+            # Draw a clean white play/telegram arrow triangle in the center
+            rel = abs(y - (h // 2)) / float(max(1, (m1 - m0) // 2))
+            x_start = int(w * 0.32)
+            x_end = max(x_start + 2, int(w * 0.72 - rel * (w * 0.36)))
+            left = x_start
+            mid = x_end - x_start
+            right = w - x_end
+            rows.append(b"\x00" + bg_px * left + fg_px * mid + bg_px * right)
+        else:
+            rows.append(full_bg_row)
+    raw = b"".join(rows)
+    def _chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw, 1)) + _chunk(b"IEND", b"")
+
+_PNG_CACHE = {}
+def _get_apk_png(size, bg=(36, 129, 204)):
+    k = (size, bg)
+    if k not in _PNG_CACHE:
+        _PNG_CACHE[k] = _make_apk_png(size, bg=bg)
+    return _PNG_CACHE[k]
+
+@app.route("/icon-192.png")
+def st_icon_192():
+    body = _get_apk_png(192, bg=(22, 27, 34))
+    return Response(body, mimetype="image/png", headers={"Content-Length": str(len(body)), "Cache-Control": "public, max-age=86400"})
+
+@app.route("/icon-512.png")
+def st_icon_512():
+    body = _get_apk_png(512, bg=(22, 27, 34))
+    return Response(body, mimetype="image/png", headers={"Content-Length": str(len(body)), "Cache-Control": "public, max-age=86400"})
+
 @app.route("/manifest.json")
 def st_manifest():
     import json as _json
     m = {
+        "id": "/browse/",
         "name": "Telegram Backup Explorer",
         "short_name": "TG Storage",
         "description": "Browse & Stream Telegram Backup Groups",
         "start_url": "/browse/",
         "scope": "/",
         "display": "standalone",
+        "orientation": "portrait",
+        "prefer_related_applications": False,
         "background_color": "#191919",
         "theme_color": "#202020",
         "icons": [
-            {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
-            {"src": "/icon.svg", "sizes": "192x192", "type": "image/svg+xml"},
-            {"src": "/icon.svg", "sizes": "512x512", "type": "image/svg+xml"}
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
         ]
     }
-    return Response(_json.dumps(m), mimetype="application/manifest+json")
+    body = _json.dumps(m).encode("utf-8")
+    return Response(body, mimetype="application/manifest+json", headers={"Content-Length": str(len(body))})
 
 @app.route("/sw.js")
 def st_sw():
