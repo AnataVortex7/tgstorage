@@ -91,8 +91,11 @@ try:
 
     import tgcrypto
 except ImportError:
-    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'telethon'], check=True)
-    from telethon import TelegramClient
+    try:
+        from telethon import TelegramClient
+    except ImportError:
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'telethon>=1.45.0'], check=True)
+        from telethon import TelegramClient
     from telethon.sessions import StringSession
     from telethon.tl.types import DocumentAttributeVideo
 

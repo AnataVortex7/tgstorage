@@ -161,7 +161,8 @@ def _ts(d):
     return int(d.timestamp()) if hasattr(d, 'timestamp') else int(d)
 
 def media_info(m):
-    if not getattr(m, 'media', None):
+    med = getattr(m, 'media', None)
+    if not med:
         return None
     f = getattr(m, 'file', None)
     kind = 'other'
@@ -173,7 +174,9 @@ def media_info(m):
     return {'kind': kind, 'size': int(getattr(f, 'size', 0) or 0), 'name': str(getattr(f, 'name', '') or ''),
             'mime': str(getattr(f, 'mime_type', '') or ''), 'dur': int(getattr(f, 'duration', 0) or 0),
             'w': int(getattr(f, 'width', 0) or 0), 'h': int(getattr(f, 'height', 0) or 0),
-            'emoji': str(getattr(f, 'emoji', '') or '')}
+            'emoji': str(getattr(f, 'emoji', '') or ''),
+            'spoiler': bool(getattr(med, 'spoiler', False)),
+            'ttl': int(getattr(med, 'ttl_seconds', 0) or 0)}
 
 def ser_entities(m):
     out = []
@@ -182,6 +185,10 @@ def ser_entities(m):
         d = {'t': t, 'o': int(e.offset), 'l': int(e.length)}
         if t == 'texturl':
             d['u'] = getattr(e, 'url', '')
+        elif t == 'blockquote' and getattr(e, 'collapsed', False):
+            d['c'] = True
+        elif t == 'customemoji':
+            d['ce'] = str(getattr(e, 'document_id', '') or '')
         out.append(d)
     return out
 
@@ -191,9 +198,15 @@ def ser_reactions(m):
         return None
     out = []
     for x in r.results:
-        em = getattr(x.reaction, 'emoticon', None)
+        rx = getattr(x, 'reaction', None)
+        em = getattr(rx, 'emoticon', None)
+        rname = type(rx).__name__ if rx else ''
         if em:
             out.append({'e': em, 'n': int(x.count), 'me': getattr(x, 'chosen_order', None) is not None})
+        elif rname == 'ReactionPaid':
+            out.append({'e': '⭐', 'n': int(x.count), 'me': getattr(x, 'chosen_order', None) is not None, 'paid': True})
+        elif rname == 'ReactionCustomEmoji':
+            out.append({'e': '✨', 'n': int(x.count), 'me': getattr(x, 'chosen_order', None) is not None, 'ce': str(getattr(rx, 'document_id', ''))})
     return out or None
 
 def ser_poll(m):
@@ -251,14 +264,20 @@ def ser_msg(m):
     dice = getattr(m, 'dice', None)
     venue = getattr(m, 'venue', None)
     top_id = None
+    quote_txt = None
     if rt:
         if getattr(rt, 'forum_topic', False):
             top_id = getattr(rt, 'reply_to_top_id', None) or getattr(rt, 'reply_to_msg_id', None)
+        quote_txt = getattr(rt, 'quote_text', None) or None
     return {'id': m.id, 'out': bool(getattr(m, 'out', False)), 'ts': _ts(getattr(m, 'date', None)), 'text': text,
             'service': service, 'from': _name(getattr(m, 'sender', None)), 'from_id': getattr(m, 'sender_id', None),
             'reply': getattr(rt, 'reply_to_msg_id', None) if rt else None,
+            'quote': str(quote_txt)[:350] if quote_txt else None,
             'topic': top_id,
             'edited': bool(getattr(m, 'edit_date', None)),
+            'invert_media': bool(getattr(m, 'invert_media', False)),
+            'noforwards': bool(getattr(m, 'noforwards', False)),
+            'effect': str(getattr(m, 'effect', '') or ''),
             'fwd': (getattr(fw, 'from_name', None) or _name(getattr(fw, 'sender', None)) or _name(getattr(fw, 'chat', None)) or 'Unknown') if fw else '',
             'via': _name(getattr(m, 'via_bot', None)), 'media': media_info(m), 'ents': ser_entities(m),
             'react': ser_reactions(m), 'poll': ser_poll(m), 'web': ser_web(m), 'btn': ser_buttons(m),
@@ -312,9 +331,12 @@ def _thumb_index(m):
 
 
 def default_factory(sess, api_id, api_hash):
-    return TelegramClient(StringSession(sess or ''), int(api_id), api_hash, device_model='Desktop',
-                          app_version='4.16.8 x64', system_version='Windows 10 x64', lang_code='en',
-                          system_lang_code='en-US', connection_retries=None, retry_delay=3,
+    return TelegramClient(StringSession(sess or ''), int(api_id), api_hash,
+                          device_model=os.environ.get('TG_DEVICE_MODEL', 'Desktop'),
+                          app_version=os.environ.get('TG_APP_VERSION', '7.3.1 x64'),
+                          system_version=os.environ.get('TG_SYSTEM_VERSION', 'Windows 11 x64'),
+                          lang_code='en', system_lang_code='en-US',
+                          connection_retries=None, retry_delay=3,
                           auto_reconnect=True, flood_sleep_threshold=120)
 
 client_factory = default_factory
@@ -923,13 +945,41 @@ class Manager:
             out.append(d)
         return out
 
-    async def a_send(self, aid, chat, text, reply_to, md, silent, schedule, preview, topic_id=None):
+    async def a_send(self, aid, chat, text, reply_to, md, silent, schedule, preview, topic_id=None, quote_text=None, invert_media=False):
+        cl = self._cl(aid)
         kw = {}
         if schedule:
             kw['schedule'] = datetime.fromtimestamp(int(schedule), tz=timezone.utc)
-        target_reply = reply_to or topic_id or None
-        m = await self._cl(aid).send_message(chat, text, reply_to=target_reply, parse_mode='md' if md else None,
-                                             silent=bool(silent), link_preview=bool(preview), **kw)
+        target_reply = int(reply_to) if reply_to else (int(topic_id) if topic_id else None)
+        quote_str = str(quote_text or '').strip()[:1024]
+        if quote_str and target_reply and hasattr(types, 'InputReplyToMessage'):
+            try:
+                peer = await cl.get_input_entity(chat)
+                ents, clean_text = await cl._parse_message_text(text, 'md' if md else None)
+                rto_kw = {'reply_to_msg_id': target_reply, 'quote_text': quote_str}
+                if topic_id:
+                    rto_kw['top_msg_id'] = int(topic_id)
+                req_kw = {
+                    'peer': peer,
+                    'message': clean_text,
+                    'random_id': secrets.randbits(63),
+                    'reply_to': types.InputReplyToMessage(**rto_kw),
+                    'entities': ents,
+                    'silent': bool(silent),
+                    'no_webpage': not bool(preview),
+                    'schedule_date': kw.get('schedule'),
+                }
+                if invert_media:
+                    req_kw['invert_media'] = True
+                upd = await cl(functions.messages.SendMessageRequest(**req_kw))
+                m = cl._get_response_message(req_kw['random_id'], upd, peer)
+                if m:
+                    bw_add(len(text.encode()) + 300)
+                    return ser_msg(m)
+            except Exception:
+                pass
+        m = await cl.send_message(chat, text, reply_to=target_reply, parse_mode='md' if md else None,
+                                  silent=bool(silent), link_preview=bool(preview), **kw)
         bw_add(len(text.encode()) + 300)
         return ser_msg(m)
 
@@ -1766,9 +1816,28 @@ class Manager:
                 kw['voice_note'] = True
             if up.get('is_round'):
                 kw['video_note'] = True
+            if up.get('ttl') and int(up['ttl']) > 0:
+                kw['ttl'] = int(up['ttl'])
             target_reply = up.get('reply_to') or up.get('topic_id') or None
-            m = await self._cl(up['acc']).send_file(
-                up['chat'], up['path'], caption=up.get('caption') or None,
+            cl = self._cl(up['acc'])
+            send_target = up['path']
+            if up.get('spoiler') and not up.get('as_file') and not up.get('is_voice') and not up.get('is_round'):
+                try:
+                    uf = await cl.upload_file(up['path'], file_name=up['name'], progress_callback=prog)
+                    ext = os.path.splitext(up['name'].lower())[1]
+                    if ext in ('.jpg', '.jpeg', '.png', '.webp'):
+                        send_target = types.InputMediaUploadedPhoto(file=uf, spoiler=True, ttl_seconds=kw.pop('ttl', None))
+                    else:
+                        mime_g = 'video/mp4' if ext in ('.mp4', '.mkv', '.mov', '.webm') else 'application/octet-stream'
+                        attrs = [types.DocumentAttributeFilename(file_name=up['name'])]
+                        if mime_g == 'video/mp4':
+                            attrs.append(types.DocumentAttributeVideo(duration=0, w=0, h=0, supports_streaming=True))
+                        send_target = types.InputMediaUploadedDocument(file=uf, mime_type=mime_g, attributes=attrs, spoiler=True, ttl_seconds=kw.pop('ttl', None))
+                    prog = None
+                except Exception:
+                    send_target = up['path']
+            m = await cl.send_file(
+                up['chat'], send_target, caption=up.get('caption') or None,
                 force_document=bool(up.get('as_file') and not up.get('is_voice') and not up.get('is_round')),
                 reply_to=target_reply, silent=bool(up.get('silent')), supports_streaming=True,
                 parse_mode='md' if up.get('md') else None, progress_callback=prog, **kw)
@@ -2527,7 +2596,121 @@ def api_send():
     if not text.strip() or len(text) > 4096:
         raise ApiError('text रिकामा किंवा 4096 पेक्षा मोठा')
     return jsonify(message=M.call(M.a_send(_acc(d), int(d['chat']), text, d.get('reply_to'), d.get('md'), d.get('silent'),
-                                           d.get('schedule'), d.get('preview', True), d.get('topic_id'))))
+                                           d.get('schedule'), d.get('preview', True), d.get('topic_id'),
+                                           d.get('quote'), d.get('invert_media'))))
+
+@bp.get('/api/folders')
+@api
+def api_folders():
+    aid = _acc()
+    async def _get_folders():
+        cl = M._cl(aid)
+        try:
+            r = await cl(functions.messages.GetDialogFiltersRequest())
+            flts = getattr(r, 'filters', r) if not isinstance(r, list) else r
+            out = []
+            for f in (flts or []):
+                if type(f).__name__ not in ('DialogFilter', 'DialogFilterChatlist'):
+                    continue
+                title = _t(getattr(f, 'title', ''))
+                if not title:
+                    continue
+                inc = []
+                for p in (getattr(f, 'include_peers', None) or []) + (getattr(f, 'pinned_peers', None) or []):
+                    try:
+                        inc.append(utils.get_peer_id(p))
+                    except Exception:
+                        pass
+                exc = []
+                for p in (getattr(f, 'exclude_peers', None) or []):
+                    try:
+                        exc.append(utils.get_peer_id(p))
+                    except Exception:
+                        pass
+                out.append({
+                    'id': int(getattr(f, 'id', 0)),
+                    'title': title[:28],
+                    'emoticon': str(getattr(f, 'emoticon', '') or ''),
+                    'include': inc,
+                    'exclude': exc,
+                    'contacts': bool(getattr(f, 'contacts', False)),
+                    'non_contacts': bool(getattr(f, 'non_contacts', False)),
+                    'groups': bool(getattr(f, 'groups', False)),
+                    'broadcasts': bool(getattr(f, 'broadcasts', False)),
+                    'bots': bool(getattr(f, 'bots', False)),
+                    'exclude_muted': bool(getattr(f, 'exclude_muted', False)),
+                    'exclude_read': bool(getattr(f, 'exclude_read', False)),
+                })
+            return out
+        except Exception:
+            return []
+    return jsonify(folders=M.call(_get_folders(), 20))
+
+@bp.post('/api/send_extra')
+@api
+def api_send_extra():
+    d = _json()
+    aid, chat = _acc(d), int(d['chat'])
+    kind = str(d.get('kind', '')).strip()
+    reply_to = d.get('reply_to') or d.get('topic_id') or None
+    async def _do():
+        cl = M._cl(aid)
+        if kind == 'dice':
+            em = str(d.get('emoticon', '🎲')).strip()
+            if em not in ('🎲', '🎯', '🏀', '⚽', '🎳', '🎰'):
+                em = '🎲'
+            m = await cl.send_file(chat, file=types.InputMediaDice(emoticon=em), reply_to=reply_to)
+            return ser_msg(m)
+        elif kind == 'geo':
+            lat, lon = float(d.get('lat', 0)), float(d.get('lon', 0))
+            m = await cl.send_file(chat, file=types.InputMediaGeoPoint(geo_point=types.InputGeoPoint(lat=lat, long=lon)), reply_to=reply_to)
+            return ser_msg(m)
+        elif kind == 'contact':
+            phone = str(d.get('phone', '')).strip()[:32]
+            first = str(d.get('first_name', '')).strip()[:64]
+            last = str(d.get('last_name', '')).strip()[:64]
+            if not phone or not first:
+                raise ApiError('नाव आणि फोन नंबर आवश्यक आहे')
+            m = await cl.send_file(chat, file=types.InputMediaContact(phone_number=phone, first_name=first, last_name=last, vcard=''), reply_to=reply_to)
+            return ser_msg(m)
+        raise ApiError('अवैध प्रकार')
+    return jsonify(message=M.call(_do(), 30))
+
+@bp.get('/api/stories')
+@api
+def api_stories():
+    aid = _acc()
+    async def _st():
+        cl = M._cl(aid)
+        if not hasattr(functions, 'stories') or not hasattr(functions.stories, 'GetAllStoriesRequest'):
+            return []
+        try:
+            r = await cl(functions.stories.GetAllStoriesRequest(next=False, hidden=False))
+            peer_stories = getattr(r, 'peer_stories', None) or []
+            users = {u.id: u for u in (getattr(r, 'users', None) or [])}
+            chats = {c.id: c for c in (getattr(r, 'chats', None) or [])}
+            out = []
+            for ps in peer_stories[:30]:
+                pid = utils.get_peer_id(ps.peer) if hasattr(ps, 'peer') else 0
+                raw_id = getattr(getattr(ps, 'peer', None), 'user_id', None) or getattr(getattr(ps, 'peer', None), 'channel_id', None)
+                ent = users.get(raw_id) or chats.get(raw_id)
+                name = _name(ent) or f'Peer {pid}'
+                stories_list = []
+                for s in (getattr(ps, 'stories', None) or []):
+                    if type(s).__name__ == 'StoryItem':
+                        stories_list.append({
+                            'id': int(s.id),
+                            'ts': _ts(getattr(s, 'date', None)),
+                            'exp': _ts(getattr(s, 'expire_date', None)),
+                            'caption': str(getattr(s, 'caption', '') or '')[:300],
+                            'views': int(getattr(getattr(s, 'views', None), 'views_count', 0) or 0),
+                        })
+                if stories_list:
+                    out.append({'peer_id': pid, 'name': name, 'count': len(stories_list), 'stories': stories_list})
+            return out
+        except Exception:
+            return []
+    return jsonify(stories=M.call(_st(), 25))
 
 @bp.post('/api/edit')
 @api
@@ -3216,6 +3399,7 @@ def api_up_start():
         UP[uid] = {'acc': aid, 'chat': chat, 'name': name, 'size': size, 'written': 0, 'sent': 0, 'path': os.path.join(folder, name),
                    'caption': str(d.get('caption', ''))[:1000], 'reply_to': d.get('reply_to'), 'topic_id': d.get('topic_id'),
                    'as_file': bool(d.get('as_file')), 'is_voice': bool(d.get('is_voice')), 'is_round': bool(d.get('is_round')),
+                   'spoiler': bool(d.get('spoiler')), 'ttl': int(d.get('ttl', 0) or 0), 'invert_media': bool(d.get('invert_media')),
                    'silent': bool(d.get('silent')), 'schedule': d.get('schedule'), 'md': bool(d.get('md')), 'state': 'receiving', 'err': ''}
     return jsonify(id=uid, chunk=CHUNK)
 

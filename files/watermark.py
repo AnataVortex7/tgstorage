@@ -33,7 +33,7 @@ STATE_FILE = BASE / 'state.json'
 PID_FILE = BASE / 'worker.pid'
 TASK = 'WatermarkWorker'
 NO_WINDOW = 0x08000000 if IS_WIN else 0
-REQS = ['flask', 'requests', 'pyaes', 'pysocks', 'pyrogram==2.0.106']
+REQS = ['flask', 'requests', 'pyaes', 'pysocks', 'pyrofork>=2.3.69', 'telethon>=1.45.0']
 
 
 # ───────────────────────── bootstrap (venv + deps) ─────────────────────────
@@ -55,7 +55,7 @@ def bootstrap():
         # tgcrypto: compiler नको म्हणून फक्त तयार (wheel) package. Python 3.12/3.13 साठी
         # मूळ tgcrypto चा Windows wheel नाही → tgcrypto-pyrofork (तोही `import tgcrypto`).
         crypto_ok = False
-        for pkg in ('tgcrypto', 'tgcrypto-pyrofork'):
+        for pkg in ('tgcrypto-pyrofork', 'tgcrypto', 'cryptg'):
             subprocess.call([py, '-m', 'pip', 'install', '-q', '--only-binary=:all:', pkg],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if subprocess.call([py, '-c', 'import tgcrypto'], stdout=subprocess.DEVNULL,

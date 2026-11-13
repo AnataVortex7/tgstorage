@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt && \
-    (pip install --no-cache-dir --only-binary=:all: cryptg || true)
+    (pip install --no-cache-dir --only-binary=:all: cryptg TgCrypto-pyrofork || true)
 
 COPY . .
 

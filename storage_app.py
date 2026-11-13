@@ -1123,7 +1123,7 @@ async def _start_user(sess):
             pass
     _warmed = False
     c = Client(name="tg_user", api_id=API_ID, api_hash=API_HASH,
-               device_model="Desktop", system_version="Windows 10 x64", app_version="4.16.8 x64",
+               device_model=os.environ.get("TG_DEVICE_MODEL", "Desktop"), system_version=os.environ.get("TG_SYSTEM_VERSION", "Windows 11 x64"), app_version=os.environ.get("TG_APP_VERSION", "7.3.1 x64"),
                lang_code="en", session_string=sess, in_memory=True, sleep_threshold=120)
     c.add_handler(RawUpdateHandler(_on_raw_update), group=-1)
     await c.start()
@@ -1152,7 +1152,7 @@ async def _qr_begin_async():
             except Exception:
                 pass
     c = Client(name=f"qr{secrets.token_hex(3)}", api_id=API_ID, api_hash=API_HASH,
-               device_model="Desktop", system_version="Windows 10 x64", app_version="4.16.8 x64", lang_code="en", in_memory=True)
+               device_model=os.environ.get("TG_DEVICE_MODEL", "Desktop"), system_version=os.environ.get("TG_SYSTEM_VERSION", "Windows 11 x64"), app_version=os.environ.get("TG_APP_VERSION", "7.3.1 x64"), lang_code="en", in_memory=True)
     await c.connect()
     try:
         r = await c.session.invoke(tg_raw.functions.auth.ExportLoginToken(
@@ -1313,7 +1313,7 @@ async def _login_step(msg):
                 await msg.reply("❌ Number बरोबर नाही. country code सह पाठव, उदा. `+919876543210`")
                 return
             c = Client(name=f"login{uid}", api_id=API_ID, api_hash=API_HASH,
-                       device_model="Desktop", system_version="Windows 10 x64", app_version="4.16.8 x64", lang_code="en", in_memory=True)
+                       device_model=os.environ.get("TG_DEVICE_MODEL", "Desktop"), system_version=os.environ.get("TG_SYSTEM_VERSION", "Windows 11 x64"), app_version=os.environ.get("TG_APP_VERSION", "7.3.1 x64"), lang_code="en", in_memory=True)
             await c.connect()
             try:
                 sent = await c.send_code(raw)
