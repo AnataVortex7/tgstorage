@@ -152,7 +152,7 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
   <div id="accbar"></div>
   <div id="dlbar"></div>
   <div id="folders"></div>
-  <div id="list"></div>
+  <div id="list"><div class="empty">⏳ Loading Telegram chats…</div></div>
   <button id="fab" title="New message / group / channel">✎</button>
   <div id="drawer"><div id="dr"></div></div>
  </aside>
@@ -205,7 +205,7 @@ const $=(s,r)=>(r||document).querySelector(s);
 const h=(t,p,...k)=>{const e=document.createElement(t);if(p)for(const[a,v]of Object.entries(p)){if(v==null||v===false)continue;if(a==='on')for(const[ev,f]of Object.entries(v))e.addEventListener(ev,f);else if(a==='text')e.textContent=v;else if(a==='class')e.className=v;else if(a==='style')e.style.cssText=v;else e.setAttribute(a,v===true?'':v)}for(const c of k.flat(9)){if(c==null||c===false)continue;e.append(c.nodeType?c:document.createTextNode(String(c)))}return e};
 const LS={get(k,d){try{const v=localStorage.getItem('tg_'+k);return v==null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem('tg_'+k,JSON.stringify(v))}catch(e){}}};
 const Q=o=>new URLSearchParams(o).toString(),sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const S={acc:null,accs:[],chat:null,cd:null,topic:0,topics:[],dl:[],adl:[],folder:'all',archived:false,msgs:[],readOut:0,readIn:0,pinned:null,typing:{},seq:0,sel:new Set(),reply:null,edit:null,uploads:{},dls:{},bw:null,defApi:false,loadingOld:false,noMore:false,gsearch:[],q:'',info:false,drafts:{},unreadFrom:0,dlCfg:{threads:8,ttl:3600,auto_cache:true},
+const S={acc:null,accs:[],chat:null,cd:null,topic:0,topics:[],dl:[],adl:[],folder:'all',archived:false,msgs:[],mcache:{},readOut:0,readIn:0,pinned:null,typing:{},seq:0,sel:new Set(),reply:null,edit:null,uploads:{},dls:{},bw:null,defApi:false,loadingOld:false,noMore:false,gsearch:[],q:'',info:false,drafts:{},unreadFrom:0,dlCfg:{threads:8,ttl:3600,auto_cache:true},
  set:Object.assign({theme:'auto',avatars:true,previews:true,notif:false,sound:true,md:false,enter:true,fs:15},LS.get('set',{}))};
 const EMOJI='😀😁😂🤣😊😍😘😎🤔😢😭😡👍👎👏🙏💪🔥❤️💔🎉✨🌹🎂🍕☕🚀✅❌⚠️📌📎💯😴🤝👀🙈😅😉😇🥰😋🤗🤩😏😬🙄😤😱🤯🥳😜🫡🫶⚡🌟💎🎵🎬📷👑🛡'.match(/\p{Extended_Pictographic}\uFE0F?/gu)||[];
 const REACT=['👍','❤️','🔥','🥰','👏','😁','🤔','😢','🎉','⚡','💯','👎'];
@@ -331,7 +331,24 @@ function drawList(){
  if(!rows.length)rows.push(h('div',{class:'empty',text:S.archived?'No archived chats yet':(S.dl.length?'No chats found':'Loading…')}));$('#list').replaceChildren(...rows);
  const n=S.dl.reduce((a,d)=>a+(d.muted?0:d.unread),0);document.title=(n?`(${n}) `:'')+'Telegram'}
 function dialogRow(d){return h('div',{class:'row',on:{click(){openChat(d)}}},avatar(d.id,d.name),h('div',{class:'rm'},h('div',{class:'r1'},h('b',{text:d.name})),h('div',{class:'r2'},h('span',{class:'mut',text:d.username?'@'+d.username:d.type}))))}
-async function loadDialogs(){if(!S.acc)return;try{const r=await api('/app/api/dialogs?'+Q({acc:S.acc}));S.dl=r.dialogs||[];S.adl=r.archived||[];drawFolders();drawList()}catch(e){$('#list').replaceChildren(h('div',{class:'empty',text:e.message}))}}
+async function loadDialogs(){
+ if(!S.acc)return;
+ if(!S.dl.length){
+  const cachedDl=LS.get('dl_'+S.acc,null);
+  if(cachedDl&&cachedDl.dl&&cachedDl.dl.length){S.dl=cachedDl.dl;S.adl=cachedDl.adl||[];drawFolders();drawList()}
+ }
+ try{
+  const r=await api('/app/api/dialogs?'+Q({acc:S.acc}));
+  S.dl=r.dialogs||[];S.adl=r.archived||[];
+  LS.set('dl_'+S.acc,{dl:S.dl.slice(0,80),adl:S.adl.slice(0,40)});
+  drawFolders();drawList();
+ }catch(e){
+  if(!S.dl.length){
+   $('#list').replaceChildren(h('div',{class:'empty'},'⏳ '+e.message,h('br'),h('button',{style:'color:var(--acc);font-weight:700;margin-top:8px',text:'🔄 Retry',on:{click:loadDialogs}})));
+   if(e.status===409||/online|सुरू/.test(e.message))setTimeout(loadDialogs,2500);
+  }
+ }
+}
 async function loadState(){
  const s=await api('/app/api/state');
  S.accs=s.accounts;S.bw=s.bw;S.defApi=s.default_api;S.chunk=s.chunk;
@@ -360,17 +377,27 @@ async function chatAct(k,d,extra){try{await api('/app/api/chat/'+k,A(Object.assi
 function showEmpty(){$('#cbar').style.display='none';$('#tbar').style.display='none';$('#comp').style.display='none';$('#pin').style.display='none';$('#mi').replaceChildren(h('div',{class:'empty',text:'Select a chat to start messaging'}));document.body.classList.remove('chat')}
 async function openByQuery(q){try{const r=await api('/app/api/resolve',A({q}));openChat(r.dialog)}catch(e){toast(e.message)}}
 async function openById(chat,mid){let d=S.dl.find(x=>x.id===chat)||(S.adl||[]).find(x=>x.id===chat)||{id:chat,name:'Chat',type:'user'};await openChat(d,mid)}
+let _chatSeq=0;
 async function openChat(d,jump){
  document.querySelectorAll('#mi video,#mi audio').forEach(el=>{try{el.pause();el.removeAttribute('src');el.load()}catch(e){}});
  if(S.chat&&$('#txt'))S.drafts[S.chat]=$('#txt').value;
- S.chat=d.id;S.cd=d;S.topic=0;S.topics=[];S.msgs=[];S.noMore=false;S.sel.clear();S.reply=null;S.edit=null;S.pinned=null;S.q='';$('#search').value='';S.gsearch=[];S.gres=null;
+ S.chat=d.id;S.cd=d;S.topic=0;S.topics=[];S.noMore=false;S.sel.clear();S.reply=null;S.edit=null;S.q='';$('#search').value='';S.gsearch=[];S.gres=null;
  if(!document.body.classList.contains('chat'))history.pushState({tgView:'chat'},'');
  document.body.classList.add('chat');$('#cbar').style.display='flex';$('#tbar').style.display='none';$('#comp').style.display='block';$('#txt').value=S.drafts[d.id]||'';autosize();barUpdate();selUpdate();
- const cav=$('#cav');cav.replaceChildren(avatar(d.id,d.name,40,d.online));cav.onclick=$('#ctt').onclick=()=>toggleInfo();$('#ctt b').textContent=(d.verified?'✔ ':'')+(d.forum?'💬 ':'')+d.name;setStatus(d.type==='user'?(d.online?'online':''):'');drawList();
+ const cav=$('#cav');cav.replaceChildren(avatar(d.id,d.name,40,d.online));cav.onclick=$('#ctt').onclick=()=>toggleInfo();$('#ctt b').textContent=(d.verified?'✔ ':'')+(d.forum?'💬 ':'')+d.name;setStatus(d.type==='user'?(d.online?'online':'loading…'):'');drawList();
+ // INSTANT 0ms UI switch: immediately show cached messages for this chat OR clear old chat bubbles right away!
+ const ck=S.acc+':'+d.id+':0',cached=S.mcache[ck];
+ if(!jump&&cached&&cached.msgs&&cached.msgs.length){
+  S.msgs=cached.msgs.slice();S.readOut=cached.readOut||0;S.readIn=cached.readIn||d.read_in||0;S.pinned=cached.pinned||null;S.unreadFrom=0;
+  drawPinned();drawMsgs('bottom');
+ }else{
+  S.msgs=[];S.pinned=null;drawPinned();
+  $('#mi').replaceChildren(h('div',{class:'empty',text:'⏳ Loading messages…'}));
+ }
  if(d.forum){loadChatTopics(d.id)}
- await reloadChatMsgs(jump);
- api('/app/api/chatinfo?'+Q({acc:S.acc,chat:d.id})).then(r=>{if(S.chat!==d.id)return;S.ci=r.info;setStatus(r.info.status||'');if(r.info.forum&&!S.topics.length)loadChatTopics(d.id);if(S.info)drawInfo()}).catch(()=>{});
  if(S.info)drawInfo();
+ reloadChatMsgs(jump);
+ api('/app/api/chatinfo?'+Q({acc:S.acc,chat:d.id})).then(r=>{if(S.chat!==d.id)return;S.ci=r.info;setStatus(r.info.status||'');if(r.info.forum&&!S.topics.length)loadChatTopics(d.id);if(S.info)drawInfo()}).catch(()=>{});
 }
 async function loadChatTopics(chatId){
  try{
@@ -391,14 +418,21 @@ function drawTopicBar(){
  );
 }
 async function reloadChatMsgs(jump){
+ const mySeq=++_chatSeq,chatId=S.chat,topId=S.topic||0,ck=S.acc+':'+chatId+':'+topId;
+ if(topId&&!jump)$('#mi').replaceChildren(h('div',{class:'empty',text:'⏳ Loading topic messages…'}));
  try{
-  if(jump){S.msgs=(await api('/app/api/around?'+Q({acc:S.acc,chat:S.chat,id:jump}))).messages}
-  else{
-   const r=await api('/app/api/messages?'+Q({acc:S.acc,chat:S.chat,limit:40,topic:S.topic||0}));
+  if(jump){
+   const r=await api('/app/api/around?'+Q({acc:S.acc,chat:chatId,id:jump}));
+   if(mySeq!==_chatSeq||S.chat!==chatId)return;
+   S.msgs=r.messages;
+  }else{
+   const r=await api('/app/api/messages?'+Q({acc:S.acc,chat:chatId,limit:40,topic:topId}));
+   if(mySeq!==_chatSeq||S.chat!==chatId)return;
    S.msgs=r.messages;S.readOut=r.read_out||0;S.readIn=r.read_in||(S.cd&&S.cd.read_in)||0;S.pinned=r.pinned;
    const um=S.msgs.find(m=>!m.out&&m.id>S.readIn);S.unreadFrom=(S.cd&&S.cd.unread&&um)?um.id:0;
+   S.mcache[ck]={msgs:S.msgs.slice(-40),readOut:S.readOut,readIn:S.readIn,pinned:S.pinned};
   }
- }catch(e){toast(e.message)}
+ }catch(e){if(mySeq===_chatSeq)toast(e.message);return}
  drawPinned();drawMsgs(jump?'jump':'unread',jump);markRead();
 }
 function setStatus(t){const s=$('#cbar .st');s.textContent=t||'';s.classList.toggle('on',t==='online'||/typing|recording/.test(t||''))}
@@ -1478,7 +1512,7 @@ function handleEvent(e){
  if(e.chat===S.chat){
   if(S.topic&&e.msg&&e.msg.topic&&e.msg.topic!==S.topic)return;
   const box=$('#msgs'),atEnd=box.scrollHeight-box.scrollTop-box.clientHeight<140;
-  if(e.type==='new'&&e.msg&&!S.msgs.some(x=>x.id===e.msg.id)){S.msgs.push(e.msg);if(!e.msg.out&&!atEnd)S.newBelow=(S.newBelow||0)+1;drawMsgs(atEnd||e.msg.out?'bottom':'keep');if(atEnd&&!document.hidden)markRead()}
+  if(e.type==='new'&&e.msg){const ck0=S.acc+':'+e.chat+':0';if(S.mcache[ck0]&&!S.mcache[ck0].msgs.some(x=>x.id===e.msg.id))S.mcache[ck0].msgs.push(e.msg)}if(e.type==='new'&&e.msg&&!S.msgs.some(x=>x.id===e.msg.id)){S.msgs.push(e.msg);if(!e.msg.out&&!atEnd)S.newBelow=(S.newBelow||0)+1;drawMsgs(atEnd||e.msg.out?'bottom':'keep');if(atEnd&&!document.hidden)markRead()}
   else if(e.type==='edit'&&e.msg)replaceMsg(e.msg);else if(e.type==='del'){if(e.ghost){S.msgs.forEach(x=>{if((e.ids||[]).includes(x.id)&&!x.out)x._deleted=true});S.msgs=S.msgs.filter(x=>!((e.ids||[]).includes(x.id)&&x.out))}else{S.msgs=S.msgs.filter(x=>!(e.ids||[]).includes(x.id))}drawMsgs('keep')}
  }
  soon()}
@@ -1520,8 +1554,7 @@ async function installPwaModal(){
   fsBtn,
   h('div',{class:'dl-card'},
    h('b',{style:'color:var(--acc);font-size:13.5px',text:isStandalone?'✅ Running as Installed Native App!':'📱 Android वर "Installing..." अडकल्यास काय करावे?'}),
-   h('div',{style:'font-size:12.5px;line-height:1.45',text:'1) Xiaomi / Redmi / Vivo / Oppo / Realme फोनवर: Phone Settings → Apps → Chrome → Permissions → "Home screen shortcuts" (किंवा "Install unknown apps") ON करा.
-2) किंवा Chrome च्या ⋮ मेन्यूमध्ये "Add to Home screen" → "Create shortcut" निवडा — १ सेकंदात Home Screen वर आयकॉन तयार होईल!'})
+   h('div',{style:'font-size:12.5px;line-height:1.45',text:'1) Xiaomi / Redmi / Vivo / Oppo / Realme फोनवर: Phone Settings → Apps → Chrome → Permissions → "Home screen shortcuts" (किंवा "Install unknown apps") ON करा. \n2) किंवा Chrome च्या ⋮ मेन्यूमध्ये "Add to Home screen" → "Create shortcut" निवडा — १ सेकंदात Home Screen वर आयकॉन तयार होईल!'})
   ),
   h('div',{class:'dl-card'},
    h('b',{style:'font-size:13px',text:'💻 PC / Laptop (Chrome / Edge):'}),

@@ -475,7 +475,7 @@ class Manager:
         self.acc, self.meta = db['tgacc'], db['meta']
         self.loop = asyncio.new_event_loop()
         self.clients, self.state, self.next_try = {}, {}, {}
-        self.logins, self.cache = {}, {}
+        self.logins, self.cache, self.msg_cache = {}, {}, {}
         self.events = collections.deque(maxlen=300)
         self.seq = 0
         self.cond = threading.Condition()
@@ -652,7 +652,15 @@ class Manager:
                 raise PermissionError('session रद्द / लॉगआउट झालं')
             me = await cl.get_me()
             self.premium[aid] = bool(getattr(me, 'premium', False))
-            await asyncio.wait_for(cl.get_dialogs(limit=100), 90)
+            ds0 = await asyncio.wait_for(cl.get_dialogs(limit=120), 90)
+            try:
+                out0 = [ser_dialog(d) for d in ds0 if not getattr(d, 'archived', False)]
+                out1 = [dict(ser_dialog(d), archived=True) for d in ds0 if getattr(d, 'archived', False)]
+                self.cache[(aid, False)] = (time.time(), out0)
+                if out1:
+                    self.cache[(aid, True)] = (time.time(), out1)
+            except Exception:
+                pass
             self._hook(aid, cl)
             self.clients[aid] = cl
             self.state[aid] = {'state': 'online', 'err': ''}
@@ -746,6 +754,9 @@ class Manager:
         if kind in ('new', 'edit', 'del', 'read'):
             self.cache.pop((aid, False), None)
             self.cache.pop((aid, True), None)
+            if chat_id is not None:
+                for k in [k for k in list(self.msg_cache) if k[0] == aid and k[1] == int(chat_id)]:
+                    self.msg_cache.pop(k, None)
         with self.cond:
             self.seq += 1
             self.events.append({'seq': self.seq, 'acc': aid, 'type': kind, 'chat': chat_id, 'msg': msg, 'ids': ids, **extra})
@@ -764,60 +775,89 @@ class Manager:
     async def a_dialogs(self, aid, archived=False):
         key = (aid, bool(archived))
         c = self.cache.get(key)
-        if c and time.time() - c[0] < 8:
+        if c and time.time() - c[0] < 60:
             return c[1]
         cl = self._cl(aid)
         if archived:
-            ds = await cl.get_dialogs(limit=150, folder=1)
-            out = [ser_dialog(d) for d in ds]
-            for x in out:
-                x['archived'] = True
+            try:
+                ds = await asyncio.wait_for(cl.get_dialogs(limit=100, folder=1), 15)
+                out = [dict(ser_dialog(d), archived=True) for d in ds]
+            except Exception:
+                out = []
             self.cache[key] = (time.time(), out)
             return out
         res0, res1 = await asyncio.gather(
-            cl.get_dialogs(limit=150, folder=0),
-            cl.get_dialogs(limit=150, folder=1),
+            cl.get_dialogs(limit=120, folder=0),
+            cl.get_dialogs(limit=100, folder=1),
             return_exceptions=True
         )
         if isinstance(res0, Exception):
             raise res0
         out0 = [ser_dialog(d) for d in res0 if not getattr(d, 'archived', False)]
-        out1 = []
+        out1 = [dict(ser_dialog(d), archived=True) for d in res0 if getattr(d, 'archived', False)]
         if not isinstance(res1, Exception) and res1:
-            out1 = [ser_dialog(d) for d in res1]
-            for x in out1:
-                x['archived'] = True
+            seen = {x['id'] for x in out1}
+            for d in res1:
+                sd = ser_dialog(d)
+                sd['archived'] = True
+                if sd['id'] not in seen:
+                    out1.append(sd)
         self.cache[(aid, False)] = (time.time(), out0)
         self.cache[(aid, True)] = (time.time(), out1)
         return out0
 
     async def a_messages(self, aid, chat, before, limit, topic_id=0):
+        chat_int, top_int = int(chat), int(topic_id or 0)
+        ck = (aid, chat_int, top_int)
+        if not before:
+            cached = self.msg_cache.get(ck)
+            if cached and time.time() - cached[0] < 30:
+                return cached[1]
         cl = self._cl(aid)
         kw = {'limit': limit, 'offset_id': before or 0}
-        if topic_id:
-            kw['reply_to'] = int(topic_id)
-        ms = await cl.get_messages(chat, **kw)
+        if top_int:
+            kw['reply_to'] = top_int
+        if before:
+            ms = await cl.get_messages(chat_int, **kw)
+            s_list = [ser_msg(m) for m in reversed(list(ms))]
+            for sm in s_list:
+                MSG_RECENT[(aid, chat_int, sm['id'])] = dict(sm, chat=chat_int, acc=aid)
+            while len(MSG_RECENT) > 800:
+                MSG_RECENT.popitem(last=False)
+            return {'messages': s_list}
+
+        async def _get_pinned():
+            pm = await cl.get_messages(chat_int, limit=1, filter=types.InputMessagesFilterPinned())
+            return {'id': pm[0].id, 'text': (pm[0].message or '📎 Media')[:100]} if pm else None
+
+        async def _get_reads():
+            peer = await cl.get_input_entity(chat_int)
+            pd = await cl(functions.messages.GetPeerDialogsRequest(peers=[types.InputDialogPeer(peer=peer)]))
+            return int(pd.dialogs[0].read_outbox_max_id), int(pd.dialogs[0].read_inbox_max_id)
+
+        ms, pin_res, rd_res = await asyncio.gather(
+            cl.get_messages(chat_int, **kw),
+            _get_pinned(),
+            _get_reads(),
+            return_exceptions=True
+        )
+        if isinstance(ms, Exception):
+            raise ms
         s_list = [ser_msg(m) for m in reversed(list(ms))]
         for sm in s_list:
-            MSG_RECENT[(aid, int(chat), sm['id'])] = dict(sm, chat=int(chat), acc=aid)
+            MSG_RECENT[(aid, chat_int, sm['id'])] = dict(sm, chat=chat_int, acc=aid)
         while len(MSG_RECENT) > 800:
             MSG_RECENT.popitem(last=False)
-        res = {'messages': s_list}
-        if not before:
-            res['pinned'] = None
-            try:
-                pm = await cl.get_messages(chat, limit=1, filter=types.InputMessagesFilterPinned())
-                if pm:
-                    res['pinned'] = {'id': pm[0].id, 'text': (pm[0].message or '📎 Media')[:100]}
-            except Exception:
-                pass
-            try:
-                peer = await cl.get_input_entity(chat)
-                pd = await cl(functions.messages.GetPeerDialogsRequest(peers=[types.InputDialogPeer(peer=peer)]))
-                res['read_out'] = int(pd.dialogs[0].read_outbox_max_id)
-                res['read_in'] = int(pd.dialogs[0].read_inbox_max_id)
-            except Exception:
-                res['read_out'] = res['read_in'] = 0
+        ro, ri = (0, 0) if isinstance(rd_res, Exception) else rd_res
+        res = {
+            'messages': s_list,
+            'pinned': None if isinstance(pin_res, Exception) else pin_res,
+            'read_out': ro,
+            'read_in': ri
+        }
+        self.msg_cache[ck] = (time.time(), res)
+        while len(self.msg_cache) > 60:
+            self.msg_cache.pop(next(iter(self.msg_cache)), None)
         return res
 
     async def a_pinned_list(self, aid, chat):
