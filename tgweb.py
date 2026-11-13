@@ -2199,7 +2199,9 @@ def gate():
     is_read = request.method in ('GET', 'HEAD')
     if is_read and p in ('/app/manifest.json', '/app/sw.js', '/app/icon.svg', '/app/icon-192.png', '/app/icon-512.png', '/app/icon-maskable-192.png', '/app/icon-maskable-512.png'):
         ua = request.headers.get('User-Agent', '')[:120]
-        PWA_LOGS.appendleft({'ts': int(time.time()), 'method': request.method, 'path': request.full_path.rstrip('?'), 'ip': _ip(), 'ua': ua, 'is_webapk_server': ('WebAPK' in ua or 'Google' in ua or 'Dalvik' in ua)})
+        dest = request.headers.get('Sec-Fetch-Dest', '')
+        is_wapk = ('maskable' in p or dest == 'manifest' or 'WebAPK' in ua or 'Google' in ua or 'Dalvik' in ua)
+        PWA_LOGS.appendleft({'ts': int(time.time()), 'method': request.method, 'path': request.full_path.rstrip('?'), 'ip': _ip(), 'ua': ua, 'is_webapk_server': is_wapk})
         return None
     # Critical PWA Scope Fix: always redirect /app (without trailing slash) to /app/ so the page is inside scope '/app/'!
     if is_read and request.path == '/app':

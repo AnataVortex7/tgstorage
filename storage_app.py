@@ -2926,7 +2926,11 @@ $('#q').addEventListener('keydown', e => {
 });
 window.addEventListener('popstate', e => {
   if (S.closing) { S.closing = false; return; }          // we closed the viewer ourselves
+  if (!menu.hidden) { hideMenu(); return; }
+  if ($('#nav').classList.contains('open')) { closeNav(); return; }
   if (!viewer.hidden) { closeViewer(true); return; }     // browser Back closes the viewer
+  if (S.selMode) { setSelMode(false); return; }
+  if (S.search || S.recent) { S.search = ''; S.recent = false; $('#q').value = ''; go(S.path, false); return; }
   go(e.state && e.state.p != null ? e.state.p : pathFromUrl(), false);
 });
 document.addEventListener('keydown', e => {

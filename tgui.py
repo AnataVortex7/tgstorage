@@ -268,8 +268,23 @@ function showMenu(x,y,items,top){closeMenu();const m=h('div',{class:'menu'});if(
  for(const it of items){if(!it)continue;m.append(h('div',{class:'mi2'+(it.red?' red':''),on:{click(){closeMenu();it.fn()}}},h('span',{text:it.ic||''}),it.t))}
  document.body.append(m);const w=m.offsetWidth||220,hh=m.offsetHeight||200;m.style.left=Math.max(6,Math.min(x,innerWidth-w-6))+'px';m.style.top=Math.max(6,Math.min(y,innerHeight-hh-6))+'px';MENU=m}
 document.addEventListener('click',e=>{if(MENU&&!MENU.contains(e.target))closeMenu()},true);
+let _navDepth=0,_ignoringPop=false;
+function pushNav(layer){
+ _navDepth++;
+ try{history.pushState({tgLayer:layer,depth:_navDepth},'','#'+layer)}catch(e){}
+}
+function hasActiveLayer(){
+ return !!(document.querySelector('.ov')||$('#lb').style.display==='flex'||$('#fv').style.display==='flex'||$('#drawer').classList.contains('on')||$('#emo').classList.contains('on')||S.info||S.sel.size||document.body.classList.contains('chat')||S.archived||S.folder!=='all'||S.q);
+}
+function ensureNavGuard(){
+ if(hasActiveLayer()&&(!history.state||!history.state.tgLayer)){
+  _navDepth++;
+  try{history.pushState({tgLayer:'guard',depth:_navDepth},'','#app')}catch(e){}
+ }
+}
 function modal(title,body,actions){const ov=h('div',{class:'ov',on:{mousedown(e){if(e.target===ov)close()}}});
- const close=()=>ov.remove();const mf=h('div',{class:'mf'});for(const a of actions||[]){mf.append(h('button',{class:a.c||'',text:a.t,on:{click(){a.fn?a.fn(close):close()}}}))}
+ pushNav('modal');
+ const close=()=>{if(ov.parentNode){ov.remove();ensureNavGuard()}};const mf=h('div',{class:'mf'});for(const a of actions||[]){mf.append(h('button',{class:a.c||'',text:a.t,on:{click(){a.fn?a.fn(close):close()}}}))}
  ov.append(h('div',{class:'mdl'},title?h('h3',{text:title}):null,h('div',{class:'mb'},body),(actions&&actions.length)?mf:null));document.body.append(ov);return close}
 function confirmBox(msg,okText,fn,red){return modal('',h('div',{text:msg}),[{t:'Cancel'},{t:okText||'OK',c:red?'d':'p',fn(c){c();fn()}}])}
 /* ---------- quick account bar & chat list ---------- */
@@ -289,7 +304,7 @@ function drawFolders(){
   const isOn=(k==='archived'&&S.archived)||(!S.archived&&S.folder===k);
   return h('button',{class:isOn?'on':'',on:{click(){
    if(k==='saved'){const u=cur().uid;if(u)openById(u,0);return}
-   if(k==='archived'){S.archived=true;S.folder='archived';drawFolders();drawList();return}
+   if(k==='archived'){S.archived=true;S.folder='archived';pushNav('archived');drawFolders();drawList();return}
    S.archived=false;S.folder=k;drawFolders();drawList();
   }}},n,c?h('span',{class:'n',style:k==='archived'?'background:var(--bdgm)':'',text:c}):null);
  }));
@@ -307,7 +322,7 @@ function drawList(){
   // Official Telegram-style Pinned "Archived Chats" folder row at the top of the main chat list
   const archUnread=S.adl.reduce((a,x)=>a+(x.unread||0),0);
   const previewNames=S.adl.slice(0,4).map(x=>x.name).join(', ');
-  rows.push(h('div',{class:'row',style:'background:rgba(148,163,184,.1);border:1px dashed var(--bd);margin-bottom:4px',on:{click(){S.archived=true;S.folder='archived';drawFolders();drawList()}}},
+  rows.push(h('div',{class:'row',style:'background:rgba(148,163,184,.1);border:1px dashed var(--bd);margin-bottom:4px',on:{click(){S.archived=true;S.folder='archived';pushNav('archived');drawFolders();drawList()}}},
    h('div',{class:'av',style:'background:linear-gradient(135deg,#64748b,#475569);font-size:22px',text:'🗄'}),
    h('div',{class:'rm'},
     h('div',{class:'r1'},h('b',{text:'Archived Chats'}),h('span',{class:'t',text:S.adl.length+' chat'+(S.adl.length===1?'':'s')})),
@@ -384,14 +399,27 @@ function chatMenu(x,y,d){const isArch=!!d.archived||S.archived;showMenu(x,y,[
 async function chatAct(k,d,extra){try{await api('/app/api/chat/'+k,A(Object.assign({chat:d.id},extra)));if(k==='delete'&&S.chat===d.id){S.chat=null;showEmpty()}await loadDialogs()}catch(e){toast(e.message)}}
 /* ---------- open chat & forum topics bar ---------- */
 function showEmpty(){$('#cbar').style.display='none';$('#tbar').style.display='none';$('#comp').style.display='none';$('#pin').style.display='none';$('#mi').replaceChildren(h('div',{class:'empty',text:'Select a chat to start messaging'}));document.body.classList.remove('chat')}
+function closeChatView(fromPop){
+ document.querySelectorAll('#mi video,#mi audio').forEach(stopMediaEl);
+ if(S.chat&&$('#txt'))S.drafts[S.chat]=$('#txt').value;
+ if(S.info){S.info=false;document.body.classList.remove('info-on')}
+ if(S.sel.size){S.sel.clear();selUpdate()}
+ $('#emo').classList.remove('on');
+ document.body.classList.remove('chat');
+ if(innerWidth<=820){S.chat=null;S.cd=null;drawList()}
+ if(!fromPop&&location.hash){try{history.replaceState({tgRoot:1},'','/app/')}catch(e){}}
+ ensureNavGuard();
+}
 async function openByQuery(q){try{const r=await api('/app/api/resolve',A({q}));openChat(r.dialog)}catch(e){toast(e.message)}}
 async function openById(chat,mid){let d=S.dl.find(x=>x.id===chat)||(S.adl||[]).find(x=>x.id===chat)||{id:chat,name:'Chat',type:'user'};await openChat(d,mid)}
 let _chatSeq=0;
 async function openChat(d,jump){
- document.querySelectorAll('#mi video,#mi audio').forEach(el=>{try{el.pause();el.removeAttribute('src');el.load()}catch(e){}});
+ document.querySelectorAll('#mi video,#mi audio').forEach(stopMediaEl);
  if(S.chat&&$('#txt'))S.drafts[S.chat]=$('#txt').value;
+ const wasChatOpen=document.body.classList.contains('chat');
  S.chat=d.id;S.cd=d;S.topic=0;S.topics=[];S.noMore=false;S.sel.clear();S.reply=null;S.edit=null;S.q='';$('#search').value='';S.gsearch=[];S.gres=null;
- if(!document.body.classList.contains('chat'))history.pushState({tgView:'chat'},'');
+ document.body.classList.add('chat');
+ if(!wasChatOpen||!history.state||!history.state.tgLayer)pushNav('chat');
  document.body.classList.add('chat');$('#cbar').style.display='flex';$('#tbar').style.display='none';$('#comp').style.display='block';$('#txt').value=S.drafts[d.id]||'';autosize();barUpdate();selUpdate();
  const cav=$('#cav');cav.replaceChildren(avatar(d.id,d.name,40,d.online));cav.onclick=$('#ctt').onclick=()=>toggleInfo();$('#ctt b').textContent=(d.verified?'✔ ':'')+(d.forum?'💬 ':'')+d.name;setStatus(d.type==='user'?(d.online?'online':'loading…'):'');drawList();
  // INSTANT 0ms UI switch: immediately show cached messages for this chat OR clear old chat bubbles right away!
@@ -1015,15 +1043,19 @@ async function shareFileMobile(m){
   await navigator.share({title:x.name||'Telegram File',text:x.name||'Telegram File',url:location.origin+sr.path+'?dl=1'});
  }catch(e){if(e.name!=='AbortError')downloadMsg(m)}
 }
-function closeFv(fromPop){const fv=$('#fv');if(fv.style.display==='none')return;fv.querySelectorAll('video,audio').forEach(stopMediaEl);fv.style.display='none';fv.dataset.dl='';$('#fvb').replaceChildren();$('#fvst').textContent='';if(!fromPop&&history.state&&history.state.fv)history.back()}
+function closeFv(fromPop){const fv=$('#fv');if(fv.style.display==='none')return;fv.querySelectorAll('video,audio').forEach(stopMediaEl);fv.style.display='none';fv.dataset.dl='';$('#fvb').replaceChildren();$('#fvst').textContent='';ensureNavGuard()}
 window.addEventListener('popstate',()=>{
- const ov=document.querySelector('.ov');if(ov){ov.remove();return}
- if($('#lb').style.display==='flex'){$('#lb').style.display='none';LB=null;return}
- if($('#fv').style.display!=='none'){closeFv(true);return}
- if($('#drawer').classList.contains('on')){closeDrawer();return}
- if(S.info){toggleInfo();return}
- if(S.sel.size){S.sel.clear();selUpdate();drawMsgs('keep');return}
- if(document.body.classList.contains('chat')){document.body.classList.remove('chat');return}
+ if(_ignoringPop){_ignoringPop=false;return}
+ if(MENU){closeMenu();ensureNavGuard();return}
+ const ovs=document.querySelectorAll('.ov');if(ovs.length){ovs[ovs.length-1].remove();ensureNavGuard();return}
+ if($('#lb').style.display==='flex'){$('#lb').style.display='none';$('#lb img').removeAttribute('src');LB=null;ensureNavGuard();return}
+ if($('#fv').style.display==='flex'){closeFv(true);return}
+ if($('#emo').classList.contains('on')){$('#emo').classList.remove('on');ensureNavGuard();return}
+ if($('#drawer').classList.contains('on')){closeDrawer();ensureNavGuard();return}
+ if(S.info){toggleInfo();ensureNavGuard();return}
+ if(S.sel.size){S.sel.clear();selUpdate();drawMsgs('keep');ensureNavGuard();return}
+ if(document.body.classList.contains('chat')){closeChatView(true);return}
+ if(S.archived||S.folder!=='all'||S.q){S.archived=false;S.folder='all';S.q='';$('#search').value='';S.gsearch=[];S.gres=null;drawFolders();drawList();ensureNavGuard();return}
 });
 $('#fvx').onclick=()=>closeFv();
 async function openFile(m){
@@ -1037,7 +1069,7 @@ async function openFile(m){
  $('#fvt').textContent=x.name||(kind==='image'?'Photo':kind==='video'?'Video':'File');
  $('#fvst').textContent=dlBadgeText(S.dls[k]||{state:'downloading',size:x.size},x);
  const d=$('#fvd');d.href='#';d.onclick=e=>{e.preventDefault();downloadMsg(m)};
- body.replaceChildren(h('div',{class:'mut',text:'⚡ Loading via multi-thread server cache…'}));$('#fv').style.display='flex';history.pushState({fv:1},'');
+ body.replaceChildren(h('div',{class:'mut',text:'⚡ Loading via multi-thread server cache…'}));$('#fv').style.display='flex';pushNav('viewer');
  const fail=async()=>{const er=await probeFile(url);body.replaceChildren(h('div',{style:'text-align:center;max-width:420px'},h('div',{style:'font-size:44px',text:'⚠'}),h('div',{text:er||"Can't preview this format directly"}),h('div',{class:'mut',style:'margin-top:8px',text:'The file is being cached on the server — click ⬇ Download to save it directly.'}),h('button',{style:'margin-top:12px;background:var(--acc);color:#fff;border-radius:8px;padding:10px 18px;font-weight:600',text:'⬇ Fast Download',on:{click(){downloadMsg(m)}}})))};
  if(kind==='image')body.replaceChildren(h('img',{alt:'',src:url,on:{error:fail}}));
  else if(kind==='video'){
@@ -1299,13 +1331,13 @@ async function drawAnalytics(b){
 let LB=null;
 function lightbox(id){const L=S.msgs.filter(m=>m.media&&m.media.kind==='photo');let i=L.findIndex(m=>m.id===id);if(i<0)return;const lb=$('#lb'),im=lb.querySelector('img');
  const show=()=>{const m=L[i];im.src=fileUrl({acc:S.acc,chat:S.chat,id:m.id},false);$('#lbc').textContent=(i+1)+' / '+L.length};
- const step=d=>{const n=i+d;if(n>=0&&n<L.length){i=n;show()}};LB={step};lb.style.display='flex';show();
- const close=()=>{lb.style.display='none';im.removeAttribute('src');LB=null};
+ const step=d=>{const n=i+d;if(n>=0&&n<L.length){i=n;show()}};LB={step};lb.style.display='flex';pushNav('photo');show();
+ const close=()=>{lb.style.display='none';im.removeAttribute('src');LB=null;ensureNavGuard()};
  lb.querySelector('.x').onclick=close;lb.onclick=e=>{if(e.target===lb)close()};$('#lbd').onclick=()=>downloadMsg(L[i]);
  const nv=lb.querySelectorAll('.nv');nv[0].onclick=()=>step(-1);nv[1].onclick=()=>step(1)}
 
 /* ---------- info panel & official user/group management ---------- */
-function toggleInfo(){S.info=!S.info;document.body.classList.toggle('info-on',S.info);if(S.info)drawInfo()}
+function toggleInfo(){S.info=!S.info;document.body.classList.toggle('info-on',S.info);if(S.info){pushNav('info');drawInfo()}else ensureNavGuard()}
 $('#cinfo').onclick=toggleInfo;
 function drawInfo(){
  const p=$('#info'),d=S.cd,ci=S.ci&&S.ci.id===S.chat?S.ci:null;if(!d){p.replaceChildren();return}
@@ -1443,7 +1475,7 @@ document.addEventListener('keydown',e=>{
 
 /* ---------- chat header menu / search ---------- */
 $('#cmore').onclick=e=>{const d=S.cd;if(!d)return;const r=e.currentTarget.getBoundingClientRect();chatMenu(r.left-150,r.bottom,d)};
-$('#back').onclick=()=>{document.body.classList.remove('chat')};
+$('#back').onclick=()=>closeChatView(false);
 $('#csr').onclick=()=>{const q=h('input',{placeholder:'Search in this chat…'}),res=h('div',{style:'max-height:50vh;overflow:auto'});let t;q.oninput=()=>{clearTimeout(t);t=setTimeout(async()=>{if(q.value.length<2)return;try{const r=(await api('/app/api/search?'+Q({acc:S.acc,q:q.value,chat:S.chat}))).messages;res.replaceChildren(...(r.length?r.map(m=>h('div',{class:'row',on:{click(){close();jumpTo(m.id)}}},h('div',{class:'rm'},h('div',{class:'r1'},h('b',{text:m.out?'You':m.from||''}),h('span',{class:'t',text:dayLabel(m.ts)+' '+tm(m.ts)})),h('div',{class:'mut',text:m.text||'📎 Media'})))):[h('div',{class:'empty',text:'No results'})]))}catch(e){res.replaceChildren(h('div',{class:'empty',text:e.message}))}},350)};const close=modal('🔍 Search in Chat',[q,res],[{t:'Close'}]);q.focus()};
 let st2;function onSearch(){S.q=$('#search').value.trim();S.gsearch=[];S.gres=null;drawList();clearTimeout(st2);if(S.q.length<2)return;st2=setTimeout(async()=>{try{if(/^(@|https?:\/\/t\.me\/|\+\d{8,})/.test(S.q)){S.gres=await api('/app/api/resolve',A({q:S.q}))}else S.gsearch=(await api('/app/api/search?'+Q({acc:S.acc,q:S.q}))).messages}catch(e){S.gsearch=[]}drawList()},400)}
 $('#search').oninput=onSearch;
@@ -1477,8 +1509,9 @@ function openDrawer(noRefresh){const dr=$('#dr'),c=cur(),st=S.st||{};dr.replaceC
   h('div',{class:'it',on:{click(){S.set.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';saveSet()}}},'🌙','Toggle Night Mode'),
   h('div',{class:'mut',style:'padding:12px 18px;font-size:12px',text:S.bw?`📊 ${(S.bw.used/1048576).toFixed(0)} MB used`+(S.bw.limit?` / ${(S.bw.limit/1073741824).toFixed(1)} GB`:' (unlimited)')+` (${S.bw.month})`:''})
  );
+ if(!$('#drawer').classList.contains('on'))pushNav('drawer');
  $('#drawer').classList.add('on');if(noRefresh!==true)loadStorage()}
-function closeDrawer(){$('#drawer').classList.remove('on')}$('#menu').onclick=openDrawer;$('#drawer').onclick=e=>{if(e.target.id==='drawer')closeDrawer()};
+function closeDrawer(){$('#drawer').classList.remove('on');ensureNavGuard()}$('#menu').onclick=openDrawer;$('#drawer').onclick=e=>{if(e.target.id==='drawer')closeDrawer()};
 async function switchAcc(id){if(id===S.acc)return;S.acc=id;LS.set('acc',id);S.chat=null;S.cd=null;S.dl=[];S.adl=[];S.archived=false;S.folder='all';drawAccBar();showEmpty();drawList();await loadDialogs()}
 function newChat(){const f=h('input',{placeholder:'@username, phone (+91…) or t.me/+invite link'}),q=h('input',{placeholder:'Search saved contacts…'}),list=h('div',{style:'max-height:36vh;overflow:auto'});let C=[];
  const draw=()=>list.replaceChildren(...C.filter(c=>c.name.toLowerCase().includes(q.value.toLowerCase())||(c.username&&c.username.toLowerCase().includes(q.value.toLowerCase()))).map(c=>h('div',{class:'row',on:{click(){close();openById(c.id,0)}}},avatar(c.id,c.name,38,c.online),h('div',{class:'rm'},h('b',{text:c.name}),h('div',{class:'mut',style:'font-size:13px',text:(c.username?'@'+c.username:'')+(c.phone?' · +'+c.phone:'')})))));
@@ -1673,18 +1706,18 @@ async function runPwaDiagnostics(diagBox){
  const svgIcon=document.querySelector('link[rel="icon"][type="image/svg+xml"]');
  add(!svgIcon,'Icon Tag Conflict Check',svgIcon?'WARNING: SVG icon tag found in <head> (causes WebAPK "Installing..." to fail!)':'Clean (PNG icons only)');
  add(!/\(\d+\)/.test(document.title),'App Title Check',`document.title = "${document.title}"`);
- // 6. beforeinstallprompt status
- add(isStandaloneApp()?true:(deferredPrompt?true:'warn'),'Install Prompt (beforeinstallprompt)',isStandaloneApp()?'Already running as Installed App':(deferredPrompt?'READY (Native WebAPK prompt captured!)':'Not fired yet (Either already installed, or Chrome cached old state — check chrome://webapks below)'));
- // 7. Server-side WebAPK request log
+ // 6. beforeinstallprompt & Server-side WebAPK request log
  try{
   const dg=await api('/app/api/pwa/diag');
   const logs=dg.logs||[];
-  const webapkHits=logs.filter(l=>l.is_webapk_server);
-  add(webapkHits.length>0?true:'warn','Google WebAPK Server Hits',webapkHits.length?`Google WebAPK builder fetched ${webapkHits.length} file(s) from server`:`No Google WebAPK builder hits yet (${logs.length} browser hits recorded)`);
+  const webapkHits=logs.filter(l=>l.is_webapk_server||l.path.includes('maskable')||l.path.includes('manifest.json'));
+  const isReadyOrInstalled=isStandaloneApp()||!!deferredPrompt||webapkHits.length>0;
+  add(isReadyOrInstalled,'Install Prompt / App Status',isStandaloneApp()?'Running as Standalone Native App (WebAPK)':(deferredPrompt?'READY (1-Click Native WebAPK prompt active)':(webapkHits.length?'Manifest & Maskable APK Icons fetched by Chrome Installer (App Installed / Ready!)':'Waiting for Chrome install check')));
+  add(webapkHits.length>0,'WebAPK Installer & Manifest Hits',webapkHits.length?`Verified (${webapkHits.length} installer/manifest fetch hits recorded)`:`Waiting (${logs.length} hits)`);
   if(logs.length){
    lines.push(h('div',{style:'margin-top:6px;font-size:11px;font-family:monospace;background:var(--bg);padding:6px;border-radius:6px;max-height:110px;overflow:auto'},
     h('b',{style:'display:block;margin-bottom:3px;color:var(--acc)',text:'Recent Server PWA Requests:'}),
-    ...logs.slice(0,10).map(l=>h('div',{text:`[${tm(l.ts)}] ${l.method} ${l.path} · ${l.is_webapk_server?'🤖 WebAPK':'📱 Browser'} (${l.ua.slice(0,38)}…)`}))
+    ...logs.slice(0,10).map(l=>h('div',{text:`[${tm(l.ts)}] ${l.method} ${l.path} · ${(l.is_webapk_server||l.path.includes('maskable'))?'🤖 WebAPK Installer':'📱 Browser'}`}))
    ));
   }
  }catch(e){}
