@@ -524,9 +524,17 @@ class Manager:
                 {'_id': 'lease', '$or': [{'owner': self.instance}, {'until': {'$lt': now}}]},
                 {'$set': {'owner': self.instance, 'until': now + LEASE_SECS}},
                 upsert=True, return_document=ReturnDocument.AFTER)
-            return bool(r and r.get('owner') == self.instance)
-        except Exception:
+            if r and r.get('owner') == self.instance:
+                self._lease_miss = 0
+                return True
             return False
+        except Exception as e:
+            # DuplicateKeyError means another active owner holds {'_id': 'lease'} with until >= now
+            if 'DuplicateKeyError' in type(e).__name__ or 'E11000' in str(e):
+                self._lease_miss = getattr(self, '_lease_miss', 0) + 1
+                return self._lease_miss < 2
+            # Transient MongoDB Atlas network blip / timeout -> keep existing lease state so accounts are NOT stopped!
+            return True if self.lease else False
 
     def _release(self):
         try:

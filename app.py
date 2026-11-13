@@ -159,6 +159,26 @@ if __name__ == "__main__":
     print(f"[web] listening on ports {', '.join(ports)} | RAM limit: {_mem or '?'} MB", flush=True)
 
     # 2) then load the app and start the heavy parts one by one
+
+def _keepalive_loop():
+    """Self-pings public WEB_URL/healthz every 3 minutes to prevent Koyeb Eco scale-to-zero sleep
+    and runs periodic garbage collection to prevent 512 MB RAM OOM restarts."""
+    import gc, urllib.request
+    while True:
+        time.sleep(180)
+        try:
+            gc.collect()
+        except Exception:
+            pass
+        u = os.environ.get("WEB_URL", "").strip().rstrip("/")
+        if u and u.startswith("http") and "localhost" not in u and "127.0.0.1" not in u:
+            try:
+                req = urllib.request.Request(f"{u}/healthz", headers={"User-Agent": "Koyeb-KeepAlive/1.0"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    r.read()
+            except Exception:
+                pass
+
     def _boot():
         try:
             load()
@@ -167,6 +187,7 @@ if __name__ == "__main__":
             time.sleep(3)
             hub_app.start_background()
             print("[boot] ready — background services started", flush=True)
+            threading.Thread(target=_keepalive_loop, daemon=True, name="keepalive").start()
         except BaseException:
             traceback.print_exc()
             print("[boot] FAILED — exiting so the platform restarts / shows the error", flush=True)
