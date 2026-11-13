@@ -1926,7 +1926,7 @@ LOGIN_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#161b22"><meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.json">
-<link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/icon-512.png" sizes="512x512" type="image/png"><link rel="apple-touch-icon" href="/icon-192.png">
 <title>Backup Browser — Login</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -2203,7 +2203,7 @@ EXPLORER_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#191919"><meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.json"><link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.json?v=5"><link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/icon-512.png" sizes="512x512" type="image/png"><link rel="apple-touch-icon" href="/icon-192.png">
 <title>Backup Explorer</title>
 <style>
 :root{--bg:#f3f3f3;--content:#fff;--text:#1b1b1b;--muted:#6b6b6b;--line:#e1e1e1;--hover:#eaf3fb;--sel:#cce8ff;--selb:#99d1ff;--menu:#fff;--shadow:0 8px 24px rgba(0,0,0,.18);--acc:#0067c0}
@@ -2646,9 +2646,13 @@ function openItem(i) {
 /* ---------- viewer (same tab, Close button, Back/Esc also closes) ---------- */
 const viewer = $('#viewer');
 function viewList() { return S.items.filter(x => x.type === 'file' && x.view); }
+function stopAllViewerMedia() {
+  $$('#vbody video, #vbody audio, #preview video, #preview audio').forEach(v => { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {} });
+}
 function showViewer(i) {
+  stopAllViewerMedia();
   const url = '/stream/' + i.id + '/' + encodeURIComponent(i.name) + gq(), k = kind(i);
-  const body = k === 'video' ? '<video controls autoplay playsinline src="' + url + '"></video>'
+  const body = k === 'video' ? '<video controls autoplay playsinline style="width:min(92vw,960px);max-height:82vh;background:#000" src="' + url + '"></video>'
     : k === 'audio' ? '<audio controls autoplay src="' + url + '"></audio>'
     : k === 'image' ? '<img alt="" src="' + url + '">'
     : '<iframe src="' + url + '"></iframe>';
@@ -2672,6 +2676,7 @@ function openViewer(i) {
 }
 function closeViewer(fromPop) {
   if (viewer.hidden) return;
+  stopAllViewerMedia();
   viewer.hidden = true;
   $('#vbody').innerHTML = '';                 // stops video/audio
   if (!fromPop && history.state && history.state.viewer) { S.closing = true; history.back(); }

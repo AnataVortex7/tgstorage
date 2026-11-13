@@ -3,8 +3,8 @@
 ENTER_PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#151f2b"><meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json">
-<link rel="icon" href="/app/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/app/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/app/icon-192.png">
+<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json?v=5">
+<link rel="icon" href="/app/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/app/icon-512.png" sizes="512x512" type="image/png"><link rel="apple-touch-icon" href="/app/icon-192.png">
 <title>Telegram Hub Pro</title></head><body style="font:15px system-ui;background:#0b121a;color:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px">
 <div id="box" style="background:#151f2b;border:1px solid #223042;border-radius:16px;padding:28px;max-width:380px;width:100%;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.5)">⏳ Connecting & preparing app…</div>
 <script>
@@ -45,8 +45,8 @@ UI_PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#151f2b"><meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json"><link rel="icon" href="/app/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/app/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/app/icon-192.png">
-<title>Telegram</title>
+<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json?v=5"><link rel="icon" href="/app/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/app/icon-512.png" sizes="512x512" type="image/png"><link rel="apple-touch-icon" href="/app/icon-192.png">
+<title>TG Hub</title>
 <style>
 :root{--bg:#e4ebf0;--side:#ffffff;--in:#ffffff;--out:#e3fdd6;--acc:#2481cc;--acc2:#1a6fb3;--fg:#0f172a;--mut:#64748b;--bd:#e2e8f0;--hov:#f1f5f9;--sel:#2481cc;--bdg:#2481cc;--bdgm:#94a3b8;--ink:#fff;--sh:0 1px 3px rgba(0,0,0,.08);--pat:rgba(0,0,0,.035);--glass:rgba(255,255,255,.92)}
 [data-theme=dark]{--bg:#0b121a;--side:#151f2b;--in:#1c2938;--out:#244d75;--acc:#5eb5f7;--acc2:#3b9de8;--fg:#f1f5f9;--mut:#7c90a6;--bd:#0d1620;--hov:#1e2c3c;--sel:#25496d;--bdg:#3b9de8;--bdgm:#3a4f66;--ink:#fff;--sh:0 2px 5px rgba(0,0,0,.35);--pat:rgba(255,255,255,.028);--glass:rgba(21,31,43,.92)}
@@ -105,7 +105,7 @@ button,input,textarea,select{font:inherit;color:inherit}button{cursor:pointer;ba
 .sp-l{background:#888;color:transparent;border-radius:4px;cursor:pointer;user-select:none}.sp-l.rv{background:none;color:inherit}
 .meta{float:right;margin:6px 0 -2px 10px;font-size:11px;color:var(--mut);display:flex;gap:4px;align-items:center;height:14px}.out .meta{color:#5a9a56}[data-theme=dark] .out .meta{color:#93bee8}
 .tk{color:var(--acc);letter-spacing:-5px;margin-right:5px;font-weight:700}.fw{color:var(--acc);font-size:12.5px;font-weight:600;margin-bottom:2px}.rp{border-left:3px solid var(--acc);padding:2px 8px;margin-bottom:4px;cursor:pointer;border-radius:4px;background:rgba(0,0,0,.06)}.rp b{display:block;color:var(--acc);font-size:12.5px}.rp span{display:block;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
-.ph,.vid{position:relative;border-radius:10px;overflow:hidden;margin:-2px -4px 4px;cursor:pointer;background:rgba(0,0,0,.18);min-width:190px;min-height:100px}.ph img,.vid img,.vid video{display:block;width:100%;max-height:440px;object-fit:cover}.vid video{object-fit:contain;background:#000}
+.ph,.vid{position:relative;border-radius:10px;overflow:hidden;margin:-2px -4px 4px;cursor:pointer;background:rgba(0,0,0,.18);min-width:220px;min-height:120px}.vid.playing{min-width:min(360px,78vw);width:100%;max-width:520px;background:#000;cursor:default;aspect-ratio:auto!important}.ph img,.vid img,.vid video{display:block;width:100%;max-height:440px;object-fit:cover}.vid video{object-fit:contain;background:#000;min-height:190px;width:100%}
 .play{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}.play i{width:56px;height:56px;border-radius:50%;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);color:#fff;display:flex;align-items:center;justify-content:center;font-style:normal;font-size:22px;box-shadow:0 4px 14px rgba(0,0,0,.35)}
 .chip{position:absolute;left:8px;top:8px;background:rgba(0,0,0,.62);backdrop-filter:blur(4px);color:#fff;border-radius:10px;padding:2px 8px;font-size:11.5px;font-weight:500}
 .vbar{display:flex;gap:6px;align-items:center;justify-content:space-between;padding:5px 8px;background:rgba(0,0,0,.78);color:#fff;font-size:12px}
@@ -140,7 +140,7 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
 @media(max-width:820px){#side{width:100%;min-width:0}#main{position:absolute;inset:0;transform:translateX(100%);transition:transform .2s;z-index:14}.chat #main{transform:none}#back{display:inline-flex}.info-on #info{position:absolute;inset:0;width:100%;z-index:20}.m{max-width:86%}.qact{display:none}}
 #fv{position:fixed;inset:0;z-index:75;background:rgba(0,0,0,.92);display:none;flex-direction:column;color:#fff}
 #fv .vh{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(0,0,0,.65)}#fv .vh b{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#fv .vh .ib{color:#fff;text-decoration:none}
-#fv .vb{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px;overflow:auto;flex-direction:column;gap:8px}#fv video,#fv img{max-width:100%;max-height:84vh;border-radius:8px}#fv iframe{width:100%;height:100%;border:0;background:#fff;border-radius:8px}
+#fv .vb{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:12px;overflow:auto;flex-direction:column;gap:8px}#fv video{width:min(92vw,960px);max-height:82vh;min-height:240px;background:#000;border-radius:8px;display:block}#fv img{max-width:100%;max-height:84vh;border-radius:8px}#fv iframe{width:100%;height:100%;border:0;background:#fff;border-radius:8px}
 #fv pre{align-self:stretch;width:100%;margin:0;background:var(--side);color:var(--fg);padding:12px;border-radius:8px;overflow:auto;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monospace,Consolas,monospace}
 .file{cursor:pointer}.stb{border-top:1px solid var(--bd);padding:10px 18px}.stb button{display:block;text-align:left;padding:6px 0;color:var(--acc);font-weight:500}
 .dl-card{background:var(--hov);border-radius:10px;padding:9px 12px;display:flex;flex-direction:column;gap:5px}
@@ -338,7 +338,7 @@ function drawList(){
  if(S.q.length>=2){if(S.gres&&S.gres.dialog)rows.push(h('div',{class:'sec',text:'Global Match'}),dialogRow(S.gres.dialog));
   if(S.gsearch.length){rows.push(h('div',{class:'sec',text:'Messages'}));for(const m of S.gsearch)rows.push(h('div',{class:'row',on:{click(){openById(m.chat,m.id)}}},avatar(m.chat,m.chat_name),h('div',{class:'rm'},h('div',{class:'r1'},h('b',{text:m.chat_name||'Chat'}),h('span',{class:'t',text:listTime(m.ts)})),h('div',{class:'r2'},h('span',{class:'mut',text:m.text||'📎 Media'})))))}}
  if(!rows.length)rows.push(h('div',{class:'empty',text:S.archived?'No archived chats yet':(S.dl.length?'No chats found':'Loading…')}));$('#list').replaceChildren(...rows);
- const n=S.dl.reduce((a,d)=>a+(d.muted?0:d.unread),0);document.title=(n?`(${n}) `:'')+'Telegram'}
+ const n=S.dl.reduce((a,d)=>a+(d.muted?0:d.unread),0);document.title='TG Hub';if(navigator.setAppBadge){try{if(n)navigator.setAppBadge(n).catch(()=>{});else navigator.clearAppBadge().catch(()=>{})}catch(e){}}}
 function dialogRow(d){return h('div',{class:'row',on:{click(){openChat(d)}}},avatar(d.id,d.name),h('div',{class:'rm'},h('div',{class:'r1'},h('b',{text:d.name})),h('div',{class:'r2'},h('span',{class:'mut',text:d.username?'@'+d.username:d.type}))))}
 async function loadDialogs(){
  if(!S.acc)return;
@@ -471,8 +471,18 @@ async function holdWakeLock(on){
  if(!('wakeLock' in navigator))return;
  try{if(on&&!_wakeLock)_wakeLock=await navigator.wakeLock.request('screen');else if(!on&&_wakeLock){await _wakeLock.release();_wakeLock=null}}catch(e){}
 }
+function stopMediaEl(el){
+ if(!el)return;
+ try{el.pause();el.removeAttribute('src');el.load()}catch(e){}
+ if('mediaSession' in navigator){try{navigator.mediaSession.setActionHandler('play',null);navigator.mediaSession.setActionHandler('pause',null)}catch(e){}}
+ holdWakeLock(false);
+}
+function pauseAllMedia(exceptEl){
+ document.querySelectorAll('video,audio').forEach(el=>{if(el!==exceptEl){try{el.pause()}catch(e){}}});
+}
 function bindMediaSession(el,m){
  el.addEventListener('play',()=>{
+  pauseAllMedia(el);
   holdWakeLock(true);
   if('mediaSession' in navigator&&window.MediaMetadata){
    const x=m.media||{};
@@ -481,7 +491,7 @@ function bindMediaSession(el,m){
     artist:(S.cd&&S.cd.name)||m.from||'Telegram Hub',
     artwork:[{src:'/app/icon-192.png',sizes:'192x192',type:'image/png'}]
    });
-   navigator.mediaSession.setActionHandler('play',()=>el.play());
+   navigator.mediaSession.setActionHandler('play',()=>{if(document.body.contains(el))el.play();else stopMediaEl(el)});
    navigator.mediaSession.setActionHandler('pause',()=>el.pause());
   }
  });
@@ -499,19 +509,30 @@ function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:
   if(x.kind==='videonote')w.style.cssText+=';border-radius:50%;width:220px;height:220px';
   const start=async(e)=>{
    if(e)e.stopPropagation();
-   // Immediately trigger multi-threaded server download in background AND start streaming video right away!
-   serverDownload(m,false).catch(()=>{});
-   const v=h('video',{src:file,playsinline:true,preload:'auto'});bindMediaSession(v,m);
-   if(x.kind==='gif'){v.loop=true;v.muted=true;v.autoplay=true}else v.controls=true;
+   pauseAllMedia(null);
+   const tgt=document.querySelector('.vid[data-dl="'+k+'"]')||w;
+   tgt.classList.add('playing');
+   tgt.dataset.activeVideo='1';
+   if(x.kind!=='videonote')tgt.style.aspectRatio='auto';
+   const v=h('video',{src:file,playsinline:true,preload:'auto',controls:x.kind!=='gif',autoplay:true});
+   bindMediaSession(v,m);
+   if(x.kind==='gif'){v.loop=true;v.muted=true}
+   const codecWarn=h('div',{style:'display:none;background:#7c2d12;color:#ffedd5;padding:6px 8px;font-size:12px;justify-content:space-between;align-items:center;gap:6px'},
+    h('span',{text:'⚠ या व्हिडिओचा Codec (HEVC/MKV) ब्राउझरमध्ये दिसत नाही (फक्त आवाज येतोय).'}),
+    h('button',{style:'background:#ea580c;color:#fff;padding:3px 8px;border-radius:6px;font-weight:700;white-space:nowrap',text:'🎬 VLC / Theatre मध्ये उघडा',on:{click(ev){ev.stopPropagation();v.pause();shareLinkModal(m)}}})
+   );
+   v.addEventListener('loadeddata',()=>{if(v.videoWidth===0&&v.duration>0)codecWarn.style.display='flex'});
    const spdBtn=h('button',{text:'1x',title:'Playback speed',on:{click(ev){ev.stopPropagation();const rates=[1,1.25,1.5,1.75,2,2.5,0.5];const nx=rates[(rates.indexOf(v.playbackRate)+1)%rates.length];v.playbackRate=nx;spdBtn.textContent=nx+'x'}}});
+   const thBtn=h('button',{text:'⛶',title:'Open in Big Theatre Player',on:{click(ev){ev.stopPropagation();stopMediaEl(v);openFile(m)}}});
    const snapBtn=h('button',{text:'📸',title:'Capture HD Screenshot of Video Frame',on:{click(ev){ev.stopPropagation();snapVideo(v,x.name||('video_'+m.id))}}});
    const pipBtn=h('button',{text:'⧉ PiP',title:'Picture in Picture',on:{click(ev){ev.stopPropagation();if(v.requestPictureInPicture)v.requestPictureInPicture().catch(()=>{})}}});
    const shBtn=h('button',{text:'🔗',title:'VLC / Public Share Link',on:{click(ev){ev.stopPropagation();shareLinkModal(m)}}});
    const dlBtn=h('button',{text:'⬇ Save',title:'Fast Download from Server',on:{click(ev){ev.stopPropagation();downloadMsg(m)}}});
-   const bar=x.kind==='gif'?null:h('div',{class:'vbar'},h('span',{class:'dlp',text:dlBadgeText(S.dls[k]||{state:'downloading',size:x.size},x)}),h('div',{style:'display:flex;gap:4px'},spdBtn,snapBtn,pipBtn,shBtn,dlBtn));
-   const tgt=document.querySelector('.vid[data-dl="'+k+'"]')||w;
-   tgt.replaceChildren(v,bar);tgt.onclick=null;
+   const bar=x.kind==='gif'?null:h('div',{class:'vbar'},h('span',{class:'dlp',text:dlBadgeText(S.dls[k]||{state:'downloading',size:x.size},x)}),h('div',{style:'display:flex;gap:4px'},spdBtn,thBtn,snapBtn,pipBtn,shBtn,dlBtn));
+   tgt.replaceChildren(v,codecWarn,bar);tgt.onclick=null;
    const p=v.play&&v.play();if(p&&p.catch)p.catch(()=>{});
+   // Start multi-threaded server caching after video element is mounted
+   serverDownload(m,false).catch(()=>{});
   };
   if(S.set.previews)w.append(h('img',{alt:'',loading:'lazy',src:th,on:{error(e){e.target.remove()}}}));else w.append(h('div',{style:'height:140px'}));
   const stTxt=st.state==='cached'?'⚡ Cached · '+sz(x.size):(st.state==='downloading'?'⚡ '+pctOf(st)+'% · '+spd(st.speed):(x.kind==='gif'?'GIF':dur(x.dur)+' · '+sz(x.size)));
@@ -554,10 +575,10 @@ function fileCard(m,x,file){
  );
 }
 function setDl(k,st){
- const prev=S.dls[k];S.dls[k]=st;
+ S.dls[k]=st;
  updateDlCounter();
  const[a,c]=k.split(':');if(a!==S.acc||String(c)!==String(S.chat))return;
- if(!prev||prev.state!==st.state)drawMsgs('keep');else updDl(k);
+ updDl(k);
 }
 function updateDlCounter(){
  const active=Object.entries(S.dls).filter(([_,x])=>x&&x.state==='downloading');
@@ -581,10 +602,14 @@ function updateDlCounter(){
 function updDl(k){
  const st=S.dls[k];if(!st)return;
  document.querySelectorAll('[data-dl="'+k+'"]').forEach(el=>{
-  const p=el.querySelector('.dlp'),b=el.querySelector('.dlb i'),pct=pctOf(st),vid=el.classList.contains('vid');
+  const p=el.querySelector('.dlp'),b=el.querySelector('.dlb i'),fi=el.querySelector('.fi'),pct=pctOf(st),vid=el.classList.contains('vid');
   if(p){
    p.textContent=vid?dlBadgeText(st,{size:st.size}):dlText(st,{size:st.size});
    if(vid)p.style.display='block';
+  }
+  if(fi){
+   fi.textContent=st.state==='cached'?'✔':(st.state==='downloading'?'✕':'⬇');
+   fi.title=st.state==='downloading'?'Cancel server download':'Fast Download to Browser';
   }
   if(b){b.parentNode.style.display=st.state==='downloading'?'block':'none';b.style.width=pct+'%'}
  });
@@ -627,11 +652,10 @@ async function refreshDlStatus(){
   for(const id of ids.slice(0,60)){
    const it=r.items[id]||{state:'none'},k=S.acc+':'+S.chat+':'+id;
    S.dls[k]=it;
-   if(it.state==='cached'||it.state==='downloading')ch=true;
+   if(it.state==='cached'||it.state==='downloading')updDl(k);
    if(it.state==='downloading')watchDl(k);
   }
   updateDlCounter();
-  if(ch)drawMsgs('keep');
  }catch(e){}
  dlBusy=false;
 }
@@ -696,8 +720,38 @@ function drawMsgs(mode,jumpId){const box=$('#msgs'),mi=$('#mi'),keep=box.scrollH
   const last=!nxt||nxt.service||nxt.from_id!==m.from_id||nxt.out!==m.out||nxt.ts-m.ts>=300||dayKey(nxt.ts)!==dayKey(m.ts);
   kids.push(bubbleRow(m,!sameP,last,!sameP,album));prev=L[end];i=end}
  if(!kids.length)kids.push(h('div',{class:'empty',text:'No messages here yet'}));
- const live=[...mi.querySelectorAll('video,audio')].filter(e=>!e.paused&&!e.ended&&e.closest('[data-id]')).map(e=>[e.closest('[data-id]').getAttribute('data-id'),e]);mi.replaceChildren(...kids);
- for(const[id,e]of live){try{const row=mi.querySelector('[data-id="'+id+'"]');if(!row)continue;if(e.tagName==='VIDEO'){const sl=row.querySelector('.vid');if(sl){sl.replaceChildren(e);sl.onclick=null}}else{const sl=row.querySelector('audio');if(sl)sl.replaceWith(e)}}catch(er){}}
+ const activeVids=new Map();
+ mi.querySelectorAll('.vid[data-active-video="1"]').forEach(vw=>{
+  const dk=vw.getAttribute('data-dl'),v=vw.querySelector('video');
+  if(dk&&v&&!v.ended)activeVids.set(dk,{node:vw,wasPlaying:!v.paused});
+ });
+ const activeAuds=new Map();
+ mi.querySelectorAll('audio').forEach(au=>{
+  const row=au.closest('[data-id]');
+  if(row&&!au.paused&&!au.ended)activeAuds.set(row.getAttribute('data-id'),au);
+ });
+ mi.querySelectorAll('video,audio').forEach(el=>{
+  const vw=el.closest('.vid[data-active-video="1"]');
+  if(vw&&activeVids.has(vw.getAttribute('data-dl')))return;
+  const row=el.closest('[data-id]');
+  if(el.tagName==='AUDIO'&&row&&activeAuds.has(row.getAttribute('data-id')))return;
+  stopMediaEl(el);
+ });
+ mi.replaceChildren(...kids);
+ for(const[dk,info]of activeVids){
+  try{
+   const sl=mi.querySelector('.vid[data-dl="'+dk+'"]');
+   if(sl){sl.replaceWith(info.node);if(info.wasPlaying){const v=info.node.querySelector('video');if(v&&v.paused){const p=v.play();if(p&&p.catch)p.catch(()=>{})}}}
+   else stopMediaEl(info.node.querySelector('video'));
+  }catch(er){}
+ }
+ for(const[id,au]of activeAuds){
+  try{
+   const row=mi.querySelector('[data-id="'+id+'"]'),sl=row&&row.querySelector('audio');
+   if(sl){sl.replaceWith(au);if(au.paused){const p=au.play();if(p&&p.catch)p.catch(()=>{})}}
+   else stopMediaEl(au);
+  }catch(er){}
+ }
  if(mode==='unread'){const u=mi.querySelector('.unr');if(u&&u.scrollIntoView)u.scrollIntoView({block:'start'});else box.scrollTop=box.scrollHeight}
  else if(mode==='bottom')box.scrollTop=box.scrollHeight;else if(mode==='jump'){const el=mi.querySelector(`[data-id="${jumpId}"]`);if(el)flash(el)}else box.scrollTop=box.scrollHeight-keep;onScroll();setTimeout(refreshDlStatus,0)}
 function replaceMsg(m){const i=S.msgs.findIndex(x=>x.id===m.id);if(i>=0)S.msgs[i]=m;drawMsgs('keep')}
@@ -961,7 +1015,7 @@ async function shareFileMobile(m){
   await navigator.share({title:x.name||'Telegram File',text:x.name||'Telegram File',url:location.origin+sr.path+'?dl=1'});
  }catch(e){if(e.name!=='AbortError')downloadMsg(m)}
 }
-function closeFv(fromPop){const fv=$('#fv');if(fv.style.display==='none')return;fv.style.display='none';fv.dataset.dl='';$('#fvb').replaceChildren();$('#fvst').textContent='';if(!fromPop&&history.state&&history.state.fv)history.back()}
+function closeFv(fromPop){const fv=$('#fv');if(fv.style.display==='none')return;fv.querySelectorAll('video,audio').forEach(stopMediaEl);fv.style.display='none';fv.dataset.dl='';$('#fvb').replaceChildren();$('#fvst').textContent='';if(!fromPop&&history.state&&history.state.fv)history.back()}
 window.addEventListener('popstate',()=>{
  const ov=document.querySelector('.ov');if(ov){ov.remove();return}
  if($('#lb').style.display==='flex'){$('#lb').style.display='none';LB=null;return}
@@ -974,6 +1028,8 @@ window.addEventListener('popstate',()=>{
 $('#fvx').onclick=()=>closeFv();
 async function openFile(m){
  const x=m.media;if(!x)return;
+ pauseAllMedia(null);
+ $('#fvb').querySelectorAll('video,audio').forEach(stopMediaEl);
  const k=dlKey(m),url=fileUrl({acc:S.acc,chat:S.chat,id:m.id},false),kind=fileKind(x),body=$('#fvb');
  // Immediately start caching the viewed file on the server with multi-threading!
  serverDownload(m,false).catch(()=>{});
@@ -985,8 +1041,14 @@ async function openFile(m){
  const fail=async()=>{const er=await probeFile(url);body.replaceChildren(h('div',{style:'text-align:center;max-width:420px'},h('div',{style:'font-size:44px',text:'⚠'}),h('div',{text:er||"Can't preview this format directly"}),h('div',{class:'mut',style:'margin-top:8px',text:'The file is being cached on the server — click ⬇ Download to save it directly.'}),h('button',{style:'margin-top:12px;background:var(--acc);color:#fff;border-radius:8px;padding:10px 18px;font-weight:600',text:'⬇ Fast Download',on:{click(){downloadMsg(m)}}})))};
  if(kind==='image')body.replaceChildren(h('img',{alt:'',src:url,on:{error:fail}}));
  else if(kind==='video'){
-  const v=h('video',{src:url,controls:true,autoplay:true,playsinline:true,on:{error:fail}});bindMediaSession(v,m);
-  body.replaceChildren(v);
+  const v=h('video',{src:url,controls:true,autoplay:true,playsinline:true,preload:'auto',on:{error:fail}});bindMediaSession(v,m);
+  const warn=h('div',{style:'display:none;background:#7c2d12;color:#ffedd5;padding:8px 12px;border-radius:8px;font-size:13px;gap:10px;align-items:center'},
+   h('span',{text:'⚠ या व्हिडिओचा Codec (HEVC/MKV) ब्राउझरमध्ये सपोर्टेड नाही (फक्त आवाज येतोय).'}),
+   h('button',{style:'background:#ea580c;color:#fff;padding:5px 12px;border-radius:6px;font-weight:700',text:'🎬 VLC मध्ये स्ट्रीम करा',on:{click(){v.pause();shareLinkModal(m)}}})
+  );
+  v.addEventListener('loadeddata',()=>{if(v.videoWidth===0&&v.duration>0)warn.style.display='flex'});
+  body.replaceChildren(v,warn);
+  const p=v.play&&v.play();if(p&&p.catch)p.catch(()=>{});
  }
  else if(kind==='audio')body.replaceChildren(h('audio',{src:url,controls:true,autoplay:true,style:'width:min(92vw,520px)',on:{error:fail}}));
  else if(kind==='pdf'){const er=await probeFile(url);if(er)return fail();body.replaceChildren(h('iframe',{src:url}))}
@@ -1577,8 +1639,60 @@ window.addEventListener('appinstalled',()=>{
  toast('✅ Real Native App (WebAPK) installed on your device!');
 });
 $('#pwa-btn').onclick=()=>installPwaModal();
+async function runPwaDiagnostics(diagBox){
+ diagBox.replaceChildren(h('div',{class:'mut',style:'font-size:12.5px',text:'🔍 Running live PWA & WebAPK diagnostics…'}));
+ const lines=[];
+ const add=(ok,title,detail)=>lines.push(h('div',{style:'font-size:12px;padding:4px 0;border-bottom:1px solid var(--bd)'},h('b',{style:'color:'+(ok===true?'#10b981':(ok===false?'#ef4444':'#f59e0b')),text:(ok===true?'✔ ':ok===false?'✖ ':'⚠ ')+title+': '}),h('span',{text:detail})));
+ // 1. URL & HTTPS check
+ const isHttps=location.protocol==='https:'||location.hostname==='localhost'||location.hostname==='127.0.0.1';
+ add(isHttps,'HTTPS / Secure Context',`${location.protocol}//${location.host}${location.pathname}`);
+ const inScope=location.pathname.startsWith('/app');
+ add(inScope,'URL Path in Scope',location.pathname+(location.pathname==='/app'?' (Tip: /app/ is preferred)':''));
+ // 2. Service Worker check
+ if('serviceWorker' in navigator){
+  try{
+   const reg=await navigator.serviceWorker.getRegistration('/app/');
+   const ctrl=!!navigator.serviceWorker.controller;
+   add(!!reg&&ctrl,'Service Worker',reg?(`Registered (scope: ${reg.scope}, state: ${(reg.active&&reg.active.state)||'installing'}, controller: ${ctrl?'YES':'NO — tap Reload button above'})`):'NOT registered');
+  }catch(e){add(false,'Service Worker Error',e.message)}
+ }else add(false,'Service Worker','Not supported by this browser');
+ // 3. Manifest fetch & JSON parse check
+ try{
+  const mr=await fetch('/app/manifest.json?v=5',{cache:'no-store'});
+  const mj=await mr.json();
+  add(mr.ok&&!!mj.name,'Manifest (/app/manifest.json)',`HTTP ${mr.status} · name="${mj.name}" · short_name="${mj.short_name}" · start_url="${mj.start_url}" · icons=${(mj.icons||[]).length}`);
+ }catch(e){add(false,'Manifest Fetch Failed',e.message)}
+ // 4. Icon 192 & 512 bitmap decode check
+ for(const sz0 of [192,512]){
+  try{
+   const dim=await new Promise((res,rej)=>{const im=new Image();im.onload=()=>res(`${im.naturalWidth}x${im.naturalHeight}`);im.onerror=()=>rej(new Error('Image decode failed'));im.src=`/app/icon-${sz0}.png?t=${Date.now()}`});
+   add(dim===`${sz0}x${sz0}`,`Icon ${sz0}x${sz0} PNG`,dim+' valid PNG bitmap');
+  }catch(e){add(false,`Icon ${sz0}x${sz0} PNG`,e.message)}
+ }
+ // 5. Check document.title & SVG icon conflict
+ const svgIcon=document.querySelector('link[rel="icon"][type="image/svg+xml"]');
+ add(!svgIcon,'Icon Tag Conflict Check',svgIcon?'WARNING: SVG icon tag found in <head> (causes WebAPK "Installing..." to fail!)':'Clean (PNG icons only)');
+ add(!/\(\d+\)/.test(document.title),'App Title Check',`document.title = "${document.title}"`);
+ // 6. beforeinstallprompt status
+ add(isStandaloneApp()?true:(deferredPrompt?true:'warn'),'Install Prompt (beforeinstallprompt)',isStandaloneApp()?'Already running as Installed App':(deferredPrompt?'READY (Native WebAPK prompt captured!)':'Not fired yet (Either already installed, or Chrome cached old state — check chrome://webapks below)'));
+ // 7. Server-side WebAPK request log
+ try{
+  const dg=await api('/app/api/pwa/diag');
+  const logs=dg.logs||[];
+  const webapkHits=logs.filter(l=>l.is_webapk_server);
+  add(webapkHits.length>0?true:'warn','Google WebAPK Server Hits',webapkHits.length?`Google WebAPK builder fetched ${webapkHits.length} file(s) from server`:`No Google WebAPK builder hits yet (${logs.length} browser hits recorded)`);
+  if(logs.length){
+   lines.push(h('div',{style:'margin-top:6px;font-size:11px;font-family:monospace;background:var(--bg);padding:6px;border-radius:6px;max-height:110px;overflow:auto'},
+    h('b',{style:'display:block;margin-bottom:3px;color:var(--acc)',text:'Recent Server PWA Requests:'}),
+    ...logs.slice(0,10).map(l=>h('div',{text:`[${tm(l.ts)}] ${l.method} ${l.path} · ${l.is_webapk_server?'🤖 WebAPK':'📱 Browser'} (${l.ua.slice(0,38)}…)`}))
+   ));
+  }
+ }catch(e){}
+ diagBox.replaceChildren(...lines);
+}
 async function installPwaModal(){
  const box=h('div',{style:'display:flex;flex-direction:column;gap:10px'});
+ const diagBox=h('div',{class:'dl-card'});
  const renderBox=()=>{
   const standalone=isStandaloneApp();
   const swCtrl=!!(navigator.serviceWorker&&navigator.serviceWorker.controller);
@@ -1586,7 +1700,11 @@ async function installPwaModal(){
    if(!deferredPrompt)return;
    deferredPrompt.prompt();
    const choice=await deferredPrompt.userChoice;
-   if(choice&&choice.outcome==='accepted'){deferredPrompt=null;drawPwaBanner();renderBox();toast('✅ Installing WebAPK app — check your App Drawer / Home Screen in 5-10s!')}
+   if(choice&&choice.outcome==='accepted'){
+    deferredPrompt=null;drawPwaBanner();renderBox();
+    toast('⏳ Android WebAPK तयार करत आहे (5-15 सेकंद थांबा)…',8000);
+    setTimeout(()=>{runPwaDiagnostics(diagBox)},6000);
+   }
   }}}):null;
   const reloadSwBtn=(!standalone&&!swCtrl&&'serviceWorker' in navigator)?h('button',{style:'background:#f59e0b;color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;width:100%',text:'🔄 Activate App Installer (1-Tap Reload)',on:{click(){location.replace('/app/')}}}):null;
   const fsBtn=h('button',{style:'background:var(--acc);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;width:100%',text:document.fullscreenElement?'🗗 Exit Fullscreen App Mode':'📱 Open Fullscreen App Mode Now',on:{click(){
@@ -1596,25 +1714,36 @@ async function installPwaModal(){
   }}});
   box.replaceChildren(
    h('div',{class:'dl-card',style:'border:1px solid '+(standalone||deferredPrompt?'#10b981':'var(--bd)')},
-    h('b',{style:'color:'+(standalone||deferredPrompt?'#10b981':'var(--acc)')+';font-size:13.5px',text:standalone?'✅ हे App तुमच्या फोनवर Standalone Native App म्हणून चालू आहे!':(deferredPrompt?'✅ 1-Click Native WebAPK Install तयार आहे! (वरचे हिरवे बटण दाबा)':(swCtrl?'ℹ️ Browser मेन्यूमधून "Install app" निवडा (किंवा App आधीच Install आहे)':'⏳ App Installer तयार होत आहे — खालील पिवळे Activate बटण दाबा'))}),
-    h('div',{class:'mut',style:'font-size:12px'},`Status: HTTPS=${location.protocol==='https:'||location.hostname==='localhost'?'✔':'✖'} · ServiceWorker=${swCtrl?'✔ Active':'⏳ Ready on reload'} · Scope=/app/`)
+    h('b',{style:'color:'+(standalone||deferredPrompt?'#10b981':'var(--acc)')+';font-size:13.5px',text:standalone?'✅ हे App तुमच्या फोनवर Standalone Native App म्हणून चालू आहे!':(deferredPrompt?'✅ 1-Click Native WebAPK Install तयार आहे! (वरचे हिरवे बटण दाबा)':(swCtrl?'ℹ️ खालील Live Diagnostic रिपोर्ट तपासा':'⏳ App Installer तयार होत आहे — खालील पिवळे Activate बटण दाबा'))}),
+    h('div',{class:'mut',style:'font-size:12px'},`Status: HTTPS=${location.protocol==='https:'||location.hostname==='localhost'?'✔':'✖'} · ServiceWorker=${swCtrl?'✔ Active':'⏳ Ready on reload'} · Title="${document.title}"`)
    ),
    natBtn,
    reloadSwBtn,
    fsBtn,
+   h('div',{style:'display:flex;justify-content:space-between;align-items:center'},
+    h('b',{style:'font-size:13px;color:var(--acc)',text:'🔍 Live Install Issue & WebAPK Debugger'}),
+    h('button',{style:'color:var(--acc);font-size:12px;font-weight:700',text:'🔄 Re-Test Now',on:{click(){runPwaDiagnostics(diagBox)}}})
+   ),
+   diagBox,
    h('div',{class:'dl-card'},
-    h('b',{style:'color:var(--acc);font-size:13.5px',text:'📱 मोबाईलवर Shortcut ऐवजी खरे App (WebAPK) कसे Install करावे?'}),
-    h('div',{style:'font-size:12.5px;line-height:1.5;white-space:pre-line',text:'1) वर हिरवे "📲 Install Real App" बटण दिसत असल्यास त्यावर क्लिक करा — थेट खरे App (WebAPK) इन्स्टॉल होईल.\n2) किंवा Chrome च्या उजव्या कोपऱ्यातील ⋮ मेन्यूवर टॅप करून "Install app" (किंवा "Add to Home screen" → "Install") निवडा. (टीप: "Create shortcut" निवडू नका, त्याने फक्त साधा ब्राउझर शॉर्टकट बनतो!)\n3) जर आधी जुना Shortcut बनवला असेल, तर तो आधी Home Screen वरून Remove/Delete करा आणि मग इथून "Install app" करा.'})
+    h('b',{style:'color:#f59e0b;font-size:13px',text:'🛠 Chrome मध्ये स्वतःचा छुपे WebAPK Error कसा बघायचा?'}),
+    h('div',{style:'font-size:12px;line-height:1.45',text:'Chrome च्या नवीन टॅबमध्ये खालील URL कॉपी करून पेस्ट करा — तिथे Chrome ने App का इन्स्टॉल केले नाही याचा अचूक Error दिसेल:'}),
+    h('div',{style:'display:flex;gap:6px;margin-top:4px'},
+     h('button',{style:'background:var(--bg);border:1px solid var(--bd);padding:6px 10px;border-radius:8px;font-size:12px;font-weight:600;flex:1',text:'⧉ Copy chrome://webapks',on:{click(){copyText('chrome://webapks')}}}),
+     h('button',{style:'background:var(--bg);border:1px solid var(--bd);padding:6px 10px;border-radius:8px;font-size:12px;font-weight:600;flex:1',text:'⧉ Copy chrome://web-app-internals',on:{click(){copyText('chrome://web-app-internals')}}})
+    )
    ),
    h('div',{class:'dl-card'},
-    h('b',{style:'font-size:13px',text:'💻 PC / Laptop (Chrome / Edge):'}),
-    h('div',{class:'mut',style:'font-size:12.5px',text:'Address bar मधील 📲 Install आयकॉनवर क्लिक करून Desktop App म्हणून इन्स्टॉल करा.'})
+    h('b',{style:'color:var(--acc);font-size:13px',text:'📱 "Installing..." अडकून नंतर गायब का होते? (3 कारणे व उपाय)'}),
+    h('div',{style:'font-size:12px;line-height:1.5;white-space:pre-line',text:'1) जर आधी "Installing Telegram (422)..." दिसत असेल, तर त्याचा अर्थ तुमचा सर्व्हर अजून जुनाच कोड चालवत आहे (422 हा तुमच्या Unread मेसेजेसचा आकडा होता, जो जुन्या कोडमध्ये <title> मध्ये येत होता आणि SVG आयकॉनमुळे WebAPK फेल होत होते). हा नवीन कोड सर्व्हरवर Deploy करा!\n2) Redmi / Xiaomi / Vivo / Oppo / Realme फोनवर: Settings → Apps → Manage Apps → Chrome → Other Permissions → "Home screen shortcuts" आणि "Install unknown apps" दोन्ही Allow करा.\n3) Google Play Store मध्ये लॉगिन असावे आणि Play Protect चालू असावे (Android वर Chrome बॅकग्राउंडला Google Play मार्फतच WebAPK साइन आणि इन्स्टॉल करते).'}
+    )
    )
   );
+  runPwaDiagnostics(diagBox);
  };
  pwaModalRefresh=renderBox;
  renderBox();
- modal('📲 Install Native App (WebAPK / PC)',box,[{t:'Close',fn(c){pwaModalRefresh=null;c()}}]);
+ modal('📲 App Installer & Live Error Debugger',box,[{t:'Close',fn(c){pwaModalRefresh=null;c()}}]);
 }
 
 /* ---------- start ---------- */

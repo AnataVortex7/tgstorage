@@ -75,6 +75,7 @@ SHARE_LINKS, SHARE_LOCK = {}, threading.Lock()   # token -> {acc, chat, id, exp,
 AUTO_REPLY = {}                                  # aid -> {'enabled': False, 'text': '', 'only_private': True, 'sent_to': {}}
 MSG_RECENT = collections.OrderedDict()           # (aid, chat, mid) -> msg_dict (last 3000 messages for Anti-Delete Vault)
 DELETED_VAULT = collections.deque(maxlen=100)    # recently deleted messages captured by Ghost Mode
+PWA_LOGS = collections.deque(maxlen=50)          # live log of manifest/icon/SW requests (including Google WebAPK builder)
 
 M = None
 reason = ''
@@ -2093,14 +2094,14 @@ def _get_apk_png(size, bg=(36, 129, 204), maskable=False):
     return _PNG_CACHE[k]
 
 _APP_MANIFEST = {
-    "id": "/app/",
+    "id": "/app/?v=5",
     "name": "Telegram Hub Pro",
     "short_name": "TG Hub",
     "description": "Multi-Account Telegram Manager & High-Speed Downloader",
     "lang": "en",
     "dir": "ltr",
     "start_url": "/app/",
-    "scope": "/app/",
+    "scope": "/app",
     "display": "standalone",
     "display_override": ["standalone", "minimal-ui"],
     "orientation": "portrait",
@@ -2197,6 +2198,8 @@ def gate():
     p = request.path.rstrip('/')
     is_read = request.method in ('GET', 'HEAD')
     if is_read and p in ('/app/manifest.json', '/app/sw.js', '/app/icon.svg', '/app/icon-192.png', '/app/icon-512.png', '/app/icon-maskable-192.png', '/app/icon-maskable-512.png'):
+        ua = request.headers.get('User-Agent', '')[:120]
+        PWA_LOGS.appendleft({'ts': int(time.time()), 'method': request.method, 'path': request.full_path.rstrip('?'), 'ip': _ip(), 'ua': ua, 'is_webapk_server': ('WebAPK' in ua or 'Google' in ua or 'Dalvik' in ua)})
         return None
     # Critical PWA Scope Fix: always redirect /app (without trailing slash) to /app/ so the page is inside scope '/app/'!
     if is_read and request.path == '/app':
@@ -2322,6 +2325,11 @@ def _all_dls_snapshot():
                     'acc': j['acc'], 'chat': j['chat'], 'id': j['id']
                 }
     return out
+
+@bp.get('/api/pwa/diag')
+@api
+def api_pwa_diag():
+    return jsonify(logs=list(PWA_LOGS)[:30], manifest=_APP_MANIFEST, host=request.host, scheme=request.headers.get('X-Forwarded-Proto', request.scheme))
 
 @bp.get('/api/state')
 @api
