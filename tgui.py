@@ -404,10 +404,12 @@ function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:
    serverDownload(m,false).catch(()=>{});
    const v=h('video',{src:file,playsinline:true,preload:'auto'});
    if(x.kind==='gif'){v.loop=true;v.muted=true;v.autoplay=true}else v.controls=true;
-   const spdBtn=h('button',{text:'1x',title:'Playback speed',on:{click(ev){ev.stopPropagation();const rates=[1,1.25,1.5,2,0.5];const nx=rates[(rates.indexOf(v.playbackRate)+1)%rates.length];v.playbackRate=nx;spdBtn.textContent=nx+'x'}}});
+   const spdBtn=h('button',{text:'1x',title:'Playback speed',on:{click(ev){ev.stopPropagation();const rates=[1,1.25,1.5,1.75,2,2.5,0.5];const nx=rates[(rates.indexOf(v.playbackRate)+1)%rates.length];v.playbackRate=nx;spdBtn.textContent=nx+'x'}}});
+   const snapBtn=h('button',{text:'📸',title:'Capture HD Screenshot of Video Frame',on:{click(ev){ev.stopPropagation();snapVideo(v,x.name||('video_'+m.id))}}});
    const pipBtn=h('button',{text:'⧉ PiP',title:'Picture in Picture',on:{click(ev){ev.stopPropagation();if(v.requestPictureInPicture)v.requestPictureInPicture().catch(()=>{})}}});
+   const shBtn=h('button',{text:'🔗',title:'VLC / Public Share Link',on:{click(ev){ev.stopPropagation();shareLinkModal(m)}}});
    const dlBtn=h('button',{text:'⬇ Save',title:'Fast Download from Server',on:{click(ev){ev.stopPropagation();downloadMsg(m)}}});
-   const bar=x.kind==='gif'?null:h('div',{class:'vbar'},h('span',{class:'dlp',text:dlBadgeText(S.dls[k]||{state:'downloading',size:x.size},x)}),h('div',{style:'display:flex;gap:5px'},spdBtn,pipBtn,dlBtn));
+   const bar=x.kind==='gif'?null:h('div',{class:'vbar'},h('span',{class:'dlp',text:dlBadgeText(S.dls[k]||{state:'downloading',size:x.size},x)}),h('div',{style:'display:flex;gap:4px'},spdBtn,snapBtn,pipBtn,shBtn,dlBtn));
    const tgt=document.querySelector('.vid[data-dl="'+k+'"]')||w;
    tgt.replaceChildren(v,bar);tgt.onclick=null;
    const p=v.play&&v.play();if(p&&p.catch)p.catch(()=>{});
@@ -578,7 +580,7 @@ function bubbleRow(m,first,last,showName,album){const out=m.out;const row=h('div
  if(showName&&!out&&S.cd&&S.cd.type!=='user')b.append(h('div',{class:'mn',style:'color:'+colorOf(m.from_id),text:m.from||'User',on:{click(e){e.stopPropagation();if(m.from_id)openById(m.from_id,0)}}}));
  if(album&&album.length>1){const g=h('div',{style:`display:grid;grid-template-columns:repeat(${album.length>3?2:Math.min(album.length,2)},1fr);gap:2px;margin:-2px -4px 3px`});album.forEach(a=>g.append(mediaNode(a)));b.append(g);const tx=album.find(a=>a.text);if(tx)b.append(...bodyNode(Object.assign({},tx,{media:null,reply:null,fwd:'',via:'',react:tx.react,btn:null})))}
  else b.append(...bodyNode(m));
- b.append(h('span',{class:'meta'},m.pinned?'📌':null,m.views?'👁 '+m.views:null,m.edited?'edited':null,tm(m.ts),ticks(m)));b.append(h('div',{style:'clear:both'}));
+ b.append(h('span',{class:'meta'},m._deleted?h('b',{style:'color:#ef4444',text:'👻 deleted'}):null,m.pinned?'📌':null,m.views?'👁 '+m.views:null,m.edited?'edited':null,tm(m.ts),ticks(m)));b.append(h('div',{style:'clear:both'}));
  b.addEventListener('contextmenu',e=>{e.preventDefault();msgMenu(e.clientX,e.clientY,m)});let lp;b.addEventListener('touchstart',e=>{const t=e.touches[0];lp=setTimeout(()=>msgMenu(t.clientX,t.clientY,m),550)},{passive:true});['touchend','touchmove'].forEach(ev=>b.addEventListener(ev,()=>clearTimeout(lp),{passive:true}));
  b.addEventListener('click',e=>{if(S.sel.size||e.shiftKey)toggleSel(m.id);else if(e.detail===2)setReply(m)});row.append(b);return row}
 
@@ -632,6 +634,8 @@ function msgMenu(x,y,m){
   {ic:'↩',t:'Reply',fn:()=>setReply(m)},
   m.media&&m.media.kind!=='sticker'?{ic:'👁',t:'Open & Cache on Server',fn:()=>openFile(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'⬇',t:'Fast Download to Browser',fn:()=>downloadMsg(m)}:null,
+  m.media&&m.media.kind!=='sticker'?{ic:'🔗',t:'Public Share / VLC Stream Link',fn:()=>shareLinkModal(m)}:null,
+  m.media&&m.media.kind!=='sticker'?{ic:'📦',t:'Backup to Storage Group',fn:()=>backupToStorageModal(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'⚡',t:'Pre-Download on Server ('+S.dlCfg.threads+'T)',fn:()=>serverDownload(m,false).then(()=>toast('⚡ Server multi-thread download started'))}:null,
   {ic:'🔖',t:'Save to Saved Messages',fn:()=>saveMsg(m)},
   m.text?{ic:'⧉',t:'Copy text',fn:()=>copyText(m.text)}:null,
@@ -932,6 +936,164 @@ async function openDlManager(){
  timer=setInterval(()=>{if(!document.body.contains(box)){clearInterval(timer);return}refreshModal()},2200);
 }
 
+
+/* ---------- 🚀 Premium & Innovative Features (Share/VLC Link, Ghost Vault, Auto-Reply, Cross-Account Search, Analytics, Video Snap) ---------- */
+function snapVideo(v,name){
+ try{
+  if(!v.videoWidth||!v.videoHeight){toast('Wait for video frame to load first');return}
+  const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
+  c.getContext('2d').drawImage(v,0,0,c.width,c.height);
+  c.toBlob(blob=>{
+   if(!blob)return;
+   const u=URL.createObjectURL(blob);
+   const a=h('a',{href:u,download:`${name.replace(/\.[^.]+$/,'')}_frame_${Math.round(v.currentTime)}s.png`,style:'display:none'});
+   document.body.append(a);a.click();a.remove();
+   setTimeout(()=>URL.revokeObjectURL(u),5000);
+   toast('📸 Video frame screenshot saved!');
+  },'image/png');
+ }catch(e){toast('Screenshot failed: '+e.message)}
+}
+
+function shareLinkModal(m){
+ const hrs=h('select',{style:'width:auto'},[[1,'1 Hour'],[6,'6 Hours'],[24,'24 Hours (1 Day)'],[72,'3 Days'],[168,'7 Days']].map(([v,t])=>h('option',{value:v,text:t})));
+ hrs.value='24';
+ const resBox=h('div',{style:'display:flex;flex-direction:column;gap:8px'});
+ async function gen(){
+  resBox.replaceChildren(h('div',{class:'mut',text:'Generating direct stream/download link…'}));
+  try{
+   const r=await api('/app/api/share/create',A({chat:S.chat,id:m.id,hours:+hrs.value}));
+   const fullUrl=location.origin+r.path;
+   const dlUrl=fullUrl+'?dl=1';
+   resBox.replaceChildren(
+    h('div',{class:'dl-card'},
+     h('b',{style:'font-size:12.5px;color:var(--acc)',text:'🎬 Direct Stream Link (VLC / MX Player / PotPlayer / Browser):'}),
+     h('input',{value:fullUrl,readonly:true,on:{click(e){e.target.select();copyText(fullUrl)}}}),
+     h('div',{style:'display:flex;gap:8px'},
+      h('button',{style:'background:var(--acc);color:#fff;padding:6px 12px;border-radius:8px;font-weight:600;font-size:12.5px',text:'⧉ Copy Stream Link',on:{click(){copyText(fullUrl)}}}),
+      h('button',{style:'background:var(--hov);color:var(--acc);padding:6px 12px;border-radius:8px;font-weight:600;font-size:12.5px',text:'⬇ Copy IDM / Direct Download Link',on:{click(){copyText(dlUrl)}}})
+     )
+    ),
+    h('div',{class:'mut',style:'font-size:12px',text:'💡 Paste this link in VLC (Media → Open Network Stream) or MX Player to watch at full multi-thread server speed without logging in!'})
+   );
+  }catch(e){resBox.replaceChildren(h('div',{class:'err',text:e.message}))}
+ }
+ hrs.onchange=gen;
+ modal('🔗 Public Share & VLC Stream Link',[h('div',{class:'sw'},h('span',{text:'Link Expiry Time'}),hrs),resBox],[{t:'Close'}]);
+ gen();
+}
+
+async function backupToStorageModal(m){
+ const body=h('div',{style:'display:flex;flex-direction:column;gap:8px'},h('div',{class:'mut',text:'Loading Backup Storage groups…'}));
+ const close=modal('📦 Backup File to Storage Group',body,[{t:'Cancel'}]);
+ try{
+  const r=await api('/app/api/storage/groups');
+  const gs=r.groups||[];
+  const targets=[...gs.map(g=>({id:g.id,name:'📦 '+g.title})),...S.dl.filter(d=>d.type!=='user'&&(d.owner||d.admin)).map(d=>({id:d.id,name:'🛡 '+d.name}))];
+  if(!targets.length){body.replaceChildren(h('div',{class:'empty',text:'No Storage Groups or Admin Groups found.'}));return}
+  body.replaceChildren(
+   h('div',{class:'mut',style:'font-size:13px',text:'Choose a Backup Group / Channel to copy this file into instantly (0 bandwidth used):'}),
+   ...targets.slice(0,30).map(t=>h('div',{class:'row',on:{async click(){
+    try{
+     await api('/app/api/forward',A({from_chat:S.chat,ids:[m.id],to_chat:t.id,hide_author:true}));
+     toast('📦 Backed up to '+t.name);close();
+    }catch(e){toast(e.message)}
+   }}},avatar(t.id,t.name,36),h('b',{text:t.name})))
+  );
+ }catch(e){body.replaceChildren(h('div',{class:'err',text:e.message}))}
+}
+
+async function openGhostAndAutoReply(){
+ const box=h('div',{style:'display:flex;flex-direction:column;gap:10px'},h('div',{class:'empty',text:'Loading…'}));
+ modal('👻 Ghost Anti-Delete Vault & 🤖 Auto-Reply',box,[{t:'Close'}]);
+ async function load(){
+  try{
+   const r=await api('/app/api/ghost/list?'+Q({acc:S.acc}));
+   const gChk=h('input',{type:'checkbox',checked:r.anti_delete!==false});
+   const arChk=h('input',{type:'checkbox',checked:!!(r.auto_reply&&r.auto_reply.enabled)});
+   const arTxt=h('textarea',{rows:2,placeholder:'Auto-reply message when someone DMs you (e.g. "I am currently studying, will reply later!")'});
+   arTxt.value=(r.auto_reply&&r.auto_reply.text)||'';
+   const cdSel=h('select',{style:'width:auto'},[[300,'Every 5m'],[1800,'Every 30m'],[3600,'Every 1h'],[21600,'Every 6h']].map(([v,t])=>h('option',{value:v,text:t})));
+   cdSel.value=String((r.auto_reply&&r.auto_reply.cooldown)||3600);
+   const saveBtn=h('button',{style:'background:var(--acc);color:#fff;padding:7px 14px;border-radius:8px;font-weight:600;align-self:flex-end',text:'💾 Save Settings',on:{async click(){
+    try{
+     await api('/app/api/ghost/settings',A({anti_delete:gChk.checked,auto_reply_enabled:arChk.checked,auto_reply_text:arTxt.value,cooldown:+cdSel.value}));
+     toast('✅ Ghost & Auto-Reply settings saved');
+    }catch(e){toast(e.message)}
+   }}});
+   const vList=(r.deleted||[]);
+   box.replaceChildren(
+    h('div',{class:'dl-card'},
+     h('label',{style:'font-weight:700'},gChk,'👻 Anti-Delete Mode (Keep deleted messages visible in chat & vault)'),
+     h('hr',{style:'border:0;border-top:1px solid var(--bd);width:100%'}),
+     h('label',{style:'font-weight:700'},arChk,'🤖 Smart Auto-Reply in Private Chats (Away Mode)'),
+     arTxt,
+     h('div',{class:'sw'},h('span',{class:'mut',style:'font-size:12.5px',text:'Reply Cooldown per User'}),cdSel),
+     saveBtn
+    ),
+    h('div',{style:'display:flex;justify-content:space-between;align-items:center'},
+     h('b',{style:'font-size:13.5px',text:`👻 Recently Deleted Messages (${vList.length})`}),
+     vList.length?h('button',{style:'color:#ef4444;font-size:12.5px;font-weight:600',text:'🗑 Clear Vault',on:{async click(){await api('/app/api/ghost/settings',A({clear_vault:true}));load()}}}):null
+    ),
+    ...(vList.length?vList.map(m=>h('div',{class:'dl-card',style:'cursor:pointer',on:{click(){document.querySelector('.ov').remove();openById(m.chat,m.id)}}},
+     h('div',{class:'top'},h('b',{style:'color:#ef4444',text:'👻 '+(m.from||'User')}),h('span',{class:'mut',style:'font-size:11.5px',text:dayLabel(m.deleted_at||m.ts)+' '+tm(m.deleted_at||m.ts)})),
+     h('div',{text:m.text||(m.media?'📎 '+(m.media.name||m.media.kind):'Message')})
+    )):[h('div',{class:'mut',style:'text-align:center;padding:14px;font-size:13px',text:'No deleted messages captured yet. When someone deletes a message, it will appear here!'})])
+   );
+  }catch(e){box.replaceChildren(h('div',{class:'err',text:e.message}))}
+ }
+ load();
+}
+
+function openCrossSearch(){
+ const q=h('input',{placeholder:'Search messages or files across ALL accounts…'}),res=h('div',{style:'max-height:52vh;overflow:auto;display:flex;flex-direction:column;gap:6px'});
+ const goBtn=h('button',{style:'background:var(--acc);color:#fff;padding:8px 14px;border-radius:8px;font-weight:600',text:'Search All',on:{click:doSearch}});
+ async function doSearch(){
+  if(q.value.trim().length<2){toast('Enter at least 2 characters');return}
+  res.replaceChildren(h('div',{class:'empty',text:'🌐 Searching across all connected Telegram accounts…'}));
+  try{
+   const ms=(await api('/app/api/cross_search?'+Q({q:q.value.trim()}))).messages||[];
+   if(!ms.length){res.replaceChildren(h('div',{class:'empty',text:'No matches across accounts'}));return}
+   res.replaceChildren(...ms.map(m=>h('div',{class:'dl-card',style:'cursor:pointer',on:{async click(){
+    close();
+    if(m.acc&&m.acc!==S.acc)await switchAcc(m.acc);
+    openById(m.chat,m.id);
+   }}},
+    h('div',{class:'top'},h('b',{text:m.chat_name||'Chat'}),h('span',{class:'badge',text:m.acc_name||m.acc})),
+    h('div',{style:'font-size:13px',text:m.text||(m.media?'📎 '+(m.media.name||m.media.kind):'')}),
+    h('div',{class:'mut',style:'font-size:11.5px',text:(m.from?m.from+' · ':'')+dayLabel(m.ts)+' '+tm(m.ts)+(m.media&&m.media.size?' · '+sz(m.media.size):'')})
+   )));
+  }catch(e){res.replaceChildren(h('div',{class:'err',text:e.message}))}
+ }
+ q.addEventListener('keydown',e=>{if(e.key==='Enter')doSearch()});
+ const close=modal('🌐 Cross-Account Global Search',[h('div',{style:'display:flex;gap:8px'},q,goBtn),res],[{t:'Close'}]);
+ q.focus();
+}
+
+async function drawAnalytics(b){
+ b.replaceChildren(h('div',{class:'empty',text:'📊 Analyzing recent chat activity…'}));
+ try{
+  const r=await api('/app/api/analytics?'+Q({acc:S.acc,chat:S.chat}));
+  const ks=Object.entries(r.kinds||{}).sort((a,b)=>b[1]-a[1]);
+  b.replaceChildren(
+   h('div',{class:'kv'},
+    h('div',{class:'dl-card'},
+     h('b',{style:'color:var(--acc)',text:`📊 Chat Overview (Last ${r.sampled} msgs)`}),
+     h('div',{style:'font-size:13px',text:`Total Media Size: ${sz(r.total_media_bytes||0)}`}),
+     r.peak_hour!=null?h('div',{class:'mut',style:'font-size:12.5px',text:`Most Active Hour: ${r.peak_hour}:00 – ${r.peak_hour+1}:00`}):null
+    )
+   ),
+   h('div',{class:'kv'},
+    h('b',{style:'display:block;margin-bottom:6px',text:'📁 Content Breakdown'}),
+    ...ks.map(([k,n])=>h('div',{class:'sw',style:'font-size:13px'},h('span',{text:k.toUpperCase()}),h('b',{text:n+' msgs'})))
+   ),
+   h('div',{class:'kv'},
+    h('b',{style:'display:block;margin-bottom:6px',text:'🏆 Top Active Senders'}),
+    ...(r.top_senders||[]).map((s,i)=>h('div',{class:'sw',style:'font-size:13px'},h('span',{text:`${i+1}. ${s.name}`}),h('span',{class:'badge',text:s.count+' msgs'})))
+   )
+  );
+ }catch(e){b.replaceChildren(h('div',{class:'empty',text:e.message}))}
+}
+
 /* ---------- lightbox ---------- */
 let LB=null;
 function lightbox(id){const L=S.msgs.filter(m=>m.media&&m.media.kind==='photo');let i=L.findIndex(m=>m.id===id);if(i<0)return;const lb=$('#lb'),im=lb.querySelector('img');
@@ -961,7 +1123,7 @@ function drawInfo(){
   }}})
  ):null;
 
- const tabs=[['media','Media'],['files','Files'],['links','Links'],['voice','Voice'],['music','Music'],['gifs','GIFs']];
+ const tabs=[['media','Media'],['files','Files'],['links','Links'],['voice','Voice'],['music','Music'],['gifs','GIFs'],['analytics','📊 Stats']];
  if(d.type==='user'&&!d.self)tabs.push(['common','Common']);
  if(d.type!=='user')tabs.push(['members','Members']);
  if(d.type!=='user'&&(d.owner||d.admin))tabs.push(['manage','⚙ Manage']);
@@ -982,6 +1144,7 @@ function drawInfo(){
 }
 async function loadShared(kind){const b=$('#ibody');b.replaceChildren(h('div',{class:'empty',text:'Loading…'}));try{
  if(kind==='manage'){drawManage(b);return}
+ if(kind==='analytics'){drawAnalytics(b);return}
  if(kind==='common'){
   const cs=(await api('/app/api/user/common?'+Q({acc:S.acc,user:S.chat}))).chats;
   if(!cs.length){b.replaceChildren(h('div',{class:'empty',text:'No groups in common'}));return}
@@ -1100,6 +1263,8 @@ function openDrawer(noRefresh){const dr=$('#dr'),c=cur(),st=S.st||{};dr.replaceC
   h('div',{class:'it',on:{click(){closeDrawer();addAccount()}}},'＋','Add Telegram Account'),
   h('hr',{style:'border:0;border-top:1px solid var(--bd);width:100%'}),
   h('div',{class:'it',on:{click(){closeDrawer();openDlManager()}}},'⚡','Downloads & Server Cache'),
+  h('div',{class:'it',on:{click(){closeDrawer();openGhostAndAutoReply()}}},'👻','Ghost Vault & Auto-Reply'),
+  h('div',{class:'it',on:{click(){closeDrawer();openCrossSearch()}}},'🌐','Cross-Account Search'),
   h('div',{class:'it',on:{click(){closeDrawer();if(c.uid)openById(c.uid,0)}}},'🔖','Saved Messages'),
   h('div',{class:'it',on:{click(){closeDrawer();newChat()}}},'👤','Contacts / New Chat / Group'),
   h('div',{class:'it',on:{click(){closeDrawer();S.archived=!S.archived;S.folder=S.archived?'archived':'all';drawFolders();drawList()}}},'🗄',S.archived?'Back to Main Chats':`Archived Chats (${(S.adl||[]).length})`),
@@ -1209,7 +1374,7 @@ function handleEvent(e){
   if(S.topic&&e.msg&&e.msg.topic&&e.msg.topic!==S.topic)return;
   const box=$('#msgs'),atEnd=box.scrollHeight-box.scrollTop-box.clientHeight<140;
   if(e.type==='new'&&e.msg&&!S.msgs.some(x=>x.id===e.msg.id)){S.msgs.push(e.msg);if(!e.msg.out&&!atEnd)S.newBelow=(S.newBelow||0)+1;drawMsgs(atEnd||e.msg.out?'bottom':'keep');if(atEnd&&!document.hidden)markRead()}
-  else if(e.type==='edit'&&e.msg)replaceMsg(e.msg);else if(e.type==='del'){S.msgs=S.msgs.filter(x=>!(e.ids||[]).includes(x.id));drawMsgs('keep')}
+  else if(e.type==='edit'&&e.msg)replaceMsg(e.msg);else if(e.type==='del'){if(e.ghost){S.msgs.forEach(x=>{if((e.ids||[]).includes(x.id)&&!x.out)x._deleted=true});S.msgs=S.msgs.filter(x=>!((e.ids||[]).includes(x.id)&&x.out))}else{S.msgs=S.msgs.filter(x=>!(e.ids||[]).includes(x.id))}drawMsgs('keep')}
  }
  soon()}
 async function poll(){for(;;){try{const r=await api('/app/api/events?'+Q({since:S.seq,wait:20}));S.seq=r.seq;for(const e of r.events)handleEvent(e)}catch(e){await sleep(3500)}}}

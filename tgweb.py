@@ -69,7 +69,12 @@ DL_CFG = {
     'threads': max(1, min(16, int(os.environ.get('DL_THREADS', '8') or 8))),
     'ttl': max(60, int(float(os.environ.get('CACHE_TTL_MINUTES', '60') or 60) * 60)),  # seconds before auto-clear
     'auto_cache': os.environ.get('AUTO_SERVER_CACHE', '1').strip() != '0',
+    'anti_delete': True,   # Ghost Mode: keep deleted messages visible instead of erasing them
 }
+SHARE_LINKS, SHARE_LOCK = {}, threading.Lock()   # token -> {acc, chat, id, exp, name}
+AUTO_REPLY = {}                                  # aid -> {'enabled': False, 'text': '', 'only_private': True, 'sent_to': {}}
+MSG_RECENT = collections.OrderedDict()           # (aid, chat, mid) -> msg_dict (last 3000 messages for Anti-Delete Vault)
+DELETED_VAULT = collections.deque(maxlen=300)    # recently deleted messages captured by Ghost Mode
 
 M = None
 reason = ''
@@ -670,14 +675,54 @@ class Manager:
         for aid in list(self.clients):
             await self.stop_client(aid)
 
-    # --- live updates
+    # --- live updates + Ghost Anti-Delete Vault + Smart Auto-Reply
     def _hook(self, aid, cl):
         async def on_new(ev):
-            self.push(aid, 'new', getattr(ev, 'chat_id', None), ser_msg(ev.message))
+            sm = ser_msg(ev.message)
+            cid = getattr(ev, 'chat_id', None)
+            if cid and sm.get('id'):
+                MSG_RECENT[(aid, cid, sm['id'])] = dict(sm, chat=cid, acc=aid)
+                while len(MSG_RECENT) > 3000:
+                    MSG_RECENT.popitem(last=False)
+            self.push(aid, 'new', cid, sm)
+            # Smart Auto-Reply in private chats
+            ar = AUTO_REPLY.get(aid)
+            if ar and ar.get('enabled') and ar.get('text') and not sm.get('out') and not sm.get('service'):
+                if getattr(ev, 'is_private', False):
+                    sender = await ev.get_sender()
+                    if sender and not getattr(sender, 'bot', False) and not getattr(sender, 'is_self', False):
+                        now = time.time()
+                        sent_map = ar.setdefault('sent_to', {})
+                        if now - sent_map.get(cid, 0) > int(ar.get('cooldown', 3600)):
+                            sent_map[cid] = now
+                            try:
+                                rm = await cl.send_message(cid, ar['text'], reply_to=sm['id'])
+                                self.push(aid, 'new', cid, ser_msg(rm))
+                            except Exception:
+                                pass
+
         async def on_edit(ev):
-            self.push(aid, 'edit', getattr(ev, 'chat_id', None), ser_msg(ev.message))
+            sm = ser_msg(ev.message)
+            cid = getattr(ev, 'chat_id', None)
+            if cid and sm.get('id'):
+                MSG_RECENT[(aid, cid, sm['id'])] = dict(sm, chat=cid, acc=aid)
+            self.push(aid, 'edit', cid, sm)
+
         async def on_del(ev):
-            self.push(aid, 'del', getattr(ev, 'chat_id', None), None, list(getattr(ev, 'deleted_ids', []) or []))
+            cid = getattr(ev, 'chat_id', None)
+            dids = list(getattr(ev, 'deleted_ids', []) or [])
+            for mid in dids:
+                found = MSG_RECENT.get((aid, cid, mid))
+                if not found:
+                    # Also search by mid if cid was None (common in non-channel private chats)
+                    for (ka, kc, km), mv in list(MSG_RECENT.items()):
+                        if ka == aid and km == mid:
+                            found = mv
+                            cid = cid or kc
+                            break
+                if found and not found.get('out'):
+                    DELETED_VAULT.appendleft(dict(found, deleted_at=int(time.time())))
+            self.push(aid, 'del', cid, None, dids, ghost=bool(DL_CFG.get('anti_delete', True)))
         async def on_read(ev):
             if getattr(ev, 'outbox', False):
                 self.push(aid, 'read', getattr(ev, 'chat_id', None), None, None, max_id=getattr(ev, 'max_id', 0))
@@ -752,7 +797,12 @@ class Manager:
         if topic_id:
             kw['reply_to'] = int(topic_id)
         ms = await cl.get_messages(chat, **kw)
-        res = {'messages': [ser_msg(m) for m in reversed(list(ms))]}
+        s_list = [ser_msg(m) for m in reversed(list(ms))]
+        for sm in s_list:
+            MSG_RECENT[(aid, int(chat), sm['id'])] = dict(sm, chat=int(chat), acc=aid)
+        while len(MSG_RECENT) > 3000:
+            MSG_RECENT.popitem(last=False)
+        res = {'messages': s_list}
         if not before:
             res['pinned'] = None
             try:
@@ -1896,6 +1946,8 @@ def gate():
     p = request.path.rstrip('/')
     if request.method == 'GET' and p == '/app' and request.args.get('k'):
         return Response(ENTER_PAGE, mimetype='text/html', headers=_sec_headers())
+    if request.method == 'GET' and p.startswith('/app/s/'):
+        return None
     if request.method == 'POST' and p == '/app/enter':
         return None
     if not session_ok():
@@ -2959,6 +3011,238 @@ def api_login_password():
     _login_guard('lc', 15)
     d = _json()
     return jsonify(M.call(M.a_login_password(str(d.get('login_id', '')), str(d.get('password', '')))))
+
+
+# ───────────────────────── Premium & Innovative Features ─────────────────────────
+@bp.post('/api/share/create')
+@api
+def api_share_create():
+    """Creates a temporary public direct stream/download link (for VLC, MX Player, IDM, or browser sharing)."""
+    d = _json()
+    aid, chat, mid = _acc(d), int(d['chat']), int(d['id'])
+    hours = max(1, min(168, int(d.get('hours', 24) or 24)))
+    info = M.call(M.a_info(aid, chat, mid))
+    if info['size'] <= 0:
+        raise ApiError('या मेसेजमध्ये फाइल नाही', 404)
+    tok = secrets.token_urlsafe(18)
+    fname = re.sub(r'[^\w.\-]', '_', info.get('name') or f'file_{mid}')[:80] or f'file_{mid}'
+    exp = time.time() + hours * 3600
+    with SHARE_LOCK:
+        now = time.time()
+        for k in [k for k, v in SHARE_LINKS.items() if v['exp'] < now]:
+            del SHARE_LINKS[k]
+        SHARE_LINKS[tok] = {'acc': aid, 'chat': chat, 'id': mid, 'exp': exp, 'name': fname, 'info': info}
+    # Pre-warm server multi-threaded download so anyone opening the share link gets instant speed
+    try:
+        _start_server_dl_job(aid, chat, mid, info=info, force=False)
+    except Exception:
+        pass
+    return jsonify(token=tok, path=f'/app/s/{tok}/{fname}', expires_in=hours * 3600, name=fname)
+
+@bp.get('/s/<token>', defaults={'name': ''})
+@bp.get('/s/<token>/<path:name>')
+@api
+def public_share_stream(token, name):
+    """Public streaming & download endpoint for VLC / MX Player / IDM / browser without requiring admin login."""
+    with SHARE_LOCK:
+        item = SHARE_LINKS.get(token)
+        if item and item['exp'] < time.time():
+            SHARE_LINKS.pop(token, None)
+            item = None
+    if not item:
+        raise ApiError('ही Share Link संपली आहे किंवा चुकीची आहे', 404)
+    aid, chat, mid, info = item['acc'], item['chat'], item['id'], item['info']
+    size = info['size']
+    start, end, partial = parse_range(request.headers.get('Range'), size)
+    length = end - start + 1
+    mime, h = _file_headers(info, mid, start, end, size, partial)
+    key = _ckey(aid, chat, mid)
+    cp = _cpath(key)
+    part = cp + '.part'
+    cur_st = _dl_state(aid, chat, mid)
+    if cur_st['state'] == 'cached' and os.path.isfile(cp) and os.path.getsize(cp) == size:
+        def gen_disk():
+            remaining = length
+            with open(cp, 'rb') as f:
+                f.seek(start)
+                while remaining > 0:
+                    chunk = f.read(min(DISK_READ_BUF, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    bw_add(len(chunk))
+                    yield chunk
+        return Response(gen_disk(), status=206 if partial else 200, mimetype=mime, headers=h, direct_passthrough=True)
+    try:
+        j, _ = _start_server_dl_job(aid, chat, mid, info=info, force=False)
+    except Exception:
+        j = None
+    if j and j.get('state') in ('downloading', 'cached') and start <= j.get('contig', 0) + 12 * MB:
+        def gen_prog():
+            pos, remaining, cond = start, length, j['cond']
+            while remaining > 0:
+                with cond:
+                    while True:
+                        st_now = j.get('state')
+                        contig_now = j.get('contig', 0)
+                        if st_now == 'cached' or contig_now > pos or st_now in ('error', 'none') or j.get('cancel'):
+                            break
+                        cond.wait(timeout=0.5)
+                    st_now = j.get('state')
+                    contig_now = j['size'] if st_now == 'cached' else j.get('contig', 0)
+                if st_now in ('error', 'none') or j.get('cancel'):
+                    break
+                target_file = cp if (st_now == 'cached' and os.path.isfile(cp)) else part
+                avail = min(remaining, max(0, contig_now - pos))
+                if avail <= 0:
+                    if st_now == 'cached':
+                        break
+                    continue
+                with open(target_file, 'rb') as f:
+                    f.seek(pos)
+                    chunk = f.read(min(DISK_READ_BUF, avail))
+                if not chunk:
+                    break
+                pos += len(chunk)
+                remaining -= len(chunk)
+                bw_add(len(chunk))
+                yield chunk
+        return Response(gen_prog(), status=206 if partial else 200, mimetype=mime, headers=h, direct_passthrough=True)
+    if not STREAMS.acquire(timeout=25):
+        raise ApiError('Server busy', 503)
+    try:
+        it = M.call(M.a_iter(aid, chat, mid, start - start % REQ, size))
+    except Exception:
+        STREAMS.release()
+        raise
+    def gen_direct():
+        skip, remaining = start % REQ, length
+        try:
+            while remaining > 0:
+                chunk = M.call(M.a_next(it), 120)
+                if not chunk:
+                    break
+                if skip:
+                    chunk, skip = chunk[skip:], 0
+                chunk = chunk[:remaining]
+                remaining -= len(chunk)
+                bw_add(len(chunk))
+                yield chunk
+        finally:
+            try:
+                M.call(M.a_close(it), 10)
+            except Exception:
+                pass
+            STREAMS.release()
+    return Response(gen_direct(), status=206 if partial else 200, mimetype=mime, headers=h, direct_passthrough=True)
+
+@bp.get('/api/ghost/list')
+@api
+def api_ghost_list():
+    """Returns deleted messages captured by Anti-Delete Ghost Vault and current Auto-Reply settings."""
+    aid = request.args.get('acc', '')
+    items = [x for x in list(DELETED_VAULT) if not aid or x.get('acc') == aid][:100]
+    ar = AUTO_REPLY.get(aid, {'enabled': False, 'text': '', 'cooldown': 3600})
+    return jsonify(deleted=items, anti_delete=bool(DL_CFG.get('anti_delete', True)),
+                   auto_reply={'enabled': bool(ar.get('enabled')), 'text': ar.get('text', ''), 'cooldown': int(ar.get('cooldown', 3600))})
+
+@bp.post('/api/ghost/settings')
+@api
+def api_ghost_settings():
+    d = _json()
+    aid = _acc(d)
+    if 'anti_delete' in d:
+        DL_CFG['anti_delete'] = bool(d['anti_delete'])
+    if 'clear_vault' in d and d['clear_vault']:
+        DELETED_VAULT.clear()
+    if 'auto_reply_enabled' in d or 'auto_reply_text' in d:
+        ar = AUTO_REPLY.setdefault(aid, {'enabled': False, 'text': '', 'cooldown': 3600, 'sent_to': {}})
+        if 'auto_reply_enabled' in d:
+            ar['enabled'] = bool(d['auto_reply_enabled'])
+        if 'auto_reply_text' in d:
+            ar['text'] = str(d['auto_reply_text'])[:1000].strip()
+        if 'cooldown' in d:
+            ar['cooldown'] = max(60, min(86400, int(d['cooldown'] or 3600)))
+    return jsonify(ok=1)
+
+@bp.get('/api/cross_search')
+@api
+def api_cross_search():
+    """Searches for messages/files across ALL connected Telegram accounts simultaneously."""
+    q = request.args.get('q', '').strip()[:100]
+    if len(q) < 2:
+        raise ApiError('कमीत कमी 2 अक्षरं टाका')
+    async def _run_all():
+        tasks = []
+        aids = []
+        for a in M.accounts_view():
+            if a.get('state') == 'online':
+                aids.append((a['id'], a.get('label') or a.get('name') or a['id']))
+                tasks.append(M.a_search(a['id'], q, None))
+        if not tasks:
+            return []
+        res_list = await asyncio.gather(*tasks, return_exceptions=True)
+        combined = []
+        for (aid, aname), r in zip(aids, res_list):
+            if isinstance(r, list):
+                for m in r:
+                    m['acc'] = aid
+                    m['acc_name'] = aname
+                    combined.append(m)
+        combined.sort(key=lambda x: x.get('ts', 0), reverse=True)
+        return combined[:80]
+    return jsonify(messages=M.call(_run_all(), 45))
+
+@bp.get('/api/analytics')
+@api
+def api_analytics():
+    """Computes rich Chat Analytics (top senders, media breakdown, total size, peak activity) from recent messages."""
+    aid, chat = _acc(), _int('chat')
+    async def _calc():
+        cl = M._cl(aid)
+        ms = await cl.get_messages(chat, limit=200)
+        senders = collections.Counter()
+        sender_names = {}
+        kinds = collections.Counter()
+        total_bytes = 0
+        hours = collections.Counter()
+        for m in ms:
+            if getattr(m, 'action', None):
+                continue
+            sid = getattr(m, 'sender_id', None) or (0 if getattr(m, 'out', False) else -1)
+            sname = 'You' if getattr(m, 'out', False) else (_name(getattr(m, 'sender', None)) or f'User {sid}')
+            senders[sid] += 1
+            sender_names[sid] = sname
+            dt = getattr(m, 'date', None)
+            if dt:
+                hours[dt.hour] += 1
+            mi = media_info(m)
+            if mi:
+                kinds[mi['kind']] += 1
+                total_bytes += int(mi.get('size') or 0)
+            else:
+                kinds['text'] += 1
+        top_senders = [{'name': sender_names[k], 'count': v} for k, v in senders.most_common(8)]
+        return {
+            'sampled': len(ms),
+            'total_media_bytes': total_bytes,
+            'kinds': dict(kinds),
+            'top_senders': top_senders,
+            'peak_hour': hours.most_common(1)[0][0] if hours else None
+        }
+    return jsonify(M.call(_calc(), 35))
+
+@bp.get('/api/storage/groups')
+@api
+def api_storage_groups():
+    """Returns Backup Browser groups so the user can 1-click forward/backup any file to a Storage Group."""
+    if STORAGE is None:
+        return jsonify(groups=[])
+    try:
+        rows = STORAGE.list_groups()
+        return jsonify(groups=[{'id': r['group_id'], 'title': r['title'] or f"Group {r['group_id']}"} for r in rows])
+    except Exception:
+        return jsonify(groups=[])
 
 def count_bw(resp):
     try:
