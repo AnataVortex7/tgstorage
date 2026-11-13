@@ -4330,6 +4330,251 @@ def hapi_pc_upload():
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+
+_PC_CHUNK_JOBS = {}
+_PC_CHUNK_LOCK = threading.Lock()
+PC_CHUNK_SIZE  = 8 * 1024 * 1024   # 8 MB per HTTP chunk (never triggers Koyeb/Cloudflare connection resets)
+
+def _cleanup_stale_pc_jobs():
+    now = time.time()
+    with _PC_CHUNK_LOCK:
+        stale = [k for k, v in _PC_CHUNK_JOBS.items() if now - v.get("ts", 0) > 3600 and v.get("state") != "sending"]
+        for k in stale:
+            j = _PC_CHUNK_JOBS.pop(k, None)
+            if j and j.get("dir"):
+                shutil.rmtree(j["dir"], ignore_errors=True)
+
+@app.route("/hapi/pc_up_start", methods=["POST"])
+def hapi_pc_up_start():
+    """Starts a resumable 8 MB chunked upload for large files (e.g. 50 MB - 2000 MB PDFs/videos)."""
+    bad = _bk_auth() or _bk_ready()
+    if bad:
+        return bad
+    _cleanup_stale_pc_jobs()
+    d = request.get_json(silent=True) or {}
+    folder = _norm_path(str(d.get("folder", "") or "PC-Backup"))[:120] or "PC-Backup"
+    fname  = os.path.basename(str(d.get("name", "") or "file").replace("\\", "/")).strip()[:180] or "file"
+    size   = int(d.get("size", 0) or 0)
+    if size <= 0:
+        return jsonify({"ok": False, "msg": "invalid file size"}), 400
+    if size > PC_FILE_MAX_MB * 1024 * 1024:
+        return jsonify({"ok": False, "msg": f"file exceeds {PC_FILE_MAX_MB} MB limit"}), 413
+
+    gid = _resolve_backup_gid()
+    dup = db_one("SELECT msg_id FROM files WHERE group_id=? AND folder_path=? COLLATE NOCASE AND filename=? COLLATE NOCASE AND size=? LIMIT 1",
+                 (gid, folder, fname, size))
+    if dup and not d.get("force"):
+        return jsonify({"ok": True, "skipped": True, "file": fname, "folder": folder, "msg_id": dup["msg_id"]})
+
+    uid = secrets.token_hex(8)
+    job_dir = os.path.join(TMP_DIR, f"pcchunk_{uid}")
+    os.makedirs(job_dir, exist_ok=True)
+    safe_disk_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", fname) or "file"
+    file_path = os.path.join(job_dir, safe_disk_name)
+    with open(file_path, "wb"):
+        pass
+
+    with _PC_CHUNK_LOCK:
+        _PC_CHUNK_JOBS[uid] = {
+            "id": uid,
+            "gid": gid,
+            "folder": folder,
+            "fname": fname,
+            "size": size,
+            "written": 0,
+            "tg_sent": 0,
+            "flood_wait": 0,
+            "state": "receiving",
+            "err": "",
+            "msg_id": 0,
+            "dir": job_dir,
+            "path": file_path,
+            "ts": time.time(),
+        }
+    return jsonify({"ok": True, "skipped": False, "id": uid, "chunk": PC_CHUNK_SIZE})
+
+@app.route("/hapi/pc_up_chunk", methods=["POST", "PUT"])
+def hapi_pc_up_chunk():
+    """Appends one 8 MB chunk to an active large-file upload job."""
+    bad = _bk_auth()
+    if bad:
+        return bad
+    uid = (request.args.get("id") or "").strip()
+    try:
+        off = int(request.args.get("off", "0"))
+        length = int(request.headers.get("Content-Length", "0"))
+    except ValueError:
+        return jsonify({"ok": False, "msg": "bad offset or Content-Length"}), 400
+
+    with _PC_CHUNK_LOCK:
+        job = _PC_CHUNK_JOBS.get(uid)
+    if not job:
+        return jsonify({"ok": False, "msg": "upload job not found or expired"}), 404
+    if job["state"] != "receiving":
+        return jsonify({"ok": False, "msg": f"job is in state {job['state']}"}), 409
+    if off != job["written"]:
+        return jsonify({"ok": False, "written": job["written"], "msg": "offset mismatch"}), 409
+    if length <= 0 or job["written"] + length > job["size"]:
+        return jsonify({"ok": False, "msg": "invalid chunk size"}), 400
+
+    inp, left = request.environ["wsgi.input"], length
+    try:
+        with open(job["path"], "ab") as f:
+            while left > 0:
+                buf = inp.read(min(1 << 20, left))
+                if not buf:
+                    break
+                f.write(buf)
+                left -= len(buf)
+        if left > 0:
+            # Truncate back to job["written"] so client retry from same offset stays clean
+            with open(job["path"], "r+b") as f:
+                f.truncate(job["written"])
+            return jsonify({"ok": False, "written": job["written"], "msg": "incomplete chunk stream"}), 400
+        job["written"] += length
+        job["ts"] = time.time()
+        return jsonify({"ok": True, "written": job["written"]})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+def _start_async_tg_send(job):
+    gid = job["gid"]
+    folder = job["folder"]
+    fname = job["fname"]
+    real_size = job["size"]
+    tmp_file = job["path"]
+
+    def _worker_thread():
+        try:
+            mime = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+            tid, norm_folder = _get_or_create_folder_topic(gid, folder)
+            job["folder"] = norm_folder
+            job["ts"] = time.time()
+
+            def _prog(current, total):
+                job["tg_sent"] = int(current)
+                job["ts"] = time.time()
+
+            async def _send_big(cur_tid):
+                import inspect
+                pool = [c for c in (_tg_user, _tg_client) if c is not None]
+                if len(pool) > 1:
+                    _pc_turn[0] = (_pc_turn[0] + 1) % len(pool)
+                    if _pc_turn[0] == 1:
+                        pool = [pool[1], pool[0]]
+
+                last_ex = None
+                for cl in pool:
+                    await _ensure_peer_warmed(cl, gid)
+                    sig_params = inspect.signature(cl.send_document).parameters
+                    for attempt in range(6):
+                        try:
+                            kw = dict(file_name=fname, caption=f"📁 {norm_folder}/{fname}", progress=_prog)
+                            if "force_document" in sig_params:
+                                kw["force_document"] = True
+                            if cur_tid and cur_tid > 1:
+                                if "message_thread_id" in sig_params:
+                                    kw["message_thread_id"] = cur_tid
+                                elif "reply_to_message_id" in sig_params:
+                                    kw["reply_to_message_id"] = cur_tid
+                            m = await cl.send_document(gid, tmp_file, **kw)
+                            if m is not None and getattr(m, "id", None):
+                                return m.id, cur_tid
+                        except FloodWait as fw:
+                            wait_s = int(getattr(fw, "value", getattr(fw, "x", 20)) or 20) + 2
+                            job["flood_wait"] = wait_s
+                            job["ts"] = time.time()
+                            print(f"[pc-chunk] FloodWait {wait_s}s while sending {fname}", flush=True)
+                            await asyncio.sleep(wait_s)
+                            job["flood_wait"] = 0
+                            continue
+                        except Exception as ex:
+                            last_ex = ex
+                            err_str = str(ex).upper()
+                            if any(k in err_str for k in ("TOPIC_DELETED", "TOPIC_ID_INVALID", "MESSAGE_THREAD_INVALID", "TOPIC_CLOSED")) and cur_tid > 1:
+                                db_exec("DELETE FROM topics WHERE group_id=? AND topic_id=?", (gid, cur_tid))
+                                _topics.get(gid, {}).pop(cur_tid, None)
+                                cur_tid = 0
+                                continue
+                            if attempt < 3:
+                                await asyncio.sleep(2 * (attempt + 1))
+                                continue
+                            break
+                raise RuntimeError(f"{type(last_ex).__name__}: {last_ex}" if last_ex else "Telegram send failed")
+
+            with _pc_upload_sem:
+                mid, final_tid = tg(_send_big(tid), timeout=3600)
+
+            db_exec("""INSERT INTO files (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(group_id, msg_id, topic_id) DO UPDATE SET
+                           folder_path=excluded.folder_path,
+                           filename=excluded.filename,
+                           size=excluded.size,
+                           mime_type=excluded.mime_type""",
+                    (gid, mid, final_tid, norm_folder, fname, real_size, mime))
+            _recount(gid, [final_tid])
+            _changed(gid)
+            global _snapshot_dirty
+            _snapshot_dirty = True
+            job["tg_sent"] = real_size
+            job["msg_id"] = int(mid)
+            job["state"] = "done"
+            job["ts"] = time.time()
+            _LIVE_BK_STATUS.update(state="stored", detail=f"{norm_folder}/{fname} ({fmt_size(real_size)})", last_file=f"{norm_folder}/{fname}", last_msg_id=mid, ts=time.time())
+            print(f"[pc-chunk] stored big file: {norm_folder}/{fname} ({real_size} bytes) msg={mid}", flush=True)
+        except Exception as e:
+            job["state"] = "error"
+            job["err"] = f"{type(e).__name__}: {e}"[:240]
+            job["ts"] = time.time()
+            print(f"[pc-chunk] failed {folder}/{fname}: {e}", flush=True)
+        finally:
+            shutil.rmtree(job["dir"], ignore_errors=True)
+
+    threading.Thread(target=_worker_thread, daemon=True).start()
+
+@app.route("/hapi/pc_up_finish", methods=["POST"])
+def hapi_pc_up_finish():
+    """Marks all chunks received and launches the background Telegram upload."""
+    bad = _bk_auth()
+    if bad:
+        return bad
+    d = request.get_json(silent=True) or {}
+    uid = str(d.get("id") or request.args.get("id") or "").strip()
+    with _PC_CHUNK_LOCK:
+        job = _PC_CHUNK_JOBS.get(uid)
+    if not job:
+        return jsonify({"ok": False, "msg": "upload job not found"}), 404
+    if job["written"] != job["size"]:
+        return jsonify({"ok": False, "written": job["written"], "size": job["size"], "msg": "not all bytes received yet"}), 409
+    if job["state"] == "receiving":
+        job["state"] = "sending"
+        job["ts"] = time.time()
+        _start_async_tg_send(job)
+    return jsonify({"ok": True, "state": job["state"]})
+
+@app.route("/hapi/pc_up_status", methods=["GET"])
+def hapi_pc_up_status():
+    """Polls live Telegram upload progress for a chunked large-file job."""
+    bad = _bk_auth()
+    if bad:
+        return bad
+    uid = (request.args.get("id") or "").strip()
+    with _PC_CHUNK_LOCK:
+        job = _PC_CHUNK_JOBS.get(uid)
+    if not job:
+        return jsonify({"ok": False, "msg": "job not found"}), 404
+    return jsonify({
+        "ok": True,
+        "state": job["state"],
+        "written": job["written"],
+        "tg_sent": job["tg_sent"],
+        "size": job["size"],
+        "flood_wait": job.get("flood_wait", 0),
+        "msg_id": job.get("msg_id", 0),
+        "err": job.get("err", ""),
+    })
+
 @app.route("/hapi/backup_status", methods=["GET", "POST"])
 def hapi_backup_status():
     if request.method == "GET":
