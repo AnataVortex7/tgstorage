@@ -1,10 +1,17 @@
 """tgui.py — Official Telegram Web सारखा आधुनिक UI + Multi-Threaded Download & Server Cache Manager."""
 
-ENTER_PAGE = r'''<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<link rel="manifest" href="/app/manifest.json"><meta name="theme-color" content="#151f2b">
-<title>Telegram Hub</title><body style="font:15px system-ui;background:#0b121a;color:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px">
-<div id="box" style="background:#151f2b;border:1px solid #223042;border-radius:16px;padding:28px;max-width:380px;width:100%;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.5)">⏳ Connecting…</div>
+ENTER_PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#151f2b"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json">
+<link rel="icon" href="/app/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/app/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/app/icon-192.png">
+<title>Telegram Hub Pro</title></head><body style="font:15px system-ui;background:#0b121a;color:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px">
+<div id="box" style="background:#151f2b;border:1px solid #223042;border-radius:16px;padding:28px;max-width:380px;width:100%;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.5)">⏳ Connecting & preparing app…</div>
 <script>
+let swReady = Promise.resolve();
+if('serviceWorker' in navigator){
+ swReady = navigator.serviceWorker.register('/app/sw.js',{scope:'/app/'}).then(()=>navigator.serviceWorker.ready).catch(()=>{});
+}
 const sp=new URLSearchParams(location.search),k=sp.get('k')||'';
 let dt=sp.get('dt')||'';
 try{if(!dt)dt=JSON.parse(localStorage.getItem('tg_pwa_dt')||'""')}catch(e){}
@@ -14,6 +21,7 @@ function tryEnter(payload){
   .then(async r=>{
    if(r.ok){
     try{const d=await r.json();if(d.dt)localStorage.setItem('tg_pwa_dt',JSON.stringify(d.dt))}catch(e){}
+    await Promise.race([swReady, new Promise(res=>setTimeout(res,650))]);
     location.replace('/app/');
    }else{
     showPrompt();
@@ -37,7 +45,7 @@ UI_PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#151f2b"><meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json"><link rel="icon" href="/app/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/app/icon-192.png">
+<meta name="apple-mobile-web-app-title" content="TG Hub"><link rel="manifest" href="/app/manifest.json"><link rel="icon" href="/app/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/app/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/app/icon-192.png">
 <title>Telegram</title>
 <style>
 :root{--bg:#e4ebf0;--side:#ffffff;--in:#ffffff;--out:#e3fdd6;--acc:#2481cc;--acc2:#1a6fb3;--fg:#0f172a;--mut:#64748b;--bd:#e2e8f0;--hov:#f1f5f9;--sel:#2481cc;--bdg:#2481cc;--bdgm:#94a3b8;--ink:#fff;--sh:0 1px 3px rgba(0,0,0,.08);--pat:rgba(0,0,0,.035);--glass:rgba(255,255,255,.92)}
@@ -149,6 +157,7 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
    <button class="ib" id="pwa-btn" title="Install as Mobile APK / PC Desktop App">📲</button>
    <button class="ib" id="dlmgr" title="Multi-Thread Downloads & Server Cache">⚡<span class="bd-dot" id="dlcnt" style="display:none">0</span></button>
   </div>
+  <div id="pwa-banner" style="display:none;padding:7px 10px;background:linear-gradient(90deg,rgba(16,185,129,.16),rgba(36,129,204,.16));border-bottom:1px solid var(--bd);align-items:center;justify-content:space-between;gap:8px;font-size:12.5px"></div>
   <div id="accbar"></div>
   <div id="dlbar"></div>
   <div id="folders"></div>
@@ -205,7 +214,7 @@ const $=(s,r)=>(r||document).querySelector(s);
 const h=(t,p,...k)=>{const e=document.createElement(t);if(p)for(const[a,v]of Object.entries(p)){if(v==null||v===false)continue;if(a==='on')for(const[ev,f]of Object.entries(v))e.addEventListener(ev,f);else if(a==='text')e.textContent=v;else if(a==='class')e.className=v;else if(a==='style')e.style.cssText=v;else e.setAttribute(a,v===true?'':v)}for(const c of k.flat(9)){if(c==null||c===false)continue;e.append(c.nodeType?c:document.createTextNode(String(c)))}return e};
 const LS={get(k,d){try{const v=localStorage.getItem('tg_'+k);return v==null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem('tg_'+k,JSON.stringify(v))}catch(e){}}};
 const Q=o=>new URLSearchParams(o).toString(),sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const S={acc:null,accs:[],chat:null,cd:null,topic:0,topics:[],dl:[],adl:[],folder:'all',archived:false,msgs:[],mcache:{},readOut:0,readIn:0,pinned:null,typing:{},seq:0,sel:new Set(),reply:null,edit:null,uploads:{},dls:{},bw:null,defApi:false,loadingOld:false,noMore:false,gsearch:[],q:'',info:false,drafts:{},unreadFrom:0,dlCfg:{threads:8,ttl:3600,auto_cache:true},
+const S={acc:null,accs:[],chat:null,cd:null,topic:0,topics:[],dl:[],adl:[],folder:'all',archived:false,msgs:[],mcache:{},readOut:0,readIn:0,pinned:null,typing:{},seq:0,sel:new Set(),reply:null,edit:null,uploads:{},dls:{},bw:null,defApi:false,loadingOld:false,noMore:false,gsearch:[],q:'',info:false,drafts:{},unreadFrom:0,dlCfg:{threads:4,ttl:3600,auto_cache:true},
  set:Object.assign({theme:'auto',avatars:true,previews:true,notif:false,sound:true,md:false,enter:true,fs:15},LS.get('set',{}))};
 const EMOJI='😀😁😂🤣😊😍😘😎🤔😢😭😡👍👎👏🙏💪🔥❤️💔🎉✨🌹🎂🍕☕🚀✅❌⚠️📌📎💯😴🤝👀🙈😅😉😇🥰😋🤗🤩😏😬🙄😤😱🤯🥳😜🫡🫶⚡🌟💎🎵🎬📷👑🛡'.match(/\p{Extended_Pictographic}\uFE0F?/gu)||[];
 const REACT=['👍','❤️','🔥','🥰','👏','😁','🤔','😢','🎉','⚡','💯','👎'];
@@ -988,8 +997,8 @@ async function openFile(m){
 /* ---------- ⚡ Multi-Thread Downloads & Server Cache Manager ---------- */
 $('#dlmgr').onclick=()=>openDlManager();
 async function openDlManager(){
- const thSel=h('select',{style:'width:auto'},[1,2,4,6,8,12,16].map(n=>h('option',{value:n,text:n+' Threads'})));
- thSel.value=String(S.dlCfg.threads||8);
+ const thSel=h('select',{style:'width:auto'},[[1,'1 Thread (Ultra Safe)'],[2,'2 Threads (Safe)'],[4,'4 Threads (Recommended ⚡)'],[6,'6 Threads (Fast)'],[8,'8 Threads (Max)']].map(([n,t])=>h('option',{value:n,text:t})));
+ thSel.value=String(Math.min(8,S.dlCfg.threads||4));
  const ttlMin0=Math.round((S.dlCfg.ttl||3600)/60);
  const ttlSel=h('select',{style:'width:auto'},[[15,'15 mins'],[30,'30 mins'],[60,'1 hour'],[120,'2 hours'],[360,'6 hours'],[720,'12 hours'],[1440,'24 hours']].map(([v,t])=>h('option',{value:v,text:t})));
  ttlSel.value=String([15,30,60,120,360,720,1440].includes(ttlMin0)?ttlMin0:60);
@@ -1003,6 +1012,7 @@ async function openDlManager(){
  };
  thSel.onchange=ttlSel.onchange=autoChk.onchange=saveCfg;
  const cfgCard=h('div',{class:'dl-card'},
+  h('div',{style:'display:flex;align-items:center;gap:6px;font-size:12px;color:#10b981;font-weight:700'},'🛡 Account Anti-Ban Protection Active (Smart FloodWait Pacing + Safe Worker Cap)'),
   h('div',{class:'sw'},h('span',{text:'⚡ Parallel Download Threads'}),thSel),
   h('div',{class:'sw'},h('span',{text:'⏱ Fixed Auto-Clear Server Time'}),ttlSel),
   h('label',{style:'font-size:13px'},autoChk,'Auto-download to server when viewing video / file'),
@@ -1136,13 +1146,14 @@ async function openGhostAndAutoReply(){
    const r=await api('/app/api/ghost/list?'+Q({acc:S.acc}));
    const gChk=h('input',{type:'checkbox',checked:r.anti_delete!==false});
    const arChk=h('input',{type:'checkbox',checked:!!(r.auto_reply&&r.auto_reply.enabled)});
+   const ctChk=h('input',{type:'checkbox',checked:!!(r.auto_reply&&r.auto_reply.contacts_only)});
    const arTxt=h('textarea',{rows:2,placeholder:'Auto-reply message when someone DMs you (e.g. "I am currently studying, will reply later!")'});
    arTxt.value=(r.auto_reply&&r.auto_reply.text)||'';
    const cdSel=h('select',{style:'width:auto'},[[300,'Every 5m'],[1800,'Every 30m'],[3600,'Every 1h'],[21600,'Every 6h']].map(([v,t])=>h('option',{value:v,text:t})));
    cdSel.value=String((r.auto_reply&&r.auto_reply.cooldown)||3600);
    const saveBtn=h('button',{style:'background:var(--acc);color:#fff;padding:7px 14px;border-radius:8px;font-weight:600;align-self:flex-end',text:'💾 Save Settings',on:{async click(){
     try{
-     await api('/app/api/ghost/settings',A({anti_delete:gChk.checked,auto_reply_enabled:arChk.checked,auto_reply_text:arTxt.value,cooldown:+cdSel.value}));
+     await api('/app/api/ghost/settings',A({anti_delete:gChk.checked,auto_reply_enabled:arChk.checked,auto_reply_text:arTxt.value,cooldown:+cdSel.value,contacts_only:ctChk.checked}));
      toast('✅ Ghost & Auto-Reply settings saved');
     }catch(e){toast(e.message)}
    }}});
@@ -1152,7 +1163,9 @@ async function openGhostAndAutoReply(){
      h('label',{style:'font-weight:700'},gChk,'👻 Anti-Delete Mode (Keep deleted messages visible in chat & vault)'),
      h('hr',{style:'border:0;border-top:1px solid var(--bd);width:100%'}),
      h('label',{style:'font-weight:700'},arChk,'🤖 Smart Auto-Reply in Private Chats (Away Mode)'),
+     h('div',{class:'mut',style:'font-size:11.5px;color:#10b981'},'🛡 Anti-Ban Shield: Simulates 2.2s typing & caps at 4 replies/min.'),
      arTxt,
+     h('label',{style:'font-size:12.5px'},ctChk,'🛡 Reply to Saved Contacts only (Recommended to avoid spam traps)'),
      h('div',{class:'sw'},h('span',{class:'mut',style:'font-size:12.5px',text:'Reply Cooldown per User'}),cdSel),
      saveBtn
     ),
@@ -1353,8 +1366,8 @@ function drawManage(b){const d=S.cd,ci=S.ci&&S.ci.id===S.chat?S.ci:null;
 
 /* ---------- extras: save, jump to date, mark all read, shortcuts, multi-select actions ---------- */
 async function saveMsg(m){const u=cur().uid;if(!u){toast('No account');return}try{await api('/app/api/forward',A({from_chat:S.chat,ids:[m.id],to_chat:u,hide_author:false}));toast('🔖 Saved to Saved Messages')}catch(e){toast(e.message)}}
-async function markAll(){const L=[...S.dl,...(S.adl||[])].filter(d=>d.unread||d.mentions);if(!L.length){toast('Nothing unread');return}toast('Marking '+L.length+' chats as read…',6000);let n=0;
- for(const d of L){try{await api('/app/api/read',A({chat:d.id,max_id:0}));d.unread=0;d.mentions=0;n++}catch(e){}}drawList();toast('✓ '+n+' chat(s) marked as read')}
+async function markAll(){const L=[...S.dl,...(S.adl||[])].filter(d=>d.unread||d.mentions).slice(0,25);if(!L.length){toast('Nothing unread');return}toast('Safely marking '+L.length+' chats as read…',6000);let n=0;
+ for(const d of L){try{await api('/app/api/read',A({chat:d.id,max_id:0}));d.unread=0;d.mentions=0;n++;drawList();await sleep(350)}catch(e){}}toast('✓ '+n+' chat(s) marked as read')}
 $('#cdate').onclick=()=>{if(!S.chat)return;const dt=h('input',{type:'date'});dt.max=new Date().toISOString().slice(0,10);
  modal('Jump to date',[h('div',{class:'mut',text:'Shows the last message of that day (or the closest one before it).'}),dt],[{t:'Cancel'},{t:'Go',c:'p',async fn(c){if(!dt.value)return;const ts=Math.floor(new Date(dt.value+'T23:59:59').getTime()/1e3);
   try{const r=await api('/app/api/bydate?'+Q({acc:S.acc,chat:S.chat,ts}));c();if(!r.id){toast('No messages on or before that date');return}jumpTo(r.id)}catch(e){toast(e.message)}}}])};
@@ -1496,7 +1509,8 @@ function notify(e){
   }
  }
 }
-let dt=null;const soon=()=>{clearTimeout(dt);dt=setTimeout(()=>{loadDialogs();loadState().catch(()=>{})},700)};
+let dt=null,lastDlgSync=0;
+const soon=(needDialogs)=>{clearTimeout(dt);dt=setTimeout(()=>{const now=Date.now();if(needDialogs&&now-lastDlgSync>25000){lastDlgSync=now;loadDialogs()}},1500)};
 function handleEvent(e){
  if(e.type==='dl'){
   const k=e.acc+':'+e.chat+':'+e.mid,st={state:e.state,done:e.done,contig:e.contig||0,size:e.total,speed:e.speed||0,threads:e.threads||S.dlCfg.threads,expires_in:e.expires_in||S.dlCfg.ttl,err:e.err||''};
@@ -1515,52 +1529,92 @@ function handleEvent(e){
   if(e.type==='new'&&e.msg){const ck0=S.acc+':'+e.chat+':0';if(S.mcache[ck0]&&!S.mcache[ck0].msgs.some(x=>x.id===e.msg.id))S.mcache[ck0].msgs.push(e.msg)}if(e.type==='new'&&e.msg&&!S.msgs.some(x=>x.id===e.msg.id)){S.msgs.push(e.msg);if(!e.msg.out&&!atEnd)S.newBelow=(S.newBelow||0)+1;drawMsgs(atEnd||e.msg.out?'bottom':'keep');if(atEnd&&!document.hidden)markRead()}
   else if(e.type==='edit'&&e.msg)replaceMsg(e.msg);else if(e.type==='del'){if(e.ghost){S.msgs.forEach(x=>{if((e.ids||[]).includes(x.id)&&!x.out)x._deleted=true});S.msgs=S.msgs.filter(x=>!((e.ids||[]).includes(x.id)&&x.out))}else{S.msgs=S.msgs.filter(x=>!(e.ids||[]).includes(x.id))}drawMsgs('keep')}
  }
- soon()}
+ soon(!d&&e.type==='new')}
 async function poll(){for(;;){try{const r=await api('/app/api/events?'+Q({since:S.seq,wait:20}));S.seq=r.seq;for(const e of r.events)handleEvent(e)}catch(e){await sleep(3500)}}}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeMenu();closeFv();$('#lb').style.display='none';const ov=document.querySelector('.ov');if(ov)ov.remove();if(S.sel.size){S.sel.clear();selUpdate();drawMsgs('keep')}}});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&S.chat)markRead()});
 
 /* ---------- 📲 Installable Mobile APK (WebAPK) & PC Desktop App (PWA) ---------- */
-let deferredPrompt=null;
+let deferredPrompt=null,pwaModalRefresh=null;
+function isStandaloneApp(){
+ return window.matchMedia('(display-mode: standalone)').matches||window.matchMedia('(display-mode: minimal-ui)').matches||!!window.navigator.standalone;
+}
+function drawPwaBanner(){
+ const bn=$('#pwa-banner'),b=$('#pwa-btn');
+ if(b)b.style.color=deferredPrompt?'#10b981':(isStandaloneApp()?'var(--acc)':'');
+ if(!bn)return;
+ if(isStandaloneApp()||LS.get('hide_pwa_bn',false)||!deferredPrompt){bn.style.display='none';return}
+ bn.style.display='flex';
+ bn.replaceChildren(
+  h('span',{style:'font-weight:600;color:var(--fg)',text:'📲 Install TG Hub as a Real Mobile App (WebAPK)'}),
+  h('div',{style:'display:flex;gap:6px;align-items:center'},
+   h('button',{style:'background:#10b981;color:#fff;padding:4px 10px;border-radius:8px;font-weight:700;font-size:12px',text:'Install App',on:{async click(){
+    if(!deferredPrompt){installPwaModal();return}
+    deferredPrompt.prompt();
+    const c=await deferredPrompt.userChoice;
+    if(c&&c.outcome==='accepted'){deferredPrompt=null;drawPwaBanner();toast('✅ Installing real WebAPK app — check Home Screen in 5-10s!')}
+   }}}),
+   h('button',{class:'mut',style:'font-size:14px;padding:0 4px',text:'✕',on:{click(){LS.set('hide_pwa_bn',true);bn.style.display='none'}}})
+  )
+ );
+}
 if('serviceWorker' in navigator){
- navigator.serviceWorker.register('/app/sw.js',{scope:'/app/'}).catch(()=>{});
+ navigator.serviceWorker.register('/app/sw.js',{scope:'/app/'}).then(()=>{
+  if(pwaModalRefresh)pwaModalRefresh();
+ }).catch(()=>{});
+ navigator.serviceWorker.addEventListener('controllerchange',()=>{if(pwaModalRefresh)pwaModalRefresh()});
 }
 window.addEventListener('beforeinstallprompt',e=>{
  e.preventDefault();
  deferredPrompt=e;
- const b=$('#pwa-btn');
- if(b)b.style.color='var(--acc)';
+ drawPwaBanner();
+ if(pwaModalRefresh)pwaModalRefresh();
 });
 window.addEventListener('appinstalled',()=>{
  deferredPrompt=null;
- toast('✅ App installed on your device!');
+ drawPwaBanner();
+ if(pwaModalRefresh)pwaModalRefresh();
+ toast('✅ Real Native App (WebAPK) installed on your device!');
 });
 $('#pwa-btn').onclick=()=>installPwaModal();
 async function installPwaModal(){
- const isStandalone=window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone;
- const fsBtn=h('button',{style:'background:var(--acc);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;width:100%',text:document.fullscreenElement?'🗗 Exit Fullscreen App Mode':'📱 Open Fullscreen App Mode Now (Instant)',on:{click(){
-  if(document.fullscreenElement){document.exitFullscreen().catch(()=>{})}
-  else if(document.documentElement.requestFullscreen){document.documentElement.requestFullscreen().catch(e=>toast(e.message))}
-  const ov=document.querySelector('.ov');if(ov)ov.remove();
- }}});
- const natBtn=deferredPrompt?h('button',{style:'background:#10b981;color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;width:100%',text:'📲 Install Native App on Device (1-Click)',on:{async click(){
-  if(!deferredPrompt)return;
-  deferredPrompt.prompt();
-  const choice=await deferredPrompt.userChoice;
-  if(choice&&choice.outcome==='accepted'){deferredPrompt=null;toast('✅ Installing app — check Home Screen in 5-10s')}
- }}}):null;
- modal('📲 Mobile APK / PC App Mode',[
-  natBtn,
-  fsBtn,
-  h('div',{class:'dl-card'},
-   h('b',{style:'color:var(--acc);font-size:13.5px',text:isStandalone?'✅ Running as Installed Native App!':'📱 Android वर "Installing..." अडकल्यास काय करावे?'}),
-   h('div',{style:'font-size:12.5px;line-height:1.45',text:'1) Xiaomi / Redmi / Vivo / Oppo / Realme फोनवर: Phone Settings → Apps → Chrome → Permissions → "Home screen shortcuts" (किंवा "Install unknown apps") ON करा. \n2) किंवा Chrome च्या ⋮ मेन्यूमध्ये "Add to Home screen" → "Create shortcut" निवडा — १ सेकंदात Home Screen वर आयकॉन तयार होईल!'})
-  ),
-  h('div',{class:'dl-card'},
-   h('b',{style:'font-size:13px',text:'💻 PC / Laptop (Chrome / Edge):'}),
-   h('div',{class:'mut',style:'font-size:12.5px',text:'Click the 📲 Install icon in the address bar (already working on your PC!).'})
-  )
- ],[{t:'Close'}]);
+ const box=h('div',{style:'display:flex;flex-direction:column;gap:10px'});
+ const renderBox=()=>{
+  const standalone=isStandaloneApp();
+  const swCtrl=!!(navigator.serviceWorker&&navigator.serviceWorker.controller);
+  const natBtn=deferredPrompt?h('button',{style:'background:#10b981;color:#fff;padding:11px 14px;border-radius:10px;font-weight:700;width:100%;font-size:14.5px;box-shadow:0 4px 14px rgba(16,185,129,.35)',text:'📲 Install Real App on Phone / PC Now (1-Click WebAPK)',on:{async click(){
+   if(!deferredPrompt)return;
+   deferredPrompt.prompt();
+   const choice=await deferredPrompt.userChoice;
+   if(choice&&choice.outcome==='accepted'){deferredPrompt=null;drawPwaBanner();renderBox();toast('✅ Installing WebAPK app — check your App Drawer / Home Screen in 5-10s!')}
+  }}}):null;
+  const reloadSwBtn=(!standalone&&!swCtrl&&'serviceWorker' in navigator)?h('button',{style:'background:#f59e0b;color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;width:100%',text:'🔄 Activate App Installer (1-Tap Reload)',on:{click(){location.replace('/app/')}}}):null;
+  const fsBtn=h('button',{style:'background:var(--acc);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;width:100%',text:document.fullscreenElement?'🗗 Exit Fullscreen App Mode':'📱 Open Fullscreen App Mode Now',on:{click(){
+   if(document.fullscreenElement){document.exitFullscreen().catch(()=>{})}
+   else if(document.documentElement.requestFullscreen){document.documentElement.requestFullscreen().catch(e=>toast(e.message))}
+   const ov=document.querySelector('.ov');if(ov)ov.remove();
+  }}});
+  box.replaceChildren(
+   h('div',{class:'dl-card',style:'border:1px solid '+(standalone||deferredPrompt?'#10b981':'var(--bd)')},
+    h('b',{style:'color:'+(standalone||deferredPrompt?'#10b981':'var(--acc)')+';font-size:13.5px',text:standalone?'✅ हे App तुमच्या फोनवर Standalone Native App म्हणून चालू आहे!':(deferredPrompt?'✅ 1-Click Native WebAPK Install तयार आहे! (वरचे हिरवे बटण दाबा)':(swCtrl?'ℹ️ Browser मेन्यूमधून "Install app" निवडा (किंवा App आधीच Install आहे)':'⏳ App Installer तयार होत आहे — खालील पिवळे Activate बटण दाबा'))}),
+    h('div',{class:'mut',style:'font-size:12px'},`Status: HTTPS=${location.protocol==='https:'||location.hostname==='localhost'?'✔':'✖'} · ServiceWorker=${swCtrl?'✔ Active':'⏳ Ready on reload'} · Scope=/app/`)
+   ),
+   natBtn,
+   reloadSwBtn,
+   fsBtn,
+   h('div',{class:'dl-card'},
+    h('b',{style:'color:var(--acc);font-size:13.5px',text:'📱 मोबाईलवर Shortcut ऐवजी खरे App (WebAPK) कसे Install करावे?'}),
+    h('div',{style:'font-size:12.5px;line-height:1.5;white-space:pre-line',text:'1) वर हिरवे "📲 Install Real App" बटण दिसत असल्यास त्यावर क्लिक करा — थेट खरे App (WebAPK) इन्स्टॉल होईल.\n2) किंवा Chrome च्या उजव्या कोपऱ्यातील ⋮ मेन्यूवर टॅप करून "Install app" (किंवा "Add to Home screen" → "Install") निवडा. (टीप: "Create shortcut" निवडू नका, त्याने फक्त साधा ब्राउझर शॉर्टकट बनतो!)\n3) जर आधी जुना Shortcut बनवला असेल, तर तो आधी Home Screen वरून Remove/Delete करा आणि मग इथून "Install app" करा.'})
+   ),
+   h('div',{class:'dl-card'},
+    h('b',{style:'font-size:13px',text:'💻 PC / Laptop (Chrome / Edge):'}),
+    h('div',{class:'mut',style:'font-size:12.5px',text:'Address bar मधील 📲 Install आयकॉनवर क्लिक करून Desktop App म्हणून इन्स्टॉल करा.'})
+   )
+  );
+ };
+ pwaModalRefresh=renderBox;
+ renderBox();
+ modal('📲 Install Native App (WebAPK / PC)',box,[{t:'Close',fn(c){pwaModalRefresh=null;c()}}]);
 }
 
 /* ---------- start ---------- */

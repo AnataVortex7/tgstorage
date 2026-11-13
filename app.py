@@ -57,7 +57,7 @@ if 0 < _mem <= 768:
     os.environ.setdefault("MAX_ACCOUNTS", "3")        # each Telegram account ~30-50 MB
 os.environ.setdefault("DISK_CACHE_GB", "20")          # allow large multi-GB files; actual free disk check protects disk
 os.environ.setdefault("CACHE_TTL_MINUTES", "60")      # auto-clear cached server files after fixed time (default 60 min)
-os.environ.setdefault("DL_THREADS", "8")              # internal multi-threaded download workers per file
+os.environ.setdefault("DL_THREADS", "4")              # safe default multi-threaded workers per file (account ban protection)
 os.environ.setdefault("BW_LIMIT_GB", "100000")        # this server has no outbound limit
 
 _missing = [k for k in ("BOT_TOKEN", "API_ID", "API_HASH", "WEB_PASSWORD", "ADMIN_PASSWORD",

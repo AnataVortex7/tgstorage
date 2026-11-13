@@ -431,6 +431,10 @@ def require_auth(f):
     @wraps(f)
     def wrapped(*args, **kwargs):
         if not session.get("authenticated"):
+            # Render LOGIN_HTML with 200 OK on / and /browse/ so Android WebAPK Minting Server validates start_url + manifest without failing on a 302 redirect!
+            if request.method in ("GET", "HEAD") and request.path in ("/", "/browse", "/browse/"):
+                ip = get_ip()
+                return render_template_string(LOGIN_HTML, blocked=is_blocked(ip), error=None, auth_bot_name=BOT_NAME, client_ip=ip)
             return redirect(url_for("login_page"))
         return f(*args, **kwargs)
     return wrapped
@@ -456,6 +460,19 @@ _tg_user   = None      # optional user-account client (reads the group)
 _warmed    = False
 _tg_ready  = threading.Event()
 
+_MONGO_CLIENT_SINGLETON = None
+_MONGO_CLIENT_LOCK = threading.Lock()
+
+def _get_mongo_db():
+    global _MONGO_CLIENT_SINGLETON
+    if not MONGO_URI:
+        return None
+    with _MONGO_CLIENT_LOCK:
+        if _MONGO_CLIENT_SINGLETON is None:
+            from pymongo import MongoClient
+            _MONGO_CLIENT_SINGLETON = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000, maxPoolSize=10)
+        return _MONGO_CLIENT_SINGLETON[MONGO_DB]
+
 def _load_session():
     """Saved bot session string (Mongo, or SESSION_STRING env). Reusing it
     avoids auth.ImportBotAuthorization on every restart — that call is what
@@ -466,8 +483,7 @@ def _load_session():
     if not MONGO_URI:
         return ""
     try:
-        from pymongo import MongoClient
-        db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]
+        db = _get_mongo_db()
         doc = db["session"].find_one({"_id": "bot"})
         return (doc or {}).get("session_string", "")
     except Exception as e:
@@ -490,8 +506,7 @@ def _save_session(session_string):
     if not MONGO_URI or not session_string:
         return
     try:
-        from pymongo import MongoClient
-        db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]
+        db = _get_mongo_db()
         db["session"].replace_one({"_id": "bot"},
                                   {"_id": "bot", "session_string": session_string},
                                   upsert=True)
@@ -500,18 +515,12 @@ def _save_session(session_string):
         print(f"[session] save failed: {e}", flush=True)
 
 # ── One Telegram session user at a time (rolling deploys) ────────────────
-# On Koyeb the NEW instance starts (and is "healthy" for the web) while the OLD
-# one is still running for a while. Using the same Telegram session in both gives
-# AUTH_KEY_DUPLICATED. So: a lease in MongoDB. The old instance keeps refreshing it
-# (every 10s) and releases it on SIGTERM; the new instance waits until the lease is
-# free (or stale) BEFORE it connects to Telegram. The web UI keeps working meanwhile.
 INSTANCE_ID = secrets.token_hex(6)
 LOCK_STALE = 25               # seconds without heartbeat -> old instance is dead
 _lock_started = False
 
 def _lock_coll():
-    from pymongo import MongoClient
-    return MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]["lock"]
+    return _get_mongo_db()["lock"]
 
 def _acquire_lock(max_wait=420):
     global _lock_started
@@ -586,8 +595,7 @@ def _delete_session():
     if not MONGO_URI:
         return
     try:
-        from pymongo import MongoClient
-        MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]["session"].delete_one({"_id": "bot"})
+        _get_mongo_db()["session"].delete_one({"_id": "bot"})
         print("[session] bad bot session deleted from MongoDB", flush=True)
     except Exception as e:
         print(f"[session] delete failed: {e}", flush=True)
@@ -1074,8 +1082,7 @@ def _load_user_session():
         return USER_SESSION
     if MONGO_URI:
         try:
-            from pymongo import MongoClient
-            db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]
+            db = _get_mongo_db()
             doc = db["session"].find_one({"_id": "user"})
             if doc and doc.get("session_string"):
                 return doc["session_string"]
@@ -1088,8 +1095,7 @@ def _save_user_session(sess):
     meta_set("user_session_string", sess)
     if MONGO_URI:
         try:
-            from pymongo import MongoClient
-            db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]
+            db = _get_mongo_db()
             db["session"].replace_one({"_id": "user"}, {"_id": "user", "session_string": sess}, upsert=True)
         except Exception as e:
             print(f"[user-session] mongo save failed: {e}", flush=True)
@@ -1101,8 +1107,7 @@ def _delete_user_session():
     db_exec("DELETE FROM meta WHERE key='user_session_string'")
     if MONGO_URI:
         try:
-            from pymongo import MongoClient
-            MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]["session"].delete_one({"_id": "user"})
+            _get_mongo_db()["session"].delete_one({"_id": "user"})
         except Exception as e:
             print(f"[user-session] mongo delete failed: {e}", flush=True)
 
@@ -1118,7 +1123,8 @@ async def _start_user(sess):
             pass
     _warmed = False
     c = Client(name="tg_user", api_id=API_ID, api_hash=API_HASH,
-               session_string=sess, in_memory=True, sleep_threshold=120)
+               device_model="Desktop", system_version="Windows 10 x64", app_version="4.16.8 x64",
+               lang_code="en", session_string=sess, in_memory=True, sleep_threshold=120)
     c.add_handler(RawUpdateHandler(_on_raw_update), group=-1)
     await c.start()
     me = await c.get_me()
@@ -1145,7 +1151,8 @@ async def _qr_begin_async():
                 await v["c"].disconnect()
             except Exception:
                 pass
-    c = Client(name=f"qr{secrets.token_hex(3)}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+    c = Client(name=f"qr{secrets.token_hex(3)}", api_id=API_ID, api_hash=API_HASH,
+               device_model="Desktop", system_version="Windows 10 x64", app_version="4.16.8 x64", lang_code="en", in_memory=True)
     await c.connect()
     try:
         r = await c.session.invoke(tg_raw.functions.auth.ExportLoginToken(
@@ -1305,7 +1312,8 @@ async def _login_step(msg):
             if len(_digits(raw)) < 8:
                 await msg.reply("❌ Number बरोबर नाही. country code सह पाठव, उदा. `+919876543210`")
                 return
-            c = Client(name=f"login{uid}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+            c = Client(name=f"login{uid}", api_id=API_ID, api_hash=API_HASH,
+                       device_model="Desktop", system_version="Windows 10 x64", app_version="4.16.8 x64", lang_code="en", in_memory=True)
             await c.connect()
             try:
                 sent = await c.send_code(raw)
@@ -1574,8 +1582,7 @@ async def _on_raw_update(client, update, users, chats):
 
 # ── Persistence (MongoDB snapshot) ───────────────────────────────────────
 def _mongo_coll():
-    from pymongo import MongoClient
-    return MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)[MONGO_DB]["index_snapshot"]
+    return _get_mongo_db()["index_snapshot"]
 
 CHUNK = 20000
 
@@ -1824,6 +1831,17 @@ async def _poll_group(gid):
         return 0
     cl = _rd()
     await _refresh_group_meta(gid)
+    if cl is _tg_user and _tg_user is not None:
+        try:
+            latest_id = 0
+            async for hm in cl.get_chat_history(gid, limit=1):
+                latest_id = hm.id
+            if latest_id and latest_id <= cursor:
+                _last_check[gid] = time.time()
+                _group_err.pop(gid, None)
+                return 0
+        except Exception:
+            pass
     ch = await _input_channel(gid, cl)
     found = 0
     for _ in range(10):               # at most 1000 ids per check
@@ -1905,7 +1923,10 @@ LOGIN_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#161b22"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/icon-192.png">
 <title>Backup Browser — Login</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -1974,6 +1995,7 @@ input:focus{border-color:#58a6ff}
     {% endif %}
   {% endif %}
 </div>
+<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js',{scope:'/'}).catch(()=>{});</script>
 </body>
 </html>"""
 
@@ -2106,6 +2128,16 @@ def st_icon_512():
     body = _get_apk_png(512, bg=(22, 27, 34))
     return Response(body, mimetype="image/png", headers={"Content-Length": str(len(body)), "Cache-Control": "public, max-age=86400"})
 
+@app.route("/icon-maskable-192.png")
+def st_icon_maskable_192():
+    body = _get_apk_png(192, bg=(30, 41, 59))
+    return Response(body, mimetype="image/png", headers={"Content-Length": str(len(body)), "Cache-Control": "public, max-age=86400"})
+
+@app.route("/icon-maskable-512.png")
+def st_icon_maskable_512():
+    body = _get_apk_png(512, bg=(30, 41, 59))
+    return Response(body, mimetype="image/png", headers={"Content-Length": str(len(body)), "Cache-Control": "public, max-age=86400"})
+
 @app.route("/manifest.json")
 def st_manifest():
     import json as _json
@@ -2114,25 +2146,55 @@ def st_manifest():
         "name": "Telegram Backup Explorer",
         "short_name": "TG Storage",
         "description": "Browse & Stream Telegram Backup Groups",
+        "lang": "en",
+        "dir": "ltr",
         "start_url": "/browse/",
         "scope": "/",
         "display": "standalone",
+        "display_override": ["standalone", "minimal-ui"],
         "orientation": "portrait",
         "prefer_related_applications": False,
         "background_color": "#191919",
         "theme_color": "#202020",
+        "categories": ["utilities", "productivity"],
         "icons": [
             {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
             {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+            {"src": "/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+            {"src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
         ]
     }
     body = _json.dumps(m).encode("utf-8")
-    return Response(body, mimetype="application/manifest+json", headers={"Content-Length": str(len(body))})
+    return Response(body, mimetype="application/manifest+json", headers={"Content-Length": str(len(body)), "Cache-Control": "public, max-age=300"})
+
+_ST_SW_JS = """const CACHE_NAME = 'tgstorage-pwa-v5';
+const SHELL_ASSETS = ['/manifest.json', '/icon-192.png', '/icon-512.png', '/icon.svg'];
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(SHELL_ASSETS)).catch(() => {}));
+  self.skipWaiting();
+});
+self.addEventListener('activate', e => {
+  e.waitUntil((
+    caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
+  ).then(() => self.clients.claim()));
+});
+self.addEventListener('fetch', e => {
+  if (e.request.method !== 'GET') return;
+  const url = new URL(e.request.url);
+  if (SHELL_ASSETS.includes(url.pathname)) {
+    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+    return;
+  }
+  if (e.request.mode === 'navigate') {
+    e.respondWith(fetch(e.request).catch(() => new Response('Offline - check connection', {status: 200, headers: {'Content-Type': 'text/plain'}})));
+  }
+});
+"""
 
 @app.route("/sw.js")
 def st_sw():
-    return Response('self.addEventListener("install",e=>self.skipWaiting());self.addEventListener("activate",e=>e.waitUntil(self.clients.claim()));self.addEventListener("fetch",e=>{});', mimetype="application/javascript")
+    body = _ST_SW_JS.encode("utf-8")
+    return Response(body, mimetype="application/javascript", headers={"Content-Length": str(len(body)), "Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
 
 
 EXPLORER_HTML = r"""<!DOCTYPE html>
@@ -2141,7 +2203,7 @@ EXPLORER_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#191919"><meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.json"><link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.json"><link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png"><link rel="icon" href="/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/icon-192.png">
 <title>Backup Explorer</title>
 <style>
 :root{--bg:#f3f3f3;--content:#fff;--text:#1b1b1b;--muted:#6b6b6b;--line:#e1e1e1;--hover:#eaf3fb;--sel:#cce8ff;--selb:#99d1ff;--menu:#fff;--shadow:0 8px 24px rgba(0,0,0,.18);--acc:#0067c0}
@@ -2939,11 +3001,11 @@ $('#grp').onchange = e => switchGroup(e.target.value);
 $('#gadd').onclick = addGroup;
 $('#lo').onclick = () => { location.href = '/logout'; };
 let stDeferredPrompt = null;
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); stDeferredPrompt = e; });
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); stDeferredPrompt = e; const b = $('#pwab'); if (b) b.style.color = '#10b981'; });
 $('#pwab').onclick = async () => {
   if (stDeferredPrompt) { stDeferredPrompt.prompt(); await stDeferredPrompt.userChoice; stDeferredPrompt = null; return; }
-  await dialog({ title: '📲 Install Backup Explorer App', text: 'Mobile वर: Browser च्या ⋮ मेन्यूवर टॅप करून "Install app" किंवा "Add to Home screen" निवडा.\nPC वर: Address bar मधल्या 📲 Install बटनावर क्लिक करा.', ok: 'OK' });
+  await dialog({ title: '📲 Install Backup Explorer App (WebAPK)', text: 'Mobile वर: Chrome च्या ⋮ मेन्यूवर टॅप करून "Install app" निवडा ("Create shortcut" निवडू नका!). जर आधी जुना Shortcut बनवला असेल तर तो आधी Home Screen वरून काढून टाका.\nPC वर: Address bar मधल्या 📲 Install बटनावर क्लिक करा.', ok: 'OK' });
 };
 
 /* ---------- index status / auto-check ---------- */

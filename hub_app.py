@@ -437,7 +437,7 @@ def on_callback(cbid, uid, chat, mid, data):
             ans('Telegram accounts बंद आहेत', True); return
         tok = tgweb.new_token()
         ans('✅ Link पाठवतोय')
-        send_ephemeral(chat, f"👤 <b>Telegram UI</b>\n{esc(root_url())}/app?k={tok}\n\n"
+        send_ephemeral(chat, f"👤 <b>Telegram UI</b>\n{esc(root_url())}/app/?k={tok}\n\n"
                              f"⏱ एकदाच चालतो, 2 मिनिटं. हा message 90 सेकंदांत आपोआप delete होईल.")
         return
     if kind in ('tp', 'tc', 'tr', 'tx'):

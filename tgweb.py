@@ -66,7 +66,7 @@ DISK_CACHE = int(float(os.environ.get('DISK_CACHE_GB', '20')) * 1024 ** 3)
 
 # Multi-thread & Fixed-Time Auto-Clear settings (configurable via env & live from UI)
 DL_CFG = {
-    'threads': max(1, min(16, int(os.environ.get('DL_THREADS', '8') or 8))),
+    'threads': max(1, min(8, int(os.environ.get('DL_THREADS', '4') or 4))),
     'ttl': max(60, int(float(os.environ.get('CACHE_TTL_MINUTES', '60') or 60) * 60)),  # seconds before auto-clear
     'auto_cache': os.environ.get('AUTO_SERVER_CACHE', '1').strip() != '0',
     'anti_delete': True,   # Ghost Mode: keep deleted messages visible instead of erasing them
@@ -311,9 +311,10 @@ def _thumb_index(m):
 
 
 def default_factory(sess, api_id, api_hash):
-    return TelegramClient(StringSession(sess or ''), int(api_id), api_hash, device_model='Worker Hub',
-                          app_version='2.0', system_version='Linux', lang_code='en',
-                          connection_retries=None, retry_delay=2, auto_reconnect=True, flood_sleep_threshold=60)
+    return TelegramClient(StringSession(sess or ''), int(api_id), api_hash, device_model='Desktop',
+                          app_version='4.16.8 x64', system_version='Windows 10 x64', lang_code='en',
+                          system_lang_code='en-US', connection_retries=None, retry_delay=3,
+                          auto_reconnect=True, flood_sleep_threshold=120)
 
 client_factory = default_factory
 
@@ -511,6 +512,8 @@ class Manager:
     def _run(self):
         asyncio.set_event_loop(self.loop)
         self.avatar_sem = asyncio.Semaphore(4)
+        self.thumb_sem = asyncio.Semaphore(3)
+        self.dl_sem = asyncio.Semaphore(6)
         self.loop.create_task(self.supervisor())
         self.loop.run_forever()
 
@@ -693,17 +696,27 @@ class Manager:
                 while len(MSG_RECENT) > 800:
                     MSG_RECENT.popitem(last=False)
             self.push(aid, 'new', cid, sm)
-            # Smart Auto-Reply in private chats
+            # Smart Auto-Reply in private chats (with human typing simulation + anti-ban rate limit)
             ar = AUTO_REPLY.get(aid)
             if ar and ar.get('enabled') and ar.get('text') and not sm.get('out') and not sm.get('service'):
                 if getattr(ev, 'is_private', False):
-                    sender = await ev.get_sender()
+                    sender = getattr(ev.message, 'sender', None) or await ev.get_sender()
                     if sender and not getattr(sender, 'bot', False) and not getattr(sender, 'is_self', False):
+                        if ar.get('contacts_only') and not getattr(sender, 'contact', False):
+                            return
                         now = time.time()
                         sent_map = ar.setdefault('sent_to', {})
-                        if now - sent_map.get(cid, 0) > int(ar.get('cooldown', 3600)):
+                        if len(sent_map) > 500:
+                            for ok_k in [k0 for k0, t0 in list(sent_map.items()) if now - t0 > 86400]:
+                                sent_map.pop(ok_k, None)
+                        win = [t0 for t0 in ar.setdefault('win', []) if now - t0 < 60]
+                        ar['win'] = win
+                        if len(win) < 4 and now - sent_map.get(cid, 0) > int(ar.get('cooldown', 3600)):
                             sent_map[cid] = now
+                            win.append(now)
                             try:
+                                async with cl.action(cid, 'typing'):
+                                    await asyncio.sleep(2.2)
                                 rm = await cl.send_message(cid, ar['text'], reply_to=sm['id'])
                                 self.push(aid, 'new', cid, ser_msg(rm))
                             except Exception:
@@ -737,12 +750,11 @@ class Manager:
         async def on_user(ev):
             act = 'typing' if getattr(ev, 'typing', False) else 'recording' if getattr(ev, 'recording', False) \
                 else 'uploading' if getattr(ev, 'uploading', False) else ''
-            who = ''
-            try:
-                who = _name(await ev.get_user())
-            except Exception:
-                pass
-            self.push(aid, 'typing', getattr(ev, 'chat_id', None) or getattr(ev, 'user_id', None), None, None,
+            cid = getattr(ev, 'chat_id', None) or getattr(ev, 'user_id', None)
+            if not cid:
+                return
+            who = _name(getattr(ev, 'user', None)) if act else ''
+            self.push(aid, 'typing', cid, None, None,
                       action=act, who=who, online=bool(getattr(ev, 'online', False)))
         cl.add_event_handler(on_new, events.NewMessage())
         cl.add_event_handler(on_edit, events.MessageEdited())
@@ -750,10 +762,32 @@ class Manager:
         cl.add_event_handler(on_read, events.MessageRead())
         cl.add_event_handler(on_user, events.UserUpdate())
 
+    def _update_cached_dialog(self, aid, kind, chat_id, msg, **extra):
+        if chat_id is None:
+            return
+        cid = int(chat_id)
+        for arch in (False, True):
+            entry = self.cache.get((aid, arch))
+            if not entry:
+                continue
+            _, dlist = entry
+            for d in dlist:
+                if d.get('id') == cid:
+                    if kind == 'new' and isinstance(msg, dict):
+                        d['last'] = (msg.get('text') or '📎 Media')[:90]
+                        d['ts'] = int(msg.get('ts') or time.time())
+                        d['out'] = bool(msg.get('out', False))
+                        if not d['out']:
+                            d['unread'] = int(d.get('unread') or 0) + 1
+                    elif kind == 'read':
+                        mx = int(extra.get('max_id') or 0)
+                        if mx:
+                            d['read_out'] = max(int(d.get('read_out') or 0), mx)
+                    break
+
     def push(self, aid, kind, chat_id, msg, ids=None, **extra):
         if kind in ('new', 'edit', 'del', 'read'):
-            self.cache.pop((aid, False), None)
-            self.cache.pop((aid, True), None)
+            self._update_cached_dialog(aid, kind, chat_id, msg, **extra)
             if chat_id is not None:
                 for k in [k for k in list(self.msg_cache) if k[0] == aid and k[1] == int(chat_id)]:
                     self.msg_cache.pop(k, None)
@@ -774,36 +808,39 @@ class Manager:
     # ═══════════ API coroutines ═══════════
     async def a_dialogs(self, aid, archived=False):
         key = (aid, bool(archived))
+        now = time.time()
         c = self.cache.get(key)
-        if c and time.time() - c[0] < 60:
+        ttl = 180 if archived else 45
+        if c and now - c[0] < ttl:
             return c[1]
         cl = self._cl(aid)
         if archived:
             try:
-                ds = await asyncio.wait_for(cl.get_dialogs(limit=100, folder=1), 15)
+                ds = await asyncio.wait_for(cl.get_dialogs(limit=60, folder=1), 15)
                 out = [dict(ser_dialog(d), archived=True) for d in ds]
             except Exception:
-                out = []
+                out = c[1] if c else []
             self.cache[key] = (time.time(), out)
             return out
-        res0, res1 = await asyncio.gather(
-            cl.get_dialogs(limit=120, folder=0),
-            cl.get_dialogs(limit=100, folder=1),
-            return_exceptions=True
-        )
-        if isinstance(res0, Exception):
-            raise res0
+        res0 = await asyncio.wait_for(cl.get_dialogs(limit=100, folder=0), 25)
         out0 = [ser_dialog(d) for d in res0 if not getattr(d, 'archived', False)]
-        out1 = [dict(ser_dialog(d), archived=True) for d in res0 if getattr(d, 'archived', False)]
-        if not isinstance(res1, Exception) and res1:
+        out1_from_0 = [dict(ser_dialog(d), archived=True) for d in res0 if getattr(d, 'archived', False)]
+        self.cache[(aid, False)] = (time.time(), out0)
+        c_arch = self.cache.get((aid, True))
+        if not c_arch or now - c_arch[0] >= 180:
+            await asyncio.sleep(0.35)
+            try:
+                res1 = await asyncio.wait_for(cl.get_dialogs(limit=60, folder=1), 15)
+            except Exception:
+                res1 = []
+            out1 = list(out1_from_0)
             seen = {x['id'] for x in out1}
-            for d in res1:
+            for d in (res1 or []):
                 sd = ser_dialog(d)
                 sd['archived'] = True
                 if sd['id'] not in seen:
                     out1.append(sd)
-        self.cache[(aid, False)] = (time.time(), out0)
-        self.cache[(aid, True)] = (time.time(), out1)
+            self.cache[(aid, True)] = (time.time(), out1)
         return out0
 
     async def a_messages(self, aid, chat, before, limit, topic_id=0):
@@ -908,10 +945,13 @@ class Manager:
         if not isinstance(to_chats, list):
             to_chats = [to_chats]
         out_msgs = []
-        for tc in to_chats[:10]:
+        for idx, tc in enumerate(to_chats[:10]):
+            if idx > 0:
+                await asyncio.sleep(0.65)
             tc_int = int(tc)
             if comment and comment.strip():
                 await cl.send_message(tc_int, comment.strip()[:2000])
+                await asyncio.sleep(0.25)
             ms = await cl.forward_messages(tc_int, ids, from_peer=from_chat, drop_author=bool(hide))
             ms = ms if isinstance(ms, list) else [ms]
             out_msgs.extend([ser_msg(m) for m in ms if m])
@@ -1405,34 +1445,49 @@ class Manager:
         if key in self.avatars:
             return self.avatars[key]
         async with self.avatar_sem:
+            if key in self.avatars:
+                return self.avatars[key]
             cl = self._cl(aid)
-            peer = await cl.get_input_entity(chat)
-            data = await cl.download_profile_photo(peer, file=bytes, download_big=False)
-        _lru_put(self.avatars, key, data or b'', 250, 6 * MB)
-        return data or b''
+            try:
+                peer = await cl.get_input_entity(chat)
+                data = await cl.download_profile_photo(peer, file=bytes, download_big=False)
+            except Exception:
+                data = b''
+            _lru_put(self.avatars, key, data or b'', 250, 6 * MB)
+            return data or b''
 
     async def a_thumb(self, aid, chat, mid):
         key = (aid, chat, mid)
         if key in self.thumbs:
+            if not self.thumbs[key]:
+                raise ApiError('thumb नाही', 404)
             return self.thumbs[key]
-        cl = self._cl(aid)
-        m = await cl.get_messages(chat, ids=mid)
-        info = media_info(m) if m else None
-        if not info:
-            raise ApiError('media नाही', 404)
-        idx = _thumb_index(m)
-        if info['kind'] == 'sticker' and 0 < info['size'] < 400 * 1024 and 'webp' in info['mime']:
-            data = (await cl.download_media(m, file=bytes),)
-        elif idx is not None:
-            data = (await cl.download_media(m, file=bytes, thumb=idx),)
-        elif info['kind'] == 'photo' and 0 < info['size'] < 300 * 1024:
-            data = (await cl.download_media(m, file=bytes),)
-        else:
-            raise ApiError('thumb नाही', 404)
-        if not data[0]:
-            raise ApiError('thumb अयशस्वी', 502)
-        _lru_put(self.thumbs, key, data[0], 400, 16 * MB)
-        return data[0]
+        async with self.thumb_sem:
+            if key in self.thumbs:
+                if not self.thumbs[key]:
+                    raise ApiError('thumb नाही', 404)
+                return self.thumbs[key]
+            cl = self._cl(aid)
+            m = await cl.get_messages(chat, ids=mid)
+            info = media_info(m) if m else None
+            if not info:
+                _lru_put(self.thumbs, key, b'', 400, 16 * MB)
+                raise ApiError('media नाही', 404)
+            idx = _thumb_index(m)
+            if info['kind'] == 'sticker' and 0 < info['size'] < 400 * 1024 and 'webp' in info['mime']:
+                data = (await cl.download_media(m, file=bytes),)
+            elif idx is not None:
+                data = (await cl.download_media(m, file=bytes, thumb=idx),)
+            elif info['kind'] == 'photo' and 0 < info['size'] < 300 * 1024:
+                data = (await cl.download_media(m, file=bytes),)
+            else:
+                _lru_put(self.thumbs, key, b'', 400, 16 * MB)
+                raise ApiError('thumb नाही', 404)
+            await asyncio.sleep(0.05)
+            if not data[0]:
+                raise ApiError('thumb अयशस्वी', 502)
+            _lru_put(self.thumbs, key, data[0], 400, 16 * MB)
+            return data[0]
 
     async def a_info(self, aid, chat, mid):
         m = await self._cl(aid).get_messages(chat, ids=mid)
@@ -1524,14 +1579,17 @@ class Manager:
             j['done'] = resume_off
             j['contig'] = resume_off
 
-            # Determine stripe size (chunks per worker claim) and number of parallel workers
+            # Determine stripe size (chunks per worker claim) and number of parallel workers (capped safely for account protection)
             remaining_chunks = max(0, total_chunks - start_chunk)
             stripe_chunks = 4 if remaining_chunks >= 16 else (2 if remaining_chunks >= 4 else 1)
-            max_workers = max(1, min(int(DL_CFG.get('threads', 8)), (remaining_chunks + stripe_chunks - 1) // max(1, stripe_chunks)))
+            max_workers = max(1, min(int(DL_CFG.get('threads', 4)), 8, (remaining_chunks + stripe_chunks - 1) // max(1, stripe_chunks)))
             j['threads'] = max_workers
 
             next_chunk_idx = [start_chunk]
             idx_lock = asyncio.Lock()
+            ref_lock = asyncio.Lock()
+            last_ref_ts = [0.0]
+            flood_until = [0.0]
             first_chunk_ev = asyncio.Event()
             t0 = time.time()
             speed_window = collections.deque(maxlen=24)
@@ -1583,41 +1641,53 @@ class Manager:
                     for attempt in range(4):
                         if j.get('cancel'):
                             raise asyncio.CancelledError()
+                        wait_fw = flood_until[0] - time.time()
+                        if wait_fw > 0:
+                            await asyncio.sleep(min(wait_fw, 60.0))
                         try:
-                            async for chunk in cl.iter_download(
-                                m.media, offset=cur_off, chunk_size=REQ, request_size=REQ, file_size=size
-                            ):
-                                if j.get('cancel'):
-                                    raise asyncio.CancelledError()
-                                if not chunk:
-                                    break
-                                take = chunk[:want_bytes - got_bytes]
-                                if not take:
-                                    break
-                                c_idx = cur_off // REQ
-                                await loop.run_in_executor(_DISK_POOL, _pwrite, fd, take, cur_off)
-                                cur_off += len(take)
-                                got_bytes += len(take)
-                                if not first_chunk_ev.is_set():
-                                    first_chunk_ev.set()
-                                _record_chunk(c_idx, len(take))
-                                if got_bytes >= want_bytes:
-                                    break
+                            async with self.dl_sem:
+                                async for chunk in cl.iter_download(
+                                    m.media, offset=cur_off, chunk_size=REQ, request_size=REQ, file_size=size
+                                ):
+                                    if j.get('cancel'):
+                                        raise asyncio.CancelledError()
+                                    if not chunk:
+                                        break
+                                    take = chunk[:want_bytes - got_bytes]
+                                    if not take:
+                                        break
+                                    c_idx = cur_off // REQ
+                                    await loop.run_in_executor(_DISK_POOL, _pwrite, fd, take, cur_off)
+                                    cur_off += len(take)
+                                    got_bytes += len(take)
+                                    if not first_chunk_ev.is_set():
+                                        first_chunk_ev.set()
+                                    _record_chunk(c_idx, len(take))
+                                    if got_bytes >= want_bytes:
+                                        break
                             if got_bytes >= want_bytes:
                                 break
                         except asyncio.CancelledError:
                             raise
                         except Exception as w_err:
-                            if attempt == 3:
-                                raise w_err
-                            await asyncio.sleep(0.8 * (attempt + 1))
-                            # Refresh message reference on FileReferenceExpiredError
-                            try:
-                                m_ref = await cl.get_messages(j['chat'], ids=j['id'])
-                                if m_ref and getattr(m_ref, 'media', None):
-                                    m = m_ref
-                            except Exception:
-                                pass
+                            fw_sec = int(getattr(w_err, 'seconds', 0) or 0)
+                            if fw_sec > 0:
+                                flood_until[0] = max(flood_until[0], time.time() + min(fw_sec + 2, 90))
+                                await asyncio.sleep(min(fw_sec + 2, 60))
+                            else:
+                                if attempt == 3:
+                                    raise w_err
+                                await asyncio.sleep(1.2 * (attempt + 1))
+                            # Refresh message reference on FileReferenceExpiredError (deduplicated across workers)
+                            async with ref_lock:
+                                if time.time() - last_ref_ts[0] > 3.0:
+                                    last_ref_ts[0] = time.time()
+                                    try:
+                                        m_ref = await cl.get_messages(j['chat'], ids=j['id'])
+                                        if m_ref and getattr(m_ref, 'media', None):
+                                            m = m_ref
+                                    except Exception:
+                                        pass
 
             if remaining_chunks > 0:
                 await asyncio.gather(*(_worker(w) for w in range(max_workers)))
@@ -1883,10 +1953,7 @@ class Manager:
         await loop.run_in_executor(None, self.acc.insert_one, doc)
         self.logins.pop(lid, None)
         self.premium[aid] = bool(getattr(me, 'premium', False))
-        try:
-            await asyncio.wait_for(cl.get_dialogs(limit=100), 90)
-        except Exception:
-            pass
+        await asyncio.sleep(1.2)
         self._hook(aid, cl)
         self.clients[aid] = cl
         self.state[aid] = {'state': 'online', 'err': ''}
@@ -1987,41 +2054,42 @@ _APP_ICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"
 </svg>'''
 
 
-def _make_apk_png(size=192, bg=(36, 129, 204), fg=(255, 255, 255)):
-    """Ultra-fast (< 5ms) pure-Python RGBA PNG generator for 192x192 & 512x512 WebAPK icons."""
+def _make_apk_png(size=192, bg=(36, 129, 204), fg=(255, 255, 255), maskable=False):
+    """Ultra-fast pure-Python RGBA PNG generator for 192x192 & 512x512 WebAPK icons (any + maskable safe-zone)."""
     import zlib, struct
     w = h = int(size)
     bg_px = bytes((bg[0], bg[1], bg[2], 255))
+    ac_px = bytes((max(0, bg[0] - 14), max(0, bg[1] - 18), max(0, bg[2] - 22), 255))
     fg_px = bytes((fg[0], fg[1], fg[2], 255))
-    # Build solid background row & center square/diamond emblem using fast byte repetition
     full_bg_row = b"\x00" + bg_px * w
     rows = []
-    m0, m1 = int(h * 0.26), int(h * 0.74)
-    cx = w // 2
-    half_span = int(w * 0.24)
+    pad = 0.30 if maskable else 0.24
+    m0, m1 = int(h * pad), int(h * (1.0 - pad))
+    c0, c1 = int(h * (pad - 0.08)), int(h * (1.0 - pad + 0.08))
     for y in range(h):
         if m0 <= y < m1:
-            # Draw a clean white play/telegram arrow triangle in the center
             rel = abs(y - (h // 2)) / float(max(1, (m1 - m0) // 2))
-            x_start = int(w * 0.32)
-            x_end = max(x_start + 2, int(w * 0.72 - rel * (w * 0.36)))
+            x_start = int(w * (0.35 if maskable else 0.31))
+            x_end = max(x_start + 2, int(w * (0.70 if maskable else 0.73) - rel * (w * 0.34)))
             left = x_start
             mid = x_end - x_start
             right = w - x_end
             rows.append(b"\x00" + bg_px * left + fg_px * mid + bg_px * right)
+        elif c0 <= y < c1:
+            rows.append(b"\x00" + ac_px * w)
         else:
             rows.append(full_bg_row)
     raw = b"".join(rows)
     def _chunk(tag, data):
         return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
     ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw, 1)) + _chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw, 6)) + _chunk(b"IEND", b"")
 
 _PNG_CACHE = {}
-def _get_apk_png(size, bg=(36, 129, 204)):
-    k = (size, bg)
+def _get_apk_png(size, bg=(36, 129, 204), maskable=False):
+    k = (size, bg, bool(maskable))
     if k not in _PNG_CACHE:
-        _PNG_CACHE[k] = _make_apk_png(size, bg=bg)
+        _PNG_CACHE[k] = _make_apk_png(size, bg=bg, maskable=maskable)
     return _PNG_CACHE[k]
 
 _APP_MANIFEST = {
@@ -2029,26 +2097,53 @@ _APP_MANIFEST = {
     "name": "Telegram Hub Pro",
     "short_name": "TG Hub",
     "description": "Multi-Account Telegram Manager & High-Speed Downloader",
+    "lang": "en",
+    "dir": "ltr",
     "start_url": "/app/",
     "scope": "/app/",
     "display": "standalone",
+    "display_override": ["standalone", "minimal-ui"],
     "orientation": "portrait",
     "background_color": "#0b121a",
     "theme_color": "#151f2b",
+    "categories": ["communication", "productivity", "utilities"],
     "prefer_related_applications": False,
     "icons": [
         {"src": "/app/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
         {"src": "/app/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-        {"src": "/app/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+        {"src": "/app/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+        {"src": "/app/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+    ],
+    "shortcuts": [
+        {"name": "Open Chats", "short_name": "Chats", "url": "/app/", "icons": [{"src": "/app/icon-192.png", "sizes": "192x192", "type": "image/png"}]}
     ]
 }
 
-_APP_SW_JS = """self.addEventListener('install', e => { self.skipWaiting(); });
-self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); });
+_APP_SW_JS = """const CACHE_NAME = 'tghub-pwa-v5';
+const SHELL_ASSETS = ['/app/manifest.json', '/app/icon-192.png', '/app/icon-512.png', '/app/icon.svg'];
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(SHELL_ASSETS)).catch(() => {}));
+  self.skipWaiting();
+});
+self.addEventListener('activate', e => {
+  e.waitUntil((
+    caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
+  ).then(() => self.clients.claim()));
+});
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  const url = new URL(e.request.url);
+  if (SHELL_ASSETS.includes(url.pathname)) {
+    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+    return;
+  }
   if (e.request.mode === 'navigate') {
-    e.respondWith(fetch(e.request).catch(() => new Response('Offline - check connection', {status: 503, headers: {'Content-Type': 'text/plain'}})));
+    e.respondWith(
+      fetch(e.request).catch(() => new Response(
+        '<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>TG Hub Offline</title><body style="background:#0b121a;color:#f1f5f9;font:15px system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center"><div><h3>📡 You are offline</h3><p>Check your internet connection and tap retry.</p><button onclick="location.reload()" style="padding:10px 18px;border-radius:8px;border:0;background:#2481cc;color:#fff;font-weight:700">🔄 Retry</button></div></body>',
+        {status: 200, headers: {'Content-Type': 'text/html; charset=utf-8'}}
+      ))
+    );
   }
 });
 """
@@ -2063,7 +2158,7 @@ def pwa_manifest():
 def pwa_sw():
     body = _APP_SW_JS.encode('utf-8')
     return Response(body, mimetype='application/javascript',
-                    headers={'Content-Length': str(len(body)), 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/app/'})
+                    headers={'Content-Length': str(len(body)), 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/'})
 
 @bp.get('/icon.svg')
 def pwa_icon():
@@ -2073,13 +2168,25 @@ def pwa_icon():
 
 @bp.get('/icon-192.png')
 def pwa_icon_192():
-    body = _get_apk_png(192)
+    body = _get_apk_png(192, maskable=False)
     return Response(body, mimetype='image/png',
                     headers={'Content-Length': str(len(body)), 'Cache-Control': 'public, max-age=86400'})
 
 @bp.get('/icon-512.png')
 def pwa_icon_512():
-    body = _get_apk_png(512)
+    body = _get_apk_png(512, maskable=False)
+    return Response(body, mimetype='image/png',
+                    headers={'Content-Length': str(len(body)), 'Cache-Control': 'public, max-age=86400'})
+
+@bp.get('/icon-maskable-192.png')
+def pwa_icon_maskable_192():
+    body = _get_apk_png(192, maskable=True)
+    return Response(body, mimetype='image/png',
+                    headers={'Content-Length': str(len(body)), 'Cache-Control': 'public, max-age=86400'})
+
+@bp.get('/icon-maskable-512.png')
+def pwa_icon_maskable_512():
+    body = _get_apk_png(512, maskable=True)
     return Response(body, mimetype='image/png',
                     headers={'Content-Length': str(len(body)), 'Cache-Control': 'public, max-age=86400'})
 
@@ -2089,8 +2196,13 @@ def gate():
         abort(404)
     p = request.path.rstrip('/')
     is_read = request.method in ('GET', 'HEAD')
-    if is_read and p in ('/app/manifest.json', '/app/sw.js', '/app/icon.svg', '/app/icon-192.png', '/app/icon-512.png'):
+    if is_read and p in ('/app/manifest.json', '/app/sw.js', '/app/icon.svg', '/app/icon-192.png', '/app/icon-512.png', '/app/icon-maskable-192.png', '/app/icon-maskable-512.png'):
         return None
+    # Critical PWA Scope Fix: always redirect /app (without trailing slash) to /app/ so the page is inside scope '/app/'!
+    if is_read and request.path == '/app':
+        qs = request.query_string.decode('utf-8', 'ignore')
+        loc = '/app/' + ('?' + qs if qs else '')
+        return Response('', status=302, headers={'Location': loc, 'Cache-Control': 'no-store'})
     if is_read and p == '/app' and (request.args.get('k') or request.args.get('dt')):
         return Response(ENTER_PAGE, mimetype='text/html', headers=_sec_headers())
     if is_read and p.startswith('/app/s/'):
@@ -2383,7 +2495,12 @@ def api_delete():
 @api
 def api_forward():
     d = _json()
-    to_chats = d.get('to_chats') if isinstance(d.get('to_chats'), list) else [int(d['to_chat'])]
+    if isinstance(d.get('to_chats'), list) and d.get('to_chats'):
+        to_chats = [int(x) for x in d['to_chats'][:10]]
+    elif d.get('to_chat') is not None:
+        to_chats = [int(d['to_chat'])]
+    else:
+        raise ApiError('target chat निवडा')
     return jsonify(messages=M.call(M.a_forward(_acc(d), int(d['from_chat']), _ids(d), to_chats, d.get('hide_author'), str(d.get('comment', '')))))
 
 @bp.post('/api/pin')
@@ -2988,7 +3105,7 @@ def api_cache():
 def api_cache_settings():
     d = _json()
     if 'threads' in d:
-        DL_CFG['threads'] = max(1, min(16, int(d['threads'])))
+        DL_CFG['threads'] = max(1, min(8, int(d['threads'])))
     if 'ttl_minutes' in d:
         DL_CFG['ttl'] = max(60, int(float(d['ttl_minutes']) * 60))
     if 'auto_cache' in d:
@@ -3303,9 +3420,10 @@ def api_ghost_list():
     """Returns deleted messages captured by Anti-Delete Ghost Vault and current Auto-Reply settings."""
     aid = request.args.get('acc', '')
     items = [x for x in list(DELETED_VAULT) if not aid or x.get('acc') == aid][:100]
-    ar = AUTO_REPLY.get(aid, {'enabled': False, 'text': '', 'cooldown': 3600})
+    ar = AUTO_REPLY.get(aid, {'enabled': False, 'text': '', 'cooldown': 3600, 'contacts_only': False})
     return jsonify(deleted=items, anti_delete=bool(DL_CFG.get('anti_delete', True)),
-                   auto_reply={'enabled': bool(ar.get('enabled')), 'text': ar.get('text', ''), 'cooldown': int(ar.get('cooldown', 3600))})
+                   auto_reply={'enabled': bool(ar.get('enabled')), 'text': ar.get('text', ''),
+                               'cooldown': int(ar.get('cooldown', 3600)), 'contacts_only': bool(ar.get('contacts_only', False))})
 
 @bp.post('/api/ghost/settings')
 @api
@@ -3316,14 +3434,16 @@ def api_ghost_settings():
         DL_CFG['anti_delete'] = bool(d['anti_delete'])
     if 'clear_vault' in d and d['clear_vault']:
         DELETED_VAULT.clear()
-    if 'auto_reply_enabled' in d or 'auto_reply_text' in d:
-        ar = AUTO_REPLY.setdefault(aid, {'enabled': False, 'text': '', 'cooldown': 3600, 'sent_to': {}})
+    if 'auto_reply_enabled' in d or 'auto_reply_text' in d or 'contacts_only' in d:
+        ar = AUTO_REPLY.setdefault(aid, {'enabled': False, 'text': '', 'cooldown': 3600, 'contacts_only': False, 'sent_to': {}})
         if 'auto_reply_enabled' in d:
             ar['enabled'] = bool(d['auto_reply_enabled'])
         if 'auto_reply_text' in d:
             ar['text'] = str(d['auto_reply_text'])[:1000].strip()
         if 'cooldown' in d:
             ar['cooldown'] = max(60, min(86400, int(d['cooldown'] or 3600)))
+        if 'contacts_only' in d:
+            ar['contacts_only'] = bool(d['contacts_only'])
     return jsonify(ok=1)
 
 @bp.get('/api/cross_search')
