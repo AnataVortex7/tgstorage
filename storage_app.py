@@ -137,7 +137,7 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=WEB_URL.startswith("https"),
     SESSION_COOKIE_HTTPONLY=True,
-    MAX_CONTENT_LENGTH=1024 * 1024,      # API bodies are tiny JSON
+    MAX_CONTENT_LENGTH=2048 * 1024 * 1024,  # Allow up to 2 GB file uploads on /hapi/pc_upload
 )
 print(f"[env] groups={ENV_GROUP_IDS} | TRUST_PROXY={TRUST_PROXY} | "
       f"SECRET_KEY_from_env={'SECRET_KEY' in os.environ} | WEB_URL={WEB_URL}", flush=True)
@@ -665,7 +665,7 @@ def run_telegram():
             bot_token=BOT_TOKEN,
             session_string=sess or None,
             in_memory=True,
-            sleep_threshold=120,
+            sleep_threshold=12,
         )
 
         # ── /start TOKEN — ask the owner to approve a web login ──────────
@@ -4099,13 +4099,34 @@ def _notify_owner_bk(text):
 
 PC_FILE_MAX_MB = _env_int("PC_FILE_MAX_MB", 2000)
 _topic_create_lock = threading.Lock()
+_pc_upload_sem = threading.Semaphore(2)
+_pc_Clients_warmed = set()
+_pc_turn = [0]
+
+async def _ensure_peer_warmed(cl, gid):
+    key = (id(cl), gid)
+    if key in _pc_Clients_warmed:
+        return
+    try:
+        await cl.resolve_peer(gid)
+        _pc_Clients_warmed.add(key)
+        return
+    except Exception:
+        pass
+    try:
+        if cl is _tg_user:
+            await _warm()
+        await cl.get_chat(gid)
+        _pc_Clients_warmed.add(key)
+    except Exception:
+        pass
 
 def _get_or_create_folder_topic(gid, folder_path):
     """Finds or creates a Forum Topic matching the exact folder path (e.g. 'Desktop', 'Documents/MPSC/Notes')."""
     norm = _norm_path(folder_path or "PC-Backup")[:120] or "PC-Backup"
     with _topic_create_lock:
         r = db_one("SELECT topic_id FROM topics WHERE group_id=? AND path=? COLLATE NOCASE LIMIT 1", (gid, norm))
-        if r and r["topic_id"]:
+        if r and r["topic_id"] is not None:
             return r["topic_id"], norm
         row_g = db_one("SELECT is_forum FROM groups WHERE group_id=?", (gid,))
         if row_g and not row_g["is_forum"]:
@@ -4113,24 +4134,38 @@ def _get_or_create_folder_topic(gid, folder_path):
             return 0, norm
         async def _mk_topic():
             import inspect
-            for attempt in range(3):
-                try:
-                    _p = inspect.signature(tg_raw.functions.messages.CreateForumTopic.__init__).parameters
-                    _kw = {("peer" if "peer" in _p else "channel"): await _tg_client.resolve_peer(gid),
-                           "title": norm, "random_id": _tg_client.rnd_id()}
-                    res = await _tg_client.invoke(tg_raw.functions.messages.CreateForumTopic(**_kw))
-                    for u in res.updates:
-                        m = getattr(u, "message", None)
-                        if m is not None and getattr(m, "id", None):
-                            return m.id
-                    raise RuntimeError("topic id not returned")
-                except FloodWait as fw:
-                    wait_s = int(getattr(fw, "value", getattr(fw, "x", 5)) or 5) + 1
-                    print(f"[pc-sync] Topic create FloodWait {wait_s}s for {norm}", flush=True)
-                    await asyncio.sleep(wait_s)
-            raise RuntimeError(f"Could not create topic for {norm}")
-        tid = tg(_mk_topic(), timeout=120)
-        _save_topic(gid, tid, norm)
+            clients = [c for c in (_tg_user, _tg_client) if c is not None]
+            for cl in clients:
+                await _ensure_peer_warmed(cl, gid)
+                for attempt in range(2):
+                    try:
+                        _p = inspect.signature(tg_raw.functions.messages.CreateForumTopic.__init__).parameters
+                        _kw = {("peer" if "peer" in _p else "channel"): await cl.resolve_peer(gid),
+                               "title": norm, "random_id": cl.rnd_id()}
+                        res = await cl.invoke(tg_raw.functions.messages.CreateForumTopic(**_kw))
+                        for u in getattr(res, "updates", []):
+                            m = getattr(u, "message", None)
+                            if m is not None and getattr(m, "id", None):
+                                return m.id
+                    except FloodWait as fw:
+                        wait_s = int(getattr(fw, "value", getattr(fw, "x", 5)) or 5) + 1
+                        if wait_s <= 15:
+                            await asyncio.sleep(wait_s)
+                            continue
+                        break
+                    except Exception as ex:
+                        print(f"[pc-sync] CreateForumTopic via {type(cl).__name__} failed for {norm}: {ex}", flush=True)
+                        break
+            # Fallback if Telegram denies topic creation: use General topic (0) in Telegram, but still save folder path in DB
+            return 0
+        tid = tg(_mk_topic(), timeout=45)
+        if tid > 0:
+            _save_topic(gid, tid, norm)
+        else:
+            # Create a virtual topic entry so the folder still shows in Storage Browser even if posted in General
+            vtid = -(abs(hash(norm)) % 90000000 + 1000)
+            _save_topic(gid, vtid, norm)
+            return vtid, norm
         return tid, norm
 
 @app.route("/hapi/pc_check", methods=["POST"])
@@ -4157,11 +4192,14 @@ def hapi_pc_check():
 @app.route("/hapi/pc_upload", methods=["POST", "PUT"])
 def hapi_pc_upload():
     """Uploads one file AS-IT-IS into its exact folder Forum Topic so it can be viewed & downloaded directly in Storage."""
+    import gzip as _gzip
     bad = _bk_auth() or _bk_ready()
     if bad:
         return bad
     folder_raw = request.args.get("folder") or request.headers.get("X-Folder-Path") or "PC-Backup"
     fname_raw  = request.args.get("name") or request.headers.get("X-File-Name") or "file"
+    orig_size  = int(request.args.get("orig_size") or 0)
+    is_gz      = request.args.get("gz") == "1" or request.headers.get("X-Backup-Gz") == "1"
     folder = _norm_path(str(folder_raw))[:120] or "PC-Backup"
     fname  = os.path.basename(str(fname_raw).replace("\\", "/")).strip()[:180] or "file"
     try:
@@ -4174,18 +4212,21 @@ def hapi_pc_upload():
         return jsonify({"ok": False, "msg": f"file exceeds {PC_FILE_MAX_MB} MB limit"}), 413
 
     gid = _resolve_backup_gid()
+    check_size = orig_size if orig_size > 0 else length
     # Check if exact same file (name + size) is already in this folder
     dup = db_one("SELECT msg_id FROM files WHERE group_id=? AND folder_path=? COLLATE NOCASE AND filename=? COLLATE NOCASE AND size=? LIMIT 1",
-                 (gid, folder, fname, length))
+                 (gid, folder, fname, check_size))
     if dup and request.args.get("force") != "1":
         return jsonify({"ok": True, "skipped": True, "file": fname, "folder": folder, "msg_id": dup["msg_id"]})
 
     tmp_dir = os.path.join(TMP_DIR, f"pcup_{secrets.token_hex(6)}")
     os.makedirs(tmp_dir, exist_ok=True)
-    tmp_file = os.path.join(tmp_dir, fname)
+    safe_disk_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", fname) or "file"
+    tmp_raw  = os.path.join(tmp_dir, "raw.bin")
+    tmp_file = os.path.join(tmp_dir, safe_disk_name)
     inp, left = request.environ["wsgi.input"], length
     try:
-        with open(tmp_file, "wb") as f:
+        with open(tmp_raw if is_gz else tmp_file, "wb") as f:
             while left > 0:
                 chunk = inp.read(min(1 << 20, left))
                 if not chunk:
@@ -4193,37 +4234,96 @@ def hapi_pc_upload():
                 f.write(chunk)
                 left -= len(chunk)
         if left > 0:
-            return jsonify({"ok": False, "msg": "upload stream incomplete"}), 400
+            return jsonify({"ok": False, "msg": f"upload stream incomplete ({left} bytes missing)"}), 400
+
+        if is_gz:
+            with _gzip.open(tmp_raw, "rb") as gzf, open(tmp_file, "wb") as out_f:
+                shutil.copyfileobj(gzf, out_f)
+            try:
+                os.unlink(tmp_raw)
+            except OSError:
+                pass
+
+        real_size = os.path.getsize(tmp_file)
+        if orig_size > 0 and real_size != orig_size:
+            real_size = orig_size
 
         mime = mimetypes.guess_type(fname)[0] or "application/octet-stream"
         tid, norm_folder = _get_or_create_folder_topic(gid, folder)
-        _LIVE_BK_STATUS.update(state="uploading", detail=f"Uploading {norm_folder}/{fname} ({fmt_size(length)})", ts=time.time())
+        _LIVE_BK_STATUS.update(state="uploading", detail=f"Uploading {norm_folder}/{fname} ({fmt_size(real_size)})", ts=time.time())
 
-        async def _send_as_is():
-            for attempt in range(4):
-                try:
-                    kw = dict(file_name=fname, force_document=True, caption=f"📁 {norm_folder}/{fname}")
-                    if tid and tid > 1:
-                        kw["message_thread_id"] = tid
-                    m = await _tg_client.send_document(gid, tmp_file, **kw)
-                    return m.id
-                except FloodWait as fw:
-                    wait_s = int(getattr(fw, "value", getattr(fw, "x", 5)) or 5) + 1
-                    print(f"[pc-sync] Upload FloodWait {wait_s}s for {fname}", flush=True)
-                    await asyncio.sleep(wait_s)
-            raise RuntimeError(f"FloodWait exceeded while uploading {fname}")
+        async def _send_as_is(cur_tid):
+            import inspect
+            # Alternate between _tg_user and _tg_client if both exist, or fallback on FloodWait/error
+            pool = [c for c in (_tg_user, _tg_client) if c is not None]
+            if len(pool) > 1:
+                _pc_turn[0] = (_pc_turn[0] + 1) % len(pool)
+                if _pc_turn[0] == 1:
+                    pool = [pool[1], pool[0]]
 
-        mid = tg(_send_as_is(), timeout=1800)
-        db_exec("""INSERT OR IGNORE INTO files (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (gid, mid, tid, norm_folder, fname, length, mime))
-        _recount(gid, [tid])
+            min_flood_wait = 0
+            last_ex = None
+            for cl in pool:
+                await _ensure_peer_warmed(cl, gid)
+                sig_params = inspect.signature(cl.send_document).parameters
+                for attempt in range(2):
+                    try:
+                        kw = dict(file_name=fname, caption=f"📁 {norm_folder}/{fname}")
+                        if "force_document" in sig_params:
+                            kw["force_document"] = True
+                        if cur_tid and cur_tid > 1:
+                            if "message_thread_id" in sig_params:
+                                kw["message_thread_id"] = cur_tid
+                            elif "reply_to_message_id" in sig_params:
+                                kw["reply_to_message_id"] = cur_tid
+                        m = await cl.send_document(gid, tmp_file, **kw)
+                        if m is not None and getattr(m, "id", None):
+                            return ("ok", m.id, cur_tid)
+                    except FloodWait as fw:
+                        wait_s = int(getattr(fw, "value", getattr(fw, "x", 15)) or 15) + 2
+                        print(f"[pc-sync] FloodWait {wait_s}s on client for {fname}", flush=True)
+                        if wait_s <= 12 and attempt == 0:
+                            await asyncio.sleep(wait_s)
+                            continue
+                        if min_flood_wait == 0 or wait_s < min_flood_wait:
+                            min_flood_wait = wait_s
+                        break
+                    except Exception as ex:
+                        last_ex = ex
+                        err_str = str(ex).upper()
+                        if any(k in err_str for k in ("TOPIC_DELETED", "TOPIC_ID_INVALID", "MESSAGE_THREAD_INVALID", "TOPIC_CLOSED")) and cur_tid > 1:
+                            db_exec("DELETE FROM topics WHERE group_id=? AND topic_id=?", (gid, cur_tid))
+                            _topics.get(gid, {}).pop(cur_tid, None)
+                            cur_tid = 0
+                            continue
+                        break
+            if min_flood_wait > 0:
+                return ("flood", min_flood_wait, cur_tid)
+            raise RuntimeError(f"{type(last_ex).__name__}: {last_ex}" if last_ex else "Upload failed")
+
+        with _pc_upload_sem:
+            status_tag, val, final_tid = tg(_send_as_is(tid), timeout=50)
+
+        if status_tag == "flood":
+            # Return HTTP 200 with retry_after so backup.ps1 pauses cleanly on the PC without hitting Koyeb's 60s timeout!
+            return jsonify({"ok": False, "retry_after": int(val), "msg": f"Telegram FloodWait {val}s"})
+
+        mid = int(val)
+        db_exec("""INSERT INTO files (group_id, msg_id, topic_id, folder_path, filename, size, mime_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(group_id, msg_id, topic_id) DO UPDATE SET
+                       folder_path=excluded.folder_path,
+                       filename=excluded.filename,
+                       size=excluded.size,
+                       mime_type=excluded.mime_type""",
+                (gid, mid, final_tid, norm_folder, fname, real_size, mime))
+        _recount(gid, [final_tid])
         _changed(gid)
         global _snapshot_dirty
         _snapshot_dirty = True
-        _LIVE_BK_STATUS.update(state="stored", detail=f"{norm_folder}/{fname} ({fmt_size(length)})", last_file=f"{norm_folder}/{fname}", last_msg_id=mid, ts=time.time())
-        print(f"[pc-sync] stored as-is: {norm_folder}/{fname} ({length} bytes) topic={tid} msg={mid}", flush=True)
-        return jsonify({"ok": True, "skipped": False, "file": fname, "folder": norm_folder, "topic_id": tid, "size": length, "msg_id": mid})
+        _LIVE_BK_STATUS.update(state="stored", detail=f"{norm_folder}/{fname} ({fmt_size(real_size)})", last_file=f"{norm_folder}/{fname}", last_msg_id=mid, ts=time.time())
+        print(f"[pc-sync] stored as-is: {norm_folder}/{fname} ({real_size} bytes) topic={final_tid} msg={mid}", flush=True)
+        return jsonify({"ok": True, "skipped": False, "file": fname, "folder": norm_folder, "topic_id": final_tid, "size": real_size, "msg_id": mid})
     except Exception as e:
         print(f"[pc-sync] upload failed for {folder}/{fname}: {e}", flush=True)
         return jsonify({"ok": False, "msg": f"{type(e).__name__}: {e}"}), 500

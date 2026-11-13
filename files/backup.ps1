@@ -4,6 +4,8 @@
 
 $ErrorActionPreference = 'Continue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+[Net.ServicePointManager]::Expect100Continue = $false
+[Net.ServicePointManager]::DefaultConnectionLimit = 16
 $ProgressPreference = 'SilentlyContinue'
 
 $Base  = '__BASE__'
@@ -18,26 +20,70 @@ function Log($msg, $color = 'White') {
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $msg" -ForegroundColor $color
 }
 
+function Get-HttpErrorDetail($ErrRecord) {
+    $msg = $ErrRecord.Exception.Message
+    if ($ErrRecord.ErrorDetails -and $ErrRecord.ErrorDetails.Message) {
+        return "$msg -> $($ErrRecord.ErrorDetails.Message)"
+    }
+    try {
+        $resp = $ErrRecord.Exception.Response
+        if ($resp) {
+            $code = [int]$resp.StatusCode
+            $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+            $txt = $sr.ReadToEnd()
+            if ($txt -and $txt.Trim() -ne "") {
+                return "HTTP $code : $($txt.Trim())"
+            }
+            return "HTTP $code ($msg)"
+        }
+    } catch {}
+    return $msg
+}
+
 function Send-Status($state, $detail) {
     try {
         $body = @{ pc = $env:COMPUTERNAME; state = $state; detail = $detail } | ConvertTo-Json -Compress
         $headers = @{ Authorization = "Bearer $Token"; "Content-Type" = "application/json; charset=utf-8" }
-        Invoke-RestMethod -Uri "$Base/hapi/backup_status" -Method POST -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -Headers $headers -TimeoutSec 15 | Out-Null
+        Invoke-RestMethod -Uri "$Base/hapi/backup_status" -Method POST -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -Headers $headers -TimeoutSec 15 -DisableKeepAlive | Out-Null
     } catch {}
 }
 
-function Get-ExistingSet($FolderPath, $FileList) {
-    $skipSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+function Get-ExistingMap($FolderPath, $FileList) {
+    # Hashtable is NEVER unrolled to $null by PowerShell even when 0 or 1 item exists!
+    $skipMap = @{}
     try {
         $items = @($FileList | ForEach-Object { @{ name = $_.Name; size = [int64]$_.Length } })
         $body = @{ folder = $FolderPath; files = $items } | ConvertTo-Json -Compress -Depth 4
         $headers = @{ Authorization = "Bearer $Token"; "Content-Type" = "application/json; charset=utf-8" }
-        $r = Invoke-RestMethod -Uri "$Base/hapi/pc_check" -Method POST -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -Headers $headers -TimeoutSec 30
-        if ($r.ok -and $r.skip) {
-            foreach ($s in $r.skip) { [void]$skipSet.Add([string]$s) }
+        $r = Invoke-RestMethod -Uri "$Base/hapi/pc_check" -Method POST -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -Headers $headers -TimeoutSec 30 -DisableKeepAlive
+        if ($r -and $r.ok -and $r.skip) {
+            foreach ($s in @($r.skip)) {
+                if ($null -ne $s) {
+                    $skipMap[([string]$s).ToLower()] = $true
+                }
+            }
         }
     } catch {}
-    return $skipSet
+    return $skipMap
+}
+
+function Read-FileBytesSafe($FullPath) {
+    $inFs = New-Object System.IO.FileStream($FullPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    try {
+        $ms = New-Object System.IO.MemoryStream
+        $inFs.CopyTo($ms)
+        return ,$ms.ToArray()
+    } finally {
+        $inFs.Dispose()
+    }
+}
+
+function Compress-GzipBytes($RawBytes) {
+    $outMs = New-Object System.IO.MemoryStream
+    $gz = New-Object System.IO.Compression.GZipStream($outMs, [System.IO.Compression.CompressionMode]::Compress)
+    $gz.Write($RawBytes, 0, $RawBytes.Length)
+    $gz.Close()
+    return ,$outMs.ToArray()
 }
 
 function Upload-SingleFile($FileObj, $FolderPath, $Index, $Total) {
@@ -52,53 +98,101 @@ function Upload-SingleFile($FileObj, $FolderPath, $Index, $Total) {
 
     $encFolder = [uri]::EscapeDataString($FolderPath)
     $encName   = [uri]::EscapeDataString($name)
-    $uri       = "$Base/hapi/pc_upload?folder=$encFolder&name=$encName"
-    $headers   = @{ Authorization = "Bearer $Token" }
 
     Write-Host "  [$Index/$Total] ⬆ Uploading: " -NoNewline -ForegroundColor Cyan
     Write-Host "$FolderPath/" -NoNewline -ForegroundColor Yellow
     Write-Host "$name ($sizeStr) ... " -NoNewline -ForegroundColor White
 
-    # Copy to a temporary unlocked file if the file is currently open in another app
+    # For files <= 40 MB, wrap in GZip during HTTP transit so Cloudflare/Koyeb WAF never blocks .html, .rdp, .lnk, .bat, or .sql files!
+    # The server unpacks it back to the exact original file before uploading as-it-is to Telegram.
+    $useMemoryGz = ($sizeBytes -le (40 * 1024 * 1024))
+    $payloadBytes = $null
     $sendPath = $FileObj.FullName
     $tempCopy = $null
-    try {
-        $testStream = [System.IO.File]::Open($FileObj.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-        $testStream.Close()
-    } catch {
+
+    if ($useMemoryGz) {
         try {
-            $tempCopy = Join-Path $env:TEMP "tgup_$(Get-Random)_$name"
-            $inFs = New-Object System.IO.FileStream($FileObj.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
-            $outFs = [System.IO.File]::Create($tempCopy)
-            try { $inFs.CopyTo($outFs) } finally { $outFs.Close(); $inFs.Close() }
-            $sendPath = $tempCopy
+            $rawBytes = Read-FileBytesSafe $FileObj.FullName
+            $payloadBytes = Compress-GzipBytes $rawBytes
         } catch {
-            Write-Host "LOCKED (Skipped)" -ForegroundColor DarkYellow
+            Write-Host "LOCKED/UNREADABLE ($($_.Exception.Message))" -ForegroundColor DarkYellow
             return 'failed'
+        }
+    } else {
+        try {
+            $testStream = [System.IO.File]::Open($FileObj.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            $testStream.Close()
+        } catch {
+            try {
+                $tempCopy = Join-Path $env:TEMP "tgup_$(Get-Random)_$name"
+                $inFs = New-Object System.IO.FileStream($FileObj.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+                $outFs = [System.IO.File]::Create($tempCopy)
+                try { $inFs.CopyTo($outFs) } finally { $outFs.Close(); $inFs.Close() }
+                $sendPath = $tempCopy
+            } catch {
+                Write-Host "LOCKED (Skipped)" -ForegroundColor DarkYellow
+                return 'failed'
+            }
         }
     }
 
+    $lastErr = ""
     try {
-        $r = Invoke-RestMethod -Uri $uri -Method POST -InFile $sendPath -Headers $headers -ContentType 'application/octet-stream' -TimeoutSec 1800
-        if ($r.ok) {
-            if ($r.skipped) {
-                Write-Host "✔ Already in Storage" -ForegroundColor DarkGreen
-                return 'skipped'
-            } else {
-                Write-Host "✅ Done (msg_id=$($r.msg_id))" -ForegroundColor Green
-                return 'uploaded'
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+                if ($useMemoryGz) {
+                    $uri = "$Base/hapi/pc_upload?folder=$encFolder&name=$encName&gz=1&orig_size=$sizeBytes"
+                    $headers = @{ Authorization = "Bearer $Token"; "X-Backup-Gz" = "1" }
+                    $r = Invoke-RestMethod -Uri $uri -Method POST -Body $payloadBytes -Headers $headers -ContentType 'application/octet-stream' -TimeoutSec 1800 -DisableKeepAlive
+                } else {
+                    $uri = "$Base/hapi/pc_upload?folder=$encFolder&name=$encName&orig_size=$sizeBytes"
+                    $headers = @{ Authorization = "Bearer $Token" }
+                    $r = Invoke-RestMethod -Uri $uri -Method POST -InFile $sendPath -Headers $headers -ContentType 'application/octet-stream' -TimeoutSec 1800 -DisableKeepAlive
+                }
+                if ($r.ok) {
+                    if ($r.skipped) {
+                        Write-Host "✔ Already in Storage" -ForegroundColor DarkGreen
+                        return 'skipped'
+                    } else {
+                        Write-Host "✅ Done (msg_id=$($r.msg_id))" -ForegroundColor Green
+                        Start-Sleep -Milliseconds 450
+                        return 'uploaded'
+                    }
+                } elseif ($r.retry_after -and [int]$r.retry_after -gt 0) {
+                    $waitSec = [int]$r.retry_after
+                    Write-Host ""
+                    for ($rem = $waitSec; $rem -gt 0; $rem--) {
+                        Write-Host "`r    ⏳ Telegram rate-limit pause: waiting $rem s before continuing...   " -NoNewline -ForegroundColor Yellow
+                        Start-Sleep -Seconds 1
+                    }
+                    Write-Host "`r    🔄 Resuming upload of $name...                                       " -ForegroundColor Cyan
+                    continue
+                } else {
+                    $lastErr = [string]$r.msg
+                }
+            } catch {
+                $lastErr = Get-HttpErrorDetail $_
+                if ($useMemoryGz -and $attempt -eq 1 -and $lastErr -match '400|500|gzip') {
+                    $useMemoryGz = $false
+                    $payloadBytes = Read-FileBytesSafe $FileObj.FullName
+                    try {
+                        $uriRaw = "$Base/hapi/pc_upload?folder=$encFolder&name=$encName"
+                        $r2 = Invoke-RestMethod -Uri $uriRaw -Method POST -Body $payloadBytes -Headers @{ Authorization = "Bearer $Token" } -ContentType 'application/octet-stream' -TimeoutSec 1800 -DisableKeepAlive
+                        if ($r2.ok) {
+                            Write-Host "✅ Done (msg_id=$($r2.msg_id))" -ForegroundColor Green
+                            Start-Sleep -Milliseconds 450
+                            return 'uploaded'
+                        }
+                    } catch {
+                        $lastErr = Get-HttpErrorDetail $_
+                    }
+                }
             }
-        } else {
-            Write-Host "❌ Failed ($($r.msg))" -ForegroundColor Red
-            return 'failed'
+            if ($attempt -lt 5) {
+                Start-Sleep -Seconds ($attempt * 3)
+            }
         }
-    } catch {
-        $errMsg = $_.Exception.Message
-        try {
-            $sr = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-            $errMsg = $sr.ReadToEnd()
-        } catch {}
-        Write-Host "❌ Error: $errMsg" -ForegroundColor Red
+        Write-Host "❌ Error: $lastErr" -ForegroundColor Red
         return 'failed'
     } finally {
         if ($tempCopy -and (Test-Path $tempCopy)) {
@@ -188,12 +282,12 @@ foreach ($root in $Roots) {
         Write-Host ""
         Log "📁 Topic / Folder: $topicFolder ($($folderFiles.Count) files)" 'Yellow'
 
-        # Check which files in this folder are already in Storage
-        $existingSet = Get-ExistingSet $topicFolder $folderFiles
+        # Check which files in this folder are already in Storage (returns Hashtable, never $null!)
+        $existingMap = Get-ExistingMap $topicFolder $folderFiles
 
         foreach ($f in $folderFiles) {
             $idx++
-            if ($existingSet.Contains($f.Name)) {
+            if ($existingMap -and $existingMap.ContainsKey($f.Name.ToLower())) {
                 Write-Host "  [$idx/$totalInRoot] ✔ Already in Storage: $topicFolder/$($f.Name)" -ForegroundColor DarkGreen
                 $skippedCount++
                 continue
