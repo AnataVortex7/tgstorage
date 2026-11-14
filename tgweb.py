@@ -945,17 +945,74 @@ class Manager:
             out.append(d)
         return out
 
-    async def a_send(self, aid, chat, text, reply_to, md, silent, schedule, preview, topic_id=None, quote_text=None, invert_media=False):
+    async def a_send(self, aid, chat, text, reply_to, md, silent, schedule, preview, topic_id=None, quote_text=None, invert_media=False, file_name=None):
         cl = self._cl(aid)
         kw = {}
         if schedule:
             kw['schedule'] = datetime.fromtimestamp(int(schedule), tz=timezone.utc)
         target_reply = int(reply_to) if reply_to else (int(topic_id) if topic_id else None)
         quote_str = str(quote_text or '').strip()[:1024]
+
+        def _cache_msg_update(sm_obj):
+            if not isinstance(sm_obj, dict):
+                return sm_obj
+            cid_int = int(chat)
+            if sm_obj.get('id'):
+                MSG_RECENT[(aid, cid_int, sm_obj['id'])] = dict(sm_obj, chat=cid_int, acc=aid)
+                while len(MSG_RECENT) > 800:
+                    MSG_RECENT.popitem(last=False)
+            self._update_cached_dialog(aid, 'new', cid_int, sm_obj)
+            for k in [k for k in list(self.msg_cache) if k[0] == aid and k[1] == cid_int]:
+                self.msg_cache.pop(k, None)
+            return sm_obj
+
+        async def _send_as_txt_file():
+            raw_bytes = text.encode('utf-8')
+            fname = re.sub(r'[\\/:*?"<>|\r\n]+', '_', str(file_name or '').strip())
+            if not fname:
+                fname = f"message_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            elif not fname.lower().endswith('.txt'):
+                fname += '.txt'
+            os.makedirs(UPDIR, exist_ok=True)
+            tmp_dir = os.path.join(UPDIR, 'txt_' + secrets.token_hex(6))
+            os.makedirs(tmp_dir, exist_ok=True)
+            tmp_path = os.path.join(tmp_dir, fname)
+            try:
+                with open(tmp_path, 'wb') as f:
+                    f.write(raw_bytes)
+                m_doc = await cl.send_file(
+                    chat, tmp_path, caption=None, force_document=True,
+                    reply_to=target_reply, silent=bool(silent), **kw
+                )
+                m_doc = m_doc[0] if isinstance(m_doc, list) else m_doc
+                bw_add(len(raw_bytes) + 500)
+                sm_doc = ser_msg(m_doc)
+                if getattr(m_doc, 'id', None):
+                    try:
+                        ck = _ckey(aid, int(chat), m_doc.id)
+                        os.makedirs(CACHE_DIR, exist_ok=True)
+                        shutil.copy2(tmp_path, _cpath(ck))
+                        _save_cmeta(ck, {
+                            'key': ck, 'name': fname, 'mime': 'text/plain; charset=utf-8',
+                            'size': len(raw_bytes), 'created_at': time.time(),
+                            'acc': aid, 'chat': int(chat), 'id': m_doc.id
+                        })
+                    except Exception:
+                        pass
+                return _cache_msg_update(sm_doc)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        utf16_len = len(text.encode('utf-16-le')) // 2
+        if len(text) > 4096 or utf16_len > 4096:
+            return await _send_as_txt_file()
+
         if quote_str and target_reply and hasattr(types, 'InputReplyToMessage'):
             try:
                 peer = await cl.get_input_entity(chat)
                 ents, clean_text = await cl._parse_message_text(text, 'md' if md else None)
+                if len(clean_text) > 4096 or (len(clean_text.encode('utf-16-le')) // 2) > 4096:
+                    return await _send_as_txt_file()
                 rto_kw = {'reply_to_msg_id': target_reply, 'quote_text': quote_str}
                 if topic_id:
                     rto_kw['top_msg_id'] = int(topic_id)
@@ -975,18 +1032,32 @@ class Manager:
                 m = cl._get_response_message(req_kw['random_id'], upd, peer)
                 if m:
                     bw_add(len(text.encode()) + 300)
-                    return ser_msg(m)
-            except Exception:
-                pass
-        m = await cl.send_message(chat, text, reply_to=target_reply, parse_mode='md' if md else None,
-                                  silent=bool(silent), link_preview=bool(preview), **kw)
-        bw_add(len(text.encode()) + 300)
-        return ser_msg(m)
+                    return _cache_msg_update(ser_msg(m))
+            except Exception as e:
+                if 'MessageTooLong' in type(e).__name__ or 'MESSAGE_TOO_LONG' in str(e):
+                    return await _send_as_txt_file()
+        try:
+            m = await cl.send_message(chat, text, reply_to=target_reply, parse_mode='md' if md else None,
+                                      silent=bool(silent), link_preview=bool(preview), **kw)
+            bw_add(len(text.encode()) + 300)
+            return _cache_msg_update(ser_msg(m))
+        except Exception as e:
+            if 'MessageTooLong' in type(e).__name__ or 'MESSAGE_TOO_LONG' in str(e):
+                return await _send_as_txt_file()
+            raise
 
     async def a_edit(self, aid, chat, mid, text, md):
-        m = await self._cl(aid).edit_message(chat, mid, text, parse_mode='md' if md else None)
-        bw_add(len(text.encode()) + 300)
-        return ser_msg(m)
+        utf16_len = len(text.encode('utf-16-le')) // 2
+        if len(text) > 4096 or utf16_len > 4096:
+            return await self.a_send(aid, chat, text, mid, md, False, None, True)
+        try:
+            m = await self._cl(aid).edit_message(chat, mid, text, parse_mode='md' if md else None)
+            bw_add(len(text.encode()) + 300)
+            return ser_msg(m)
+        except Exception as e:
+            if 'MessageTooLong' in type(e).__name__ or 'MESSAGE_TOO_LONG' in str(e):
+                return await self.a_send(aid, chat, text, mid, md, False, None, True)
+            raise
 
     async def a_delete(self, aid, chat, ids, revoke):
         await self._cl(aid).delete_messages(chat, ids, revoke=bool(revoke))
@@ -1843,7 +1914,21 @@ class Manager:
                 parse_mode='md' if up.get('md') else None, progress_callback=prog, **kw)
             m = m[0] if isinstance(m, list) else m
             bw_add(up['size'] + 500)
-            up.update(state='done', msg=ser_msg(m))
+            sm_up = ser_msg(m)
+            if getattr(m, 'id', None) and up['size'] <= 25 * MB:
+                try:
+                    ck = _ckey(up['acc'], int(up['chat']), m.id)
+                    os.makedirs(CACHE_DIR, exist_ok=True)
+                    shutil.copy2(up['path'], _cpath(ck))
+                    _save_cmeta(ck, {
+                        'key': ck, 'name': up['name'],
+                        'mime': str(getattr(getattr(m, 'file', None), 'mime_type', '') or 'application/octet-stream'),
+                        'size': up['size'], 'created_at': time.time(),
+                        'acc': up['acc'], 'chat': int(up['chat']), 'id': m.id
+                    })
+                except Exception:
+                    pass
+            up.update(state='done', msg=sm_up)
             self.push(up['acc'], 'up', up['chat'], up['msg'], None, uid=up_id, sent=up['size'], total=up['size'], state='done', name=up['name'])
         except asyncio.CancelledError:
             up['state'] = 'canceled'
@@ -2593,11 +2678,11 @@ def api_terminate():
 def api_send():
     d = _json()
     text = str(d.get('text', ''))
-    if not text.strip() or len(text) > 4096:
-        raise ApiError('text रिकामा किंवा 4096 पेक्षा मोठा')
+    if not text.strip():
+        raise ApiError('text रिकामा आहे')
     return jsonify(message=M.call(M.a_send(_acc(d), int(d['chat']), text, d.get('reply_to'), d.get('md'), d.get('silent'),
                                            d.get('schedule'), d.get('preview', True), d.get('topic_id'),
-                                           d.get('quote'), d.get('invert_media'))))
+                                           d.get('quote'), d.get('invert_media'), d.get('file_name')), 120))
 
 @bp.get('/api/folders')
 @api
@@ -2717,9 +2802,9 @@ def api_stories():
 def api_edit():
     d = _json()
     text = str(d.get('text', ''))
-    if not text.strip() or len(text) > 4096:
-        raise ApiError('text रिकामा किंवा मोठा')
-    return jsonify(message=M.call(M.a_edit(_acc(d), int(d['chat']), int(d['id']), text, d.get('md'))))
+    if not text.strip():
+        raise ApiError('text रिकामा आहे')
+    return jsonify(message=M.call(M.a_edit(_acc(d), int(d['chat']), int(d['id']), text, d.get('md')), 120))
 
 @bp.post('/api/delete')
 @api

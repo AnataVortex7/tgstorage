@@ -217,7 +217,7 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
   </div>
   <div id="msgs"><div id="mi"><div class="empty">Select a chat to start messaging</div></div><button id="dn">⌄</button></div>
   <div id="ups"></div>
-  <div id="comp" style="display:none"><div id="cin"><div id="bar2"><div style="flex:1;min-width:0"></div><button class="ib" id="bar2x">✕</button></div><div id="recbar"><div style="display:flex;align-items:center;gap:8px"><span class="rdot"></span><b id="rectm" style="font-size:13.5px;color:#ef4444">0:00</b><span class="mut" style="font-size:12.5px">Recording voice…</span></div><div style="display:flex;gap:8px"><button id="reccancel" style="color:#ef4444;font-weight:700;font-size:13px;padding:4px 8px;border-radius:8px;background:rgba(239,68,68,.12)">🗑 Cancel</button><button id="recsend" style="background:#10b981;color:#fff;font-weight:700;font-size:13px;padding:4px 10px;border-radius:8px">➤ Send</button></div></div><div id="emo"></div>
+  <div id="comp" style="display:none"><div id="cin"><div id="bar2"><div style="flex:1;min-width:0"></div><button class="ib" id="bar2x">✕</button></div><div id="lenbar" style="display:none;align-items:center;justify-content:space-between;gap:8px;padding:5px 12px;margin-bottom:5px;border-radius:10px;background:rgba(36,129,204,.14);border:1px solid rgba(36,129,204,.32);color:var(--acc);font-size:12.5px;font-weight:600"></div><div id="recbar"><div style="display:flex;align-items:center;gap:8px"><span class="rdot"></span><b id="rectm" style="font-size:13.5px;color:#ef4444">0:00</b><span class="mut" style="font-size:12.5px">Recording voice…</span></div><div style="display:flex;gap:8px"><button id="reccancel" style="color:#ef4444;font-weight:700;font-size:13px;padding:4px 8px;border-radius:8px;background:rgba(239,68,68,.12)">🗑 Cancel</button><button id="recsend" style="background:#10b981;color:#fff;font-weight:700;font-size:13px;padding:4px 10px;border-radius:8px">➤ Send</button></div></div><div id="emo"></div>
    <div id="box">
     <div id="pillbox">
      <button class="ib" id="emob" title="Emoji">☺</button>
@@ -1022,6 +1022,7 @@ function msgMenu(x,y,m){
   m.text?{ic:'🇮🇳',t:'Translate to मराठी (1-Tap)',fn:()=>doTranslateMsg(m,'mr')}:null,
   m.text?{ic:'🌐',t:'Translate (All Languages)…',fn:()=>translateMsg(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'👁',t:'Open & Cache on Server',fn:()=>openFile(m)}:null,
+  (m.media&&fileKind(m.media)==='text')?{ic:'📋',t:'Copy Full .txt Content',fn:async()=>{try{toast('⏳ Reading .txt file…');const r=await fetch(fileUrl({acc:S.acc,chat:S.chat,id:m.id},false),{credentials:'same-origin'});if(!r.ok)throw new Error('Failed to load .txt file');copyText(await r.text())}catch(e){toast(e.message)}}}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'⬇',t:'Download to Device',fn:()=>downloadMsg(m)}:null,
   (m.media&&m.media.kind!=='sticker'&&navigator.share)?{ic:'📱',t:'Share to Phone / Apps (WhatsApp, Files…)',fn:()=>shareFileMobile(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'🔗',t:'Public Share / VLC Stream Link',fn:()=>shareLinkModal(m)}:null,
@@ -1080,7 +1081,7 @@ $('#selrng').onclick=()=>{
 $('#self').onclick=()=>forwardDlg([...S.sel]);$('#seld').onclick=()=>deleteDlg([...S.sel]);
 
 /* ---------- composer, polls, scheduled messages & voice recorder ---------- */
-function autosize(){const t=$('#txt');if(!t)return;t.style.height='auto';t.style.height=Math.min(180,t.scrollHeight)+'px';const sb=$('#send');if(sb){sb.textContent=S.edit?'✓':'➤';sb.classList.toggle('ready',!!t.value.trim())}}
+function autosize(){const t=$('#txt');if(!t)return;t.style.height='auto';t.style.height=Math.min(180,t.scrollHeight)+'px';const sb=$('#send');if(sb){sb.textContent=S.edit?'✓':'➤';sb.classList.toggle('ready',!!t.value.trim())}const lb=$('#lenbar');if(lb){const n=t.value.length;if(n>4096){lb.style.display='flex';lb.textContent=`📄 मोठा मेसेज (${n.toLocaleString()} chars > 4,096) — आपोआप पूर्ण .txt फाइल फॉरमॅटमध्ये पाठवला जाईल (No Limit)`}else lb.style.display='none'}}
 function barUpdate(){const b=$('#bar2'),c=b.firstElementChild;b.style.display=(S.reply||S.edit)?'flex':'none';const m=S.edit||S.reply;if(m){c.replaceChildren(h('b',{style:'color:var(--acc);font-size:13px;display:block',text:S.edit?'✎ Edit message':(S.quote?'❝ Quote reply to ':'↩ Reply to ')+(m.out?'yourself':m.from||'message')}),h('span',{class:'mut',style:'display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis',text:S.quote||m.text||'📎 Media'}))}}
 function setReply(m,quote){S.reply=m;S.quote=quote||null;S.edit=null;barUpdate();$('#txt').focus()}
 function startEdit(m){S.edit=m;S.reply=null;S.quote=null;$('#txt').value=m.text;autosize();barUpdate();$('#txt').focus()}
@@ -1110,33 +1111,59 @@ async function flushOutbox(){
   }
  }finally{_flushingOutbox=false}
 }
+function _txtFileName(){
+ const d=new Date(),p=n=>String(n).padStart(2,'0');
+ return `message_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.txt`;
+}
 async function send(opt){opt=opt||{};const t=$('#txt').value;if(!t.trim()||!S.chat)return;const tx=t;$('#txt').value='';autosize();delete S.drafts[S.chat];LS.set('drafts_cache',S.drafts);
- const repId=S.reply&&S.reply.id,quoteTxt=S.quote||undefined;
+ let repId=S.reply&&S.reply.id,quoteTxt=S.quote||undefined;
  if(S.edit){
-  try{const r=await api('/app/api/edit',A({chat:S.chat,id:S.edit.id,text:tx,md:S.set.md}));replaceMsg(r.message);S.edit=null;S.reply=null;S.quote=null;barUpdate()}catch(e){toast(e.message);$('#txt').value=tx;autosize()}
-  return;
+  if(tx.length<=4096){
+   try{const r=await api('/app/api/edit',A({chat:S.chat,id:S.edit.id,text:tx,md:S.set.md}));replaceMsg(r.message);S.edit=null;S.reply=null;S.quote=null;barUpdate()}catch(e){toast(e.message);$('#txt').value=tx;autosize()}
+   return;
+  }
+  repId=S.edit.id;S.edit=null;
  }
  S.reply=null;S.quote=null;barUpdate();
+ const isLong=tx.length>4096;
  const queueOffline=()=>{
   const tempId='q_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
-  const tempMsg={id:tempId,out:true,_queued:true,ts:Math.floor(Date.now()/1e3),text:tx,reply:repId||null,topic:S.topic||null};
+  const previewTxt=isLong?(`📄 [.txt फाइल · ${tx.length.toLocaleString()} chars]
+`+tx.slice(0,280)+'…'):tx;
+  const tempMsg={id:tempId,out:true,_queued:true,ts:Math.floor(Date.now()/1e3),text:previewTxt,reply:repId||null,topic:S.topic||null};
   S.outbox.push({tempId,acc:S.acc,chat:S.chat,text:tx,reply_to:repId,topic_id:S.topic||undefined,md:S.set.md,silent:opt.silent,schedule:opt.schedule,tempMsg});
   saveOutbox();
   S.msgs.push(tempMsg);
   const d=S.dl.find(x=>x.id===S.chat)||(S.adl||[]).find(x=>x.id===S.chat);
-  if(d){d.last='🕒 '+tx;d.ts=tempMsg.ts;d.out=true;drawList()}
+  if(d){d.last='🕒 '+(isLong?'📄 .txt ('+tx.length+' chars)':tx.slice(0,90));d.ts=tempMsg.ts;d.out=true;drawList()}
   drawMsgs('bottom');
   setNetStatus(false,false);
   toast('🕒 Offline: मेसेज सेव्ह केला आहे — इंटरनेट येताच आपोआप पाठवला जाईल!');
  };
  if(!navigator.onLine){queueOffline();return}
+ const fname=isLong?_txtFileName():undefined;
+ if(isLong){
+  const blob=new Blob([tx],{type:'text/plain;charset=utf-8'});
+  if(blob.size>512*1024){
+   toast(`📄 मोठा मेसेज (${tx.length.toLocaleString()} chars) .txt फाइल म्हणून अपलोड होत आहे…`,2500);
+   const file=new File([blob],fname,{type:'text/plain'});
+   await queueUpload(file,true,{caption:'',reply_to:repId,silent:opt.silent,schedule:opt.schedule});
+   return;
+  }
+  toast(`📄 4096+ chars मोठा मेसेज (${tx.length.toLocaleString()} chars) .txt फाइल म्हणून पाठवत आहे…`,2200);
+ }
  try{
-  const r=await api('/app/api/send',A({chat:S.chat,text:tx,reply_to:repId,quote:quoteTxt,invert_media:opt.invert_media,topic_id:S.topic||undefined,md:S.set.md,silent:opt.silent,schedule:opt.schedule}));
+  const r=await api('/app/api/send',A({chat:S.chat,text:tx,file_name:fname,reply_to:repId,quote:quoteTxt,invert_media:opt.invert_media,topic_id:S.topic||undefined,md:S.set.md,silent:opt.silent,schedule:opt.schedule}));
   if(opt.schedule)toast('⏰ Message scheduled');
   else{
+   if(r.message&&r.message.media&&isLong){
+    S.dls[dlKey(r.message)]={state:'cached',done:r.message.media.size,size:r.message.media.size,expires_in:S.dlCfg.ttl,name:r.message.media.name||fname};
+   }
    if(!S.msgs.some(x=>x.id===r.message.id))S.msgs.push(r.message);
    const ck=S.acc+':'+S.chat+':'+(S.topic||0);
    if(S.mcache[ck]){S.mcache[ck].msgs=S.msgs.slice(-40);saveMcache()}
+   const d=S.dl.find(x=>x.id===S.chat)||(S.adl||[]).find(x=>x.id===S.chat);
+   if(d&&r.message){d.last=r.message.text||(r.message.media?'📎 '+(r.message.media.name||'file'):'');d.ts=r.message.ts;d.out=true;drawList()}
    drawMsgs('bottom');
   }
  }catch(e){
@@ -1347,7 +1374,11 @@ function drawUploads(){const u=$('#ups');u.replaceChildren(...Object.values(S.up
 async function cancelUpload(x){x.state='canceled';try{await api('/app/api/up/cancel',{id:x.id})}catch(e){}delete S.uploads[x.id];drawUploads()}
 const ab=b=>b.arrayBuffer?b.arrayBuffer():new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsArrayBuffer(b)});
 async function queueUpload(file,asFile,extra){extra=extra||{};const lim=cur().max_upload||4e9;if(file.size>lim){toast(`${file.name}: over Telegram's limit (${mbs(lim)})`);return}
- const cap=($('#txt').value||'').trim();if(cap){$('#txt').value='';autosize()}let st;try{st=await api('/app/api/up/start',A({chat:S.chat,size:file.size,name:file.name,caption:cap,reply_to:S.reply&&S.reply.id,topic_id:S.topic||undefined,as_file:asFile,is_voice:!!extra.is_voice,is_round:!!extra.is_round,spoiler:!!extra.spoiler,ttl:extra.ttl||0,md:S.set.md}))}catch(e){toast(e.message);return}
+ const rawCap=extra.caption!==undefined?String(extra.caption):(($('#txt').value||'').trim());if(extra.caption===undefined&&rawCap){$('#txt').value='';autosize()}
+ const cap=rawCap.length<=1000?rawCap:'';
+ const repId=extra.reply_to!==undefined?extra.reply_to:(S.reply&&S.reply.id);
+ let st;try{st=await api('/app/api/up/start',A({chat:S.chat,size:file.size,name:file.name,caption:cap,reply_to:repId,topic_id:S.topic||undefined,as_file:asFile,is_voice:!!extra.is_voice,is_round:!!extra.is_round,spoiler:!!extra.spoiler,ttl:extra.ttl||0,silent:!!extra.silent,schedule:extra.schedule,md:S.set.md}))}catch(e){toast(e.message);return}
+ if(rawCap.length>1000){api('/app/api/send',A({chat:S.chat,text:rawCap,file_name:rawCap.length>4096?_txtFileName():undefined,reply_to:repId,topic_id:S.topic||undefined,md:S.set.md})).then(r=>{if(r.message&&!S.msgs.some(x=>x.id===r.message.id)){S.msgs.push(r.message);drawMsgs('bottom')}}).catch(()=>{})}
  S.reply=null;barUpdate();const U={id:st.id,name:file.name,size:file.size,written:0,sent:0,state:'receiving',chat:S.chat,err:''};S.uploads[U.id]=U;drawUploads();
  try{let off=0;while(off<file.size){if(U.state==='canceled')return;const end=Math.min(off+st.chunk,file.size),buf=await ab(file.slice(off,end));let tries=0;
    for(;;){try{const r=await api('/app/api/up/chunk?'+Q({id:U.id,off}),undefined,{raw:buf});U.written=r.written;off=r.written;break}catch(e){if(e.status===409&&e.data&&e.data.written!=null){off=e.data.written;U.written=off;break}if(++tries>4)throw e;await sleep(1500*tries)}}
@@ -1439,7 +1470,7 @@ async function openFile(m){
  }
  else if(kind==='audio')body.replaceChildren(h('audio',{src:url,controls:true,autoplay:true,style:'width:min(92vw,520px)',on:{error:fail}}));
  else if(kind==='pdf'){const er=await probeFile(url);if(er)return fail();body.replaceChildren(h('iframe',{src:url}))}
- else if(kind==='text'){try{const r=await fetch(url,{headers:{Range:'bytes=0-1048575'},credentials:'same-origin'});if(!r.ok)return fail();const t=await r.text();body.replaceChildren(h('pre',{text:t+(x.size>1048576?'\n\n… (first 1 MB shown — use ⬇ Download for the full file)':'')}))}catch(e){fail()}}
+ else if(kind==='text'){try{const r=await fetch(url,{headers:{Range:'bytes=0-2097151'},credentials:'same-origin'});if(!r.ok)return fail();const t=await r.text();const tbar=h('div',{style:'align-self:stretch;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 10px;background:var(--side);border-radius:8px;border:1px solid var(--bd);font-size:12.5px'},h('span',{class:'mut',text:`📄 ${t.length.toLocaleString()} chars · ${sz(x.size)}`}),h('div',{style:'display:flex;gap:8px'},h('button',{style:'background:var(--acc);color:#fff;padding:5px 12px;border-radius:6px;font-weight:700',text:'📋 Copy Full Text',on:{click(){copyText(t)}}}),h('button',{style:'background:var(--hov);color:var(--fg);padding:5px 12px;border-radius:6px;font-weight:600',text:'⬇ Download .txt',on:{click(){downloadMsg(m)}}})));body.replaceChildren(tbar,h('pre',{text:t+(x.size>2097152?'\n\n… (first 2 MB shown — use ⬇ Download for the full file)':'')}))}catch(e){fail()}}
  else body.replaceChildren(h('div',{style:'text-align:center'},h('div',{style:'font-size:56px',text:'📄'}),h('b',{text:x.name||'File'}),h('div',{class:'mut',style:'margin:6px 0 14px',text:sz(x.size)+' · Caching on server with '+S.dlCfg.threads+' threads'}),h('button',{class:'p',style:'background:var(--acc);color:#fff;border-radius:8px;padding:10px 18px;font-weight:600',text:'⬇ Fast Download to Browser',on:{click(){downloadMsg(m)}}})));
 }
 
