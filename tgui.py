@@ -50,7 +50,12 @@ UI_PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8">
 <style>
 :root{--bg:#e4ebf0;--side:#ffffff;--in:#ffffff;--out:#e3fdd6;--acc:#2481cc;--acc2:#1a6fb3;--fg:#0f172a;--mut:#64748b;--bd:#e2e8f0;--hov:#f1f5f9;--sel:#2481cc;--bdg:#2481cc;--bdgm:#94a3b8;--ink:#fff;--sh:0 1px 3px rgba(0,0,0,.08);--pat:rgba(0,0,0,.035);--glass:rgba(255,255,255,.92)}
 [data-theme=dark]{--bg:#0b121a;--side:#151f2b;--in:#1c2938;--out:#244d75;--acc:#5eb5f7;--acc2:#3b9de8;--fg:#f1f5f9;--mut:#7c90a6;--bd:#0d1620;--hov:#1e2c3c;--sel:#25496d;--bdg:#3b9de8;--bdgm:#3a4f66;--ink:#fff;--sh:0 2px 5px rgba(0,0,0,.35);--pat:rgba(255,255,255,.028);--glass:rgba(21,31,43,.92)}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{height:100%;height:100dvh;margin:0;overflow:hidden;overscroll-behavior:none;user-select:none;-webkit-user-select:none}.mt,input,textarea,pre{user-select:text;-webkit-user-select:text}
+[data-theme=amoled]{--bg:#000000;--side:#070a0f;--in:#11161f;--out:#163654;--acc:#38bdf8;--acc2:#0284c7;--fg:#f8fafc;--mut:#64748b;--bd:#111827;--hov:#0f172a;--sel:#1e3a5f;--bdg:#0ea5e9;--bdgm:#334155;--ink:#fff;--sh:0 2px 6px rgba(0,0,0,.6);--pat:rgba(255,255,255,.02);--glass:rgba(7,10,15,.94)}
+[data-theme=royal]{--bg:#0f0a1c;--side:#18112b;--in:#23193e;--out:#3b236a;--acc:#a855f7;--acc2:#7e22ce;--fg:#f5f3ff;--mut:#9ca3af;--bd:#261a42;--hov:#281d46;--sel:#4c1d95;--bdg:#9333ea;--bdgm:#4b5563;--ink:#fff;--sh:0 2px 6px rgba(0,0,0,.45);--pat:rgba(168,85,247,.04);--glass:rgba(24,17,43,.92)}
+[data-theme=emerald]{--bg:#071712;--side:#0c241c;--in:#133529;--out:#155e46;--acc:#10b981;--acc2:#059669;--fg:#ecfdf5;--mut:#6ee7b7;--bd:#113025;--hov:#163e30;--sel:#065f46;--bdg:#10b981;--bdgm:#374151;--ink:#fff;--sh:0 2px 6px rgba(0,0,0,.4);--pat:rgba(16,185,129,.035);--glass:rgba(12,36,28,.92)}
+[data-theme=rose]{--bg:#180910;--side:#240e19;--in:#331524;--out:#591c3b;--acc:#f43f5e;--acc2:#e11d48;--fg:#fff1f2;--mut:#fda4af;--bd:#381426;--hov:#3d172b;--sel:#881337;--bdg:#f43f5e;--bdgm:#4b5563;--ink:#fff;--sh:0 2px 6px rgba(0,0,0,.45);--pat:rgba(244,63,94,.035);--glass:rgba(36,14,25,.92)}
+[data-theme=sunset]{--bg:#181009;--side:#24180e;--in:#332214;--out:#5c3716;--acc:#f59e0b;--acc2:#d97706;--fg:#fffbeb;--mut:#fcd34d;--bd:#362312;--hov:#3b2715;--sel:#78350f;--bdg:#f59e0b;--bdgm:#4b5563;--ink:#fff;--sh:0 2px 6px rgba(0,0,0,.45);--pat:rgba(245,158,11,.035);--glass:rgba(36,24,14,.92)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{height:100%;height:var(--vvh,100dvh);margin:0;overflow:hidden;overscroll-behavior:none;user-select:none;-webkit-user-select:none}.mt,input,textarea,pre{user-select:text;-webkit-user-select:text}
 body{background:var(--bg);color:var(--fg);font:var(--fs,15px)/1.38 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-thumb{background:rgba(128,128,128,.32);border-radius:4px}
 button,input,textarea,select{font:inherit;color:inherit}button{cursor:pointer;background:none;border:0;transition:background .15s,transform .1s,opacity .15s}button:active{transform:scale(.96)}
@@ -128,9 +133,19 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
 #dn{position:absolute;right:18px;bottom:14px;display:none;width:44px;height:44px;border-radius:50%;background:var(--side);box-shadow:0 3px 12px rgba(0,0,0,.28);font-size:18px;color:var(--mut);z-index:6}#dn .bd{position:absolute;top:-8px;right:-4px}
 #ups{max-width:800px;margin:0 auto;width:100%;padding:0 12px}.up{background:var(--side);border-radius:10px;padding:7px 11px;margin:4px 0;font-size:13px;box-shadow:var(--sh)}.up .pb{height:5px;border-radius:3px;background:var(--bd);margin-top:5px;overflow:hidden}.up .pb i{display:block;height:100%;background:var(--acc);width:0;transition:width .2s}
 #comp{background:var(--bg);padding-bottom:env(safe-area-inset-bottom,0px)}#cin{max-width:800px;margin:0 auto;padding:6px 12px 10px}#bar2{display:none;background:var(--side);border-radius:12px 12px 0 0;padding:6px 12px;gap:8px;align-items:center;border-bottom:1px solid var(--bd)}
-#box{display:flex;gap:8px;align-items:flex-end}#pillbox{flex:1;display:flex;align-items:flex-end;background:var(--side);border-radius:24px;padding:2px 6px;box-shadow:var(--sh)}
-#txt{flex:1;border:0;background:none;outline:0;resize:none;max-height:180px;padding:10px 6px;line-height:1.35}#send,#mic{width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-size:19px;flex:none;box-shadow:var(--sh)}
+#recbar{display:none;background:linear-gradient(90deg,rgba(239,68,68,.16),var(--side));border:1px solid rgba(239,68,68,.4);border-radius:14px;padding:7px 12px;margin-bottom:6px;align-items:center;justify-content:space-between;gap:10px;box-shadow:var(--sh)}
+#recbar .rdot{width:10px;height:10px;border-radius:50%;background:#ef4444;animation:pulse .9s infinite;flex:none}
+#box{display:flex;gap:8px;align-items:flex-end;width:100%;min-width:0}#pillbox{flex:1;min-width:0;display:flex;align-items:flex-end;background:var(--side);border-radius:24px;padding:2px 6px;box-shadow:var(--sh)}
+#txt{flex:1;min-width:0;width:0;border:0;background:none;outline:0;resize:none;max-height:180px;padding:10px 6px;line-height:1.35}#send,#mic{width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-size:19px;flex:none;display:inline-flex;align-items:center;justify-content:center;box-shadow:var(--sh)}
+#send.ready{box-shadow:0 0 0 2.5px rgba(255,255,255,.22),0 4px 12px rgba(36,129,204,.55)}
 #mic.rec{background:#ef4444;animation:pulse 1s infinite}
+@keyframes slideNext{0%{opacity:.45;transform:translateX(34px)}100%{opacity:1;transform:none}}
+@keyframes slidePrev{0%{opacity:.45;transform:translateX(-34px)}100%{opacity:1;transform:none}}
+#list.sw-next{animation:slideNext .19s cubic-bezier(.22,.61,.36,1)}
+#list.sw-prev{animation:slidePrev .19s cubic-bezier(.22,.61,.36,1)}
+#folders{scroll-behavior:smooth}#folders button{position:relative;transition:color .15s,background .15s;border-radius:8px 8px 0 0}
+.aud-bar{display:flex;align-items:center;gap:6px;margin-top:4px}.aud-pill{background:rgba(51,144,236,.16);color:var(--acc);border-radius:8px;padding:2px 7px;font-size:11.5px;font-weight:700}
+#lock-ov{position:fixed;inset:0;z-index:120;background:rgba(11,18,26,.94);backdrop-filter:blur(16px);display:none;flex-direction:column;align-items:center;justify-content:center;padding:20px;color:#fff}
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
 #emo{display:none;background:var(--side);border-radius:14px;margin-bottom:6px;padding:8px;max-height:200px;overflow:auto;grid-template-columns:repeat(auto-fill,minmax(38px,1fr));box-shadow:var(--sh)}#emo.on{display:grid}#emo button{font-size:23px;padding:4px;border-radius:6px}#emo button:hover{background:var(--hov)}
 #sel{display:none;align-items:center;gap:10px;padding:8px 14px;background:var(--side);border-bottom:1px solid var(--bd)}
@@ -146,7 +161,7 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
 .tabs{display:flex;border-bottom:1px solid var(--bd);overflow-x:auto;scrollbar-width:none}.tabs button{padding:10px 12px;color:var(--mut);white-space:nowrap;font-weight:600;font-size:13px}.tabs button.on{color:var(--acc);border-bottom:2px solid var(--acc)}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:2px}.grid div{aspect-ratio:1;background:rgba(0,0,0,.2);position:relative;overflow:hidden;cursor:pointer}.grid img{width:100%;height:100%;object-fit:cover}
 .empty{margin:auto;color:var(--mut);padding:30px;text-align:center}
-@media(max-width:820px){#side{width:100%;min-width:0}#main{position:absolute;inset:0;transform:translateX(100%);transition:transform .2s;z-index:14}.chat #main{transform:none}#back{display:inline-flex}.info-on #info{position:absolute;inset:0;width:100%;z-index:20}.m{max-width:86%}.qact{display:none}}
+@media(max-width:820px){#side{width:100%;min-width:0}#main{position:absolute;inset:0;width:100%;max-width:100vw;overflow-x:hidden;transform:translateX(100%);transition:transform .2s;z-index:14}.chat #main{transform:none}#back{display:inline-flex}#cbar{gap:4px;padding:6px 8px}#cbar .ib{width:34px;height:34px;font-size:16px}#comp{width:100%;max-width:100vw;overflow-x:hidden}#cin{padding:6px 8px 8px}#box{gap:6px}#pillbox{padding:2px 4px}#pillbox .ib{width:32px;height:36px;font-size:17px}#txt{padding:8px 4px}#send,#mic{width:42px;height:42px;font-size:18px}.info-on #info{position:absolute;inset:0;width:100%;z-index:20}.m{max-width:86%}.qact{display:none}}
 #fv{position:fixed;inset:0;z-index:75;background:rgba(0,0,0,.92);display:none;flex-direction:column;color:#fff}
 #fv .vh{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(0,0,0,.65)}#fv .vh b{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#fv .vh .ib{color:#fff;text-decoration:none}
 #fv .vb{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:12px;overflow:auto;flex-direction:column;gap:8px}#fv video{width:min(92vw,960px);max-height:82vh;min-height:240px;background:#000;border-radius:8px;display:block}#fv img{max-width:100%;max-height:84vh;border-radius:8px}#fv iframe{width:100%;height:100%;border:0;background:#fff;border-radius:8px}
@@ -163,6 +178,8 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
   <div class="hd">
    <button class="ib" id="menu" title="Menu">☰</button>
    <input id="search" placeholder="Search chats or @username…" autocomplete="off">
+   <button class="ib" id="bkm-btn" title="Starred Bookmarks & Study Notes">⭐</button>
+   <button class="ib" id="theme-btn" title="Premium Themes & Wallpaper Studio">🎨</button>
    <button class="ib" id="pwa-btn" title="Install as Mobile APK / PC Desktop App">📲</button>
    <button class="ib" id="dlmgr" title="Multi-Thread Downloads & Server Cache">⚡<span class="bd-dot" id="dlcnt" style="display:none">0</span></button>
   </div>
@@ -200,22 +217,22 @@ audio{max-width:100%;height:38px;margin-top:3px}.card{border-left:3px solid var(
   </div>
   <div id="msgs"><div id="mi"><div class="empty">Select a chat to start messaging</div></div><button id="dn">⌄</button></div>
   <div id="ups"></div>
-  <div id="comp" style="display:none"><div id="cin"><div id="bar2"><div style="flex:1;min-width:0"></div><button class="ib" id="bar2x">✕</button></div><div id="emo"></div>
+  <div id="comp" style="display:none"><div id="cin"><div id="bar2"><div style="flex:1;min-width:0"></div><button class="ib" id="bar2x">✕</button></div><div id="recbar"><div style="display:flex;align-items:center;gap:8px"><span class="rdot"></span><b id="rectm" style="font-size:13.5px;color:#ef4444">0:00</b><span class="mut" style="font-size:12.5px">Recording voice…</span></div><div style="display:flex;gap:8px"><button id="reccancel" style="color:#ef4444;font-weight:700;font-size:13px;padding:4px 8px;border-radius:8px;background:rgba(239,68,68,.12)">🗑 Cancel</button><button id="recsend" style="background:#10b981;color:#fff;font-weight:700;font-size:13px;padding:4px 10px;border-radius:8px">➤ Send</button></div></div><div id="emo"></div>
    <div id="box">
     <div id="pillbox">
      <button class="ib" id="emob" title="Emoji">☺</button>
      <textarea id="txt" rows="1" placeholder="Message"></textarea>
-     <button class="ib" id="md" title="Markdown formatting">𝐁</button>
-     <button class="ib" id="att" title="Attach file, media, or poll">📎</button>
+     <button class="ib" id="md" title="Tap: Markdown ON/OFF · Long-press: Quick Reply Templates">𝐁</button>
+     <button class="ib" id="att" title="Attach file, media, poll, or quick template">📎</button>
     </div>
     <button id="mic" title="Record Voice Message (Click to start/stop)">🎤</button>
-    <button id="send" title="Send (Right-click for Silent / Schedule)">➤</button>
+    <button id="send" title="Send (Hold / Right-click for Silent, Schedule & Templates)">➤</button>
    </div>
    <input id="file" type="file" multiple hidden></div></div>
  </main>
  <aside id="info"></aside>
 </div>
-<div id="lb"><button class="x">✕</button><button class="x" id="lbd" title="Download" style="right:64px">⬇</button><span id="lbc" style="position:absolute;top:18px;left:16px;color:#fff;font-size:14px"></span><button class="nv" style="left:6px">‹</button><img alt=""><button class="nv" style="right:6px">›</button></div>
+<div id="lb"><button class="x">✕</button><button class="x" id="lbd" title="Download" style="right:64px">⬇</button><button class="x" id="lbsh" title="Share Photo" style="right:114px">📱</button><span id="lbc" style="position:absolute;top:18px;left:16px;color:#fff;font-size:14px;font-weight:600"></span><button class="nv" style="left:6px;transform:translateY(-50%)">‹</button><img alt="" style="transition:transform .2s;touch-action:none"><button class="nv" style="right:6px;transform:translateY(-50%)">›</button><div id="lbcap" style="position:absolute;bottom:18px;left:50%;transform:translateX(-50%);color:#fff;background:rgba(0,0,0,.65);padding:6px 14px;border-radius:12px;max-width:88vw;font-size:13.5px;display:none;text-align:center"></div></div><div id="lock-ov"></div>
 <div id="fv"><div class="vh"><b id="fvt"></b><span id="fvst" style="font-size:12px;color:#6ee7b7"></span><a class="ib" id="fvd" title="Fast Download to Browser">⬇</a><button class="ib" id="fvx" title="Close">✕</button></div><div class="vb" id="fvb"></div></div>
 <div id="toast"></div><iframe name="tg_dl_frame" id="dlframe" style="display:none"></iframe>
 <script>
@@ -224,8 +241,8 @@ const $=(s,r)=>(r||document).querySelector(s);
 const h=(t,p,...k)=>{const e=document.createElement(t);if(p)for(const[a,v]of Object.entries(p)){if(v==null||v===false)continue;if(a==='on')for(const[ev,f]of Object.entries(v))e.addEventListener(ev,f);else if(a==='text')e.textContent=v;else if(a==='class')e.className=v;else if(a==='style')e.style.cssText=v;else e.setAttribute(a,v===true?'':v)}for(const c of k.flat(9)){if(c==null||c===false)continue;e.append(c.nodeType?c:document.createTextNode(String(c)))}return e};
 const LS={get(k,d){try{const v=localStorage.getItem('tg_'+k);return v==null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem('tg_'+k,JSON.stringify(v))}catch(e){}}};
 const Q=o=>new URLSearchParams(o).toString(),sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const S={acc:LS.get('acc',null),accs:LS.get('accs_cache',[]),chat:null,cd:null,topic:0,topics:[],dl:[],adl:[],folder:'all',archived:false,msgs:[],mcache:LS.get('mcache_all',{}),outbox:LS.get('outbox_q',[]),offline:!navigator.onLine,readOut:0,readIn:0,pinned:null,typing:{},seq:0,sel:new Set(),reply:null,edit:null,uploads:{},dls:{},bw:LS.get('bw_cache',null),defApi:false,loadingOld:false,noMore:false,gsearch:[],q:'',info:false,drafts:LS.get('drafts_cache',{}),unreadFrom:0,dlCfg:LS.get('dlcfg_cache',{threads:4,ttl:3600,auto_cache:true}),
- set:Object.assign({theme:'auto',avatars:true,previews:true,notif:false,sound:true,md:false,enter:true,fs:15},LS.get('set',{}))};
+const S={acc:LS.get('acc',null),accs:LS.get('accs_cache',[]),chat:null,cd:null,topic:0,topics:[],dl:[],adl:[],cloudFolders:LS.get('cf_cache',[]),hiddenFolders:LS.get('hid_folders',[]),customFolders:LS.get('cust_folders',[]),bookmarks:LS.get('bookmarks',[]),templates:LS.get('quick_tpls',['📚 सध्या लायब्ररीत अभ्यास चालू आहे, नंतर बोलू!','👍 ठीक आहे, पोहोचल्यावर कळवतो.','🙏 धन्यवाद!','⏳ ५ मिनिटांत कॉल करतो.']),folder:'all',archived:false,msgs:[],mcache:LS.get('mcache_all',{}),outbox:LS.get('outbox_q',[]),offline:!navigator.onLine,readOut:0,readIn:0,pinned:null,typing:{},seq:0,sel:new Set(),reply:null,edit:null,uploads:{},dls:{},bw:LS.get('bw_cache',null),defApi:false,loadingOld:false,noMore:false,gsearch:[],q:'',info:false,drafts:LS.get('drafts_cache',{}),unreadFrom:0,dlCfg:LS.get('dlcfg_cache',{threads:4,ttl:3600,auto_cache:true}),
+ set:Object.assign({theme:'auto',avatars:true,previews:true,notif:false,sound:true,md:false,enter:true,fs:15,swipeFolders:true,trLang:'mr',pinCode:'',autoLockMin:0},LS.get('set',{}))};
 function saveMcache(){try{const ks=Object.keys(S.mcache);if(ks.length>35){delete S.mcache[ks[0]]}LS.set('mcache_all',S.mcache)}catch(e){}}
 function saveOutbox(){LS.set('outbox_q',S.outbox)}
 const EMOJI='😀😁😂🤣😊😍😘😎🤔😢😭😡👍👎👏🙏💪🔥❤️💔🎉✨🌹🎂🍕☕🚀✅❌⚠️📌📎💯😴🤝👀🙈😅😉😇🥰😋🤗🤩😏😬🙄😤😱🤯🥳😜🫡🫶⚡🌟💎🎵🎬📷👑🛡'.match(/\p{Extended_Pictographic}\uFE0F?/gu)||[];
@@ -293,7 +310,22 @@ const A=(o)=>Object.assign({acc:S.acc},o);
 const fileUrl=(b,dl)=>'/app/api/file?'+Q(Object.assign({},b,S.dlTok?{dt:S.dlTok}:{},dl?{dl:1}:{}));
 const cur=()=>S.accs.find(a=>a.id===S.acc)||{};
 function saveSet(){LS.set('set',S.set);applyTheme()}
-function applyTheme(){document.documentElement.style.setProperty('--fs',(S.set.fs||15)+'px');let t=S.set.theme;if(t==='auto')t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';document.documentElement.dataset.theme=t}
+function applyTheme(){
+ document.documentElement.style.setProperty('--fs',(S.set.fs||15)+'px');
+ let t=S.set.theme||'auto';
+ if(t==='auto')t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';
+ document.documentElement.dataset.theme=t;
+ const tc={light:'#2481cc',dark:'#151f2b',amoled:'#000000',royal:'#18112b',emerald:'#0c241c',rose:'#240e19',sunset:'#24180e'}[t]||'#151f2b';
+ const mt=document.querySelector('meta[name="theme-color"]');if(mt)mt.setAttribute('content',tc);
+}
+if(window.visualViewport){
+ const syncVv=()=>{
+  document.documentElement.style.setProperty('--vvh',window.visualViewport.height+'px');
+  if(S.chat&&document.activeElement===$('#txt')){const b=$('#msgs');if(b&&b.scrollHeight-b.scrollTop-b.clientHeight<260)b.scrollTop=b.scrollHeight}
+ };
+ window.visualViewport.addEventListener('resize',syncVv);
+ window.visualViewport.addEventListener('scroll',syncVv);
+}
 /* ---------- avatar ---------- */
 function avatar(id,name,size,online){const a=h('div',{class:'av',style:`background:${colorOf(id)};${size?`width:${size}px;height:${size}px;font-size:${Math.round(size*.38)}px`:''}`,text:(name||'?').trim().slice(0,1).toUpperCase()});
  if(S.set.avatars&&S.acc&&id){const i=h('img',{alt:'',loading:'lazy',src:'/app/api/avatar?'+Q({acc:S.acc,chat:id}),on:{error(){i.remove()}}});a.append(i)}
@@ -351,21 +383,54 @@ function drawAccBar(){
  )),h('button',{class:'apill',title:'Add Telegram Account',on:{click:addAccount}},'＋'));
 }
 const FOLDERS=[['all','All'],['unread','Unread'],['archived','🗄 Archived'],['owned','👑 Admin'],['user','Personal'],['group','Groups'],['channel','Channels'],['bot','Bots'],['saved','🔖 Saved']];
+function getAllFolderTabs(){
+ const hid=new Set(S.hiddenFolders||[]);
+ const cloud=(S.cloudFolders||[]).map(cf=>['cf_'+cf.id,(cf.emoticon?cf.emoticon+' ':'📁 ')+cf.title,cf]);
+ const local=(S.customFolders||[]).map(lf=>['lf_'+lf.id,(lf.icon||'📌')+' '+lf.title,lf]);
+ return [...FOLDERS.slice(0,2),...cloud,...local,...FOLDERS.slice(2)].filter(([k])=>k==='all'||!hid.has(k));
+}
+function getSwipeableFolders(){
+ return getAllFolderTabs().filter(([k])=>k!=='saved');
+}
+function selectFolderTab(k,cf,animDir){
+ if(k==='saved'){const u=cur().uid;if(u)openById(u,0);return}
+ if(k==='archived'){S.archived=true;S.folder='archived';S.activeCf=null;pushNav('archived')}
+ else{S.archived=false;S.folder=k;S.activeCf=cf||null}
+ drawFolders();
+ drawList(animDir);
+}
+function stepFolder(delta){
+ if(S.set.swipeFolders===false)return;
+ const tabs=getSwipeableFolders();
+ if(tabs.length<2)return;
+ const curKey=S.archived?'archived':S.folder;
+ let idx=tabs.findIndex(([k])=>k===curKey);
+ if(idx<0)idx=0;
+ const nextIdx=(idx+delta+tabs.length)%tabs.length;
+ const [nk,nn,ncf]=tabs[nextIdx];
+ if(navigator.vibrate)try{navigator.vibrate(12)}catch(e){}
+ selectFolderTab(nk,ncf,delta>0?'next':'prev');
+ toast(`📁 ${nn.replace(/^[^\w\u0900-\u097F]+/,'').trim()||nn}`,1100);
+}
 function drawFolders(){
  const f=$('#folders');
- const custom=(S.cloudFolders||[]).map(cf=>['cf_'+cf.id,(cf.emoticon?cf.emoticon+' ':'📁 ')+cf.title,cf]);
- f.replaceChildren(...[...FOLDERS.slice(0,2),...custom,...FOLDERS.slice(2)].map(([k,n,cf])=>{
-  const c=k==='unread'?S.dl.filter(d=>d.unread&&!d.muted).length:(k==='archived'?(S.adl||[]).length:0);
-  const isOn=(k==='archived'&&S.archived)||(!S.archived&&S.folder===k);
-  return h('button',{class:isOn?'on':'',on:{click(){
-   if(k==='saved'){const u=cur().uid;if(u)openById(u,0);return}
-   if(k==='archived'){S.archived=true;S.folder='archived';pushNav('archived');drawFolders();drawList();return}
-   S.archived=false;S.folder=k;S.activeCf=cf||null;drawFolders();drawList();
-  }}},n,c?h('span',{class:'n',style:k==='archived'?'background:var(--bdgm)':'',text:c}):null);
- }));
+ const tabs=getAllFolderTabs();
+ f.replaceChildren(
+  ...tabs.map(([k,n,cf])=>{
+   const c=k==='unread'?S.dl.filter(d=>d.unread&&!d.muted).length:(k==='archived'?(S.adl||[]).length:0);
+   const isOn=(k==='archived'&&S.archived)||(!S.archived&&S.folder===k);
+   return h('button',{class:isOn?'on':'','data-fk':k,on:{click(){selectFolderTab(k,cf)}}},n,c?h('span',{class:'n',style:k==='archived'?'background:var(--bdgm)':'',text:c}):null);
+  }),
+  h('button',{title:'Manage & Customize Folders',style:'padding:10px 10px;color:var(--acc)',on:{click:openFolderManager}},'⚙📁')
+ );
+ requestAnimationFrame(()=>{
+  const act=f.querySelector('button.on');
+  if(act&&act.scrollIntoView)try{act.scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'})}catch(e){}
+ });
 }
 function lastText(d){if(S.drafts[d.id]&&d.id!==S.chat)return h('span',{class:'mut'},h('span',{style:'color:#ef4444;font-weight:600',text:'Draft: '}),S.drafts[d.id].slice(0,60));const t=S.typing[d.id];if(t&&t.exp>Date.now())return h('span',{class:'typ',text:(t.who&&d.type!=='user'?t.who+' ':'')+(t.action==='recording'?'is recording…':'typing…')});return h('span',{class:'mut',text:(d.out&&d.last?'You: ':'')+d.last})}
-function drawList(){
+let _lastFolderSwipe=0;
+function drawList(animDir){
  const q=S.q.toLowerCase();
  const rows=[];
  if(S.archived){
@@ -405,23 +470,38 @@ function drawList(){
     return false;
    });
   }
-  else if(S.folder!=='all')L=L.filter(d=>d.type===S.folder&&!d.bot);
- }
- for(const d of L){
-  const isArch=!!d.archived||S.archived;
-  const ub=d.unread?h('span',{class:'bd'+(d.muted?' m':''),text:d.unread>999?'999+':d.unread}):(d.mentions?h('span',{class:'bd',text:'@'}):(d.pinned?h('span',{class:'mut',text:'📌'}):null));
-  const unarchBtn=S.archived?h('button',{class:'ib',style:'width:28px;height:28px;font-size:14px',title:'Unarchive chat',text:'📤',on:{click(e){e.stopPropagation();chatAct('archive',d,{archive:false})}}}):null;
-  rows.push(h('div',{class:'row'+(d.id===S.chat?' on':''),on:{click(){openChat(d)},contextmenu(e){e.preventDefault();chatMenu(e.clientX,e.clientY,d)}}},
-   avatar(d.id,d.name,0,d.online),
-   h('div',{class:'rm'},
-    h('div',{class:'r1'},h('b',{text:(isArch&&!S.archived?'🗄 ':'')+(d.verified?'✔ ':'')+(d.premium?'⭐ ':'')+(d.forum?'💬 ':'')+(d.owner?'👑 ':(d.admin?'🛡 ':''))+d.name}),h('span',{class:'t',text:(d.muted?'🔇 ':'')+listTime(d.ts)})),
-    h('div',{class:'r2'},lastText(d),h('div',{style:'display:flex;align-items:center;gap:4px'},ub,unarchBtn))
-   )
-  ));
- }
+   else if(S.folder&&S.folder.startsWith('lf_')&&S.activeCf){
+    const lf=S.activeCf,peers=new Set(lf.peers||[]),kw=(lf.keyword||'').toLowerCase();
+    L=L.filter(d=>peers.has(d.id)||(kw&&d.name.toLowerCase().includes(kw)));
+   }
+   else if(S.folder!=='all')L=L.filter(d=>d.type===S.folder&&!d.bot);
+  }
+  for(const d of L){
+   const isArch=!!d.archived||S.archived;
+   const ub=d.unread?h('span',{class:'bd'+(d.muted?' m':''),text:d.unread>999?'999+':d.unread}):(d.mentions?h('span',{class:'bd',text:'@'}):(d.pinned?h('span',{class:'mut',text:'📌'}):null));
+   const unarchBtn=S.archived?h('button',{class:'ib',style:'width:28px;height:28px;font-size:14px',title:'Unarchive chat',text:'📤',on:{click(e){e.stopPropagation();chatAct('archive',d,{archive:false})}}}):null;
+   let rLp=null,rFired=false,rx0=0,ry0=0;
+   const rowEl=h('div',{class:'row'+(d.id===S.chat?' on':''),on:{
+    click(e){if(rFired||Date.now()-_lastFolderSwipe<380){rFired=false;e.stopPropagation();return}openChat(d)},
+    contextmenu(e){e.preventDefault();chatMenu(e.clientX,e.clientY,d)},
+    touchstart(e){const t=e.touches[0];rx0=t.clientX;ry0=t.clientY;rFired=false;clearTimeout(rLp);rLp=setTimeout(()=>{rFired=true;if(navigator.vibrate)try{navigator.vibrate(18)}catch(_){}chatMenu(t.clientX,t.clientY,d)},480)},
+    touchmove(e){const t=e.touches[0];if(Math.hypot(t.clientX-rx0,t.clientY-ry0)>10)clearTimeout(rLp)},
+    touchend(){clearTimeout(rLp)},
+    touchcancel(){clearTimeout(rLp)}
+   }},
+    avatar(d.id,d.name,0,d.online),
+    h('div',{class:'rm'},
+     h('div',{class:'r1'},h('b',{text:(isArch&&!S.archived?'🗄 ':'')+(d.verified?'✔ ':'')+(d.premium?'⭐ ':'')+(d.forum?'💬 ':'')+(d.owner?'👑 ':(d.admin?'🛡 ':''))+d.name}),h('span',{class:'t',text:(d.muted?'🔇 ':'')+listTime(d.ts)})),
+     h('div',{class:'r2'},lastText(d),h('div',{style:'display:flex;align-items:center;gap:4px'},ub,unarchBtn))
+    )
+   );
+   rows.push(rowEl);
+  }
  if(S.q.length>=2){if(S.gres&&S.gres.dialog)rows.push(h('div',{class:'sec',text:'Global Match'}),dialogRow(S.gres.dialog));
   if(S.gsearch.length){rows.push(h('div',{class:'sec',text:'Messages'}));for(const m of S.gsearch)rows.push(h('div',{class:'row',on:{click(){openById(m.chat,m.id)}}},avatar(m.chat,m.chat_name),h('div',{class:'rm'},h('div',{class:'r1'},h('b',{text:m.chat_name||'Chat'}),h('span',{class:'t',text:listTime(m.ts)})),h('div',{class:'r2'},h('span',{class:'mut',text:m.text||'📎 Media'})))))}}
- if(!rows.length)rows.push(h('div',{class:'empty',text:S.archived?'No archived chats yet':(S.dl.length?'No chats found':'Loading…')}));$('#list').replaceChildren(...rows);
+ if(!rows.length)rows.push(h('div',{class:'empty',text:S.archived?'No archived chats yet':(S.dl.length?'No chats found':'Loading…')}));
+ const lst=$('#list');lst.replaceChildren(...rows);
+ if(animDir){lst.classList.remove('sw-next','sw-prev');void lst.offsetWidth;lst.classList.add(animDir==='next'?'sw-next':'sw-prev')}
  const n=S.dl.reduce((a,d)=>a+(d.muted?0:d.unread),0);document.title='TG Hub';if(navigator.setAppBadge){try{if(n)navigator.setAppBadge(n).catch(()=>{});else navigator.clearAppBadge().catch(()=>{})}catch(e){}}}
 function dialogRow(d){return h('div',{class:'row',on:{click(){openChat(d)}}},avatar(d.id,d.name),h('div',{class:'rm'},h('div',{class:'r1'},h('b',{text:d.name})),h('div',{class:'r2'},h('span',{class:'mut',text:d.username?'@'+d.username:d.type}))))}
 async function loadDialogs(){
@@ -435,7 +515,7 @@ async function loadDialogs(){
   S.dl=r.dialogs||[];S.adl=r.archived||[];
   LS.set('dl_'+S.acc,{dl:S.dl.slice(0,80),adl:S.adl.slice(0,40)});
   drawFolders();drawList();
-  api('/app/api/folders?'+Q({acc:S.acc})).then(fr=>{S.cloudFolders=fr.folders||[];drawFolders()}).catch(()=>{});
+  api('/app/api/folders?'+Q({acc:S.acc})).then(fr=>{S.cloudFolders=fr.folders||[];LS.set('cf_cache',S.cloudFolders);drawFolders()}).catch(()=>{});
  }catch(e){
   if(!S.dl.length){
    $('#list').replaceChildren(h('div',{class:'empty'},'⏳ '+e.message,h('br'),h('button',{style:'color:var(--acc);font-weight:700;margin-top:8px',text:'🔄 Retry',on:{click:loadDialogs}})));
@@ -635,13 +715,15 @@ function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:
     h('button',{style:'background:#ea580c;color:#fff;padding:3px 8px;border-radius:6px;font-weight:700;white-space:nowrap',text:'🎬 VLC / Theatre मध्ये उघडा',on:{click(ev){ev.stopPropagation();v.pause();shareLinkModal(m)}}})
    );
    v.addEventListener('loadeddata',()=>{if(v.videoWidth===0&&v.duration>0)codecWarn.style.display='flex'});
+   const rwBtn=h('button',{text:'⏪10s',title:'Rewind 10s',on:{click(ev){ev.stopPropagation();v.currentTime=Math.max(0,(v.currentTime||0)-10)}}});
+   const ffBtn=h('button',{text:'10s⏩',title:'Forward 10s',on:{click(ev){ev.stopPropagation();v.currentTime=Math.min(v.duration||1e9,(v.currentTime||0)+10)}}});
    const spdBtn=h('button',{text:'1x',title:'Playback speed',on:{click(ev){ev.stopPropagation();const rates=[1,1.25,1.5,1.75,2,2.5,0.5];const nx=rates[(rates.indexOf(v.playbackRate)+1)%rates.length];v.playbackRate=nx;spdBtn.textContent=nx+'x'}}});
    const thBtn=h('button',{text:'⛶',title:'Open in Big Theatre Player',on:{click(ev){ev.stopPropagation();stopMediaEl(v);openFile(m)}}});
    const snapBtn=h('button',{text:'📸',title:'Capture HD Screenshot of Video Frame',on:{click(ev){ev.stopPropagation();snapVideo(v,x.name||('video_'+m.id))}}});
    const pipBtn=h('button',{text:'⧉ PiP',title:'Picture in Picture',on:{click(ev){ev.stopPropagation();if(v.requestPictureInPicture)v.requestPictureInPicture().catch(()=>{})}}});
    const shBtn=h('button',{text:'🔗',title:'VLC / Public Share Link',on:{click(ev){ev.stopPropagation();shareLinkModal(m)}}});
-   const dlBtn=h('button',{text:'⬇ Save',title:'Fast Download from Server',on:{click(ev){ev.stopPropagation();downloadMsg(m)}}});
-   const bar=x.kind==='gif'?null:h('div',{class:'vbar'},h('span',{class:'dlp',text:dlBadgeText(S.dls[k]||{state:'downloading',size:x.size},x)}),h('div',{style:'display:flex;gap:4px'},spdBtn,thBtn,snapBtn,pipBtn,shBtn,dlBtn));
+   const dlBtn=h('button',{text:'⬇',title:'Fast Download from Server',on:{click(ev){ev.stopPropagation();downloadMsg(m)}}});
+   const bar=x.kind==='gif'?null:h('div',{class:'vbar',style:'flex-wrap:wrap'},h('span',{class:'dlp',text:dlBadgeText(S.dls[k]||{state:'downloading',size:x.size},x)}),h('div',{style:'display:flex;gap:4px;flex-wrap:wrap'},rwBtn,ffBtn,spdBtn,thBtn,snapBtn,pipBtn,shBtn,dlBtn));
    tgt.replaceChildren(v,codecWarn,bar);tgt.onclick=null;
    const p=v.play&&v.play();if(p&&p.catch)p.catch(()=>{});
    // Start multi-threaded server caching after video element is mounted
@@ -653,10 +735,14 @@ function mediaNode(m){const x=m.media;if(!x)return null;const b={acc:S.acc,chat:
   w.setAttribute('data-dl',k);w.onclick=start;return w;
  }
  if(x.kind==='voice'||x.kind==='audio'){
-  return h('div',{},h('div',{class:'mut',style:'font-size:13px;display:flex;justify-content:space-between;gap:8px'},
-   h('span',{text:(x.kind==='voice'?'🎤 Voice message ':'🎵 '+(x.name||'Audio')+' ')+dur(x.dur)+' · '+sz(x.size)}),
-   h('button',{style:'color:var(--acc);font-weight:600;font-size:12px',text:'⬇',title:'Download audio',on:{click(e){e.stopPropagation();downloadMsg(m)}}})
-  ),h('audio',{controls:true,preload:'none',src:file,on:{play(){serverDownload(m,false).catch(()=>{})}}}))
+  const au=h('audio',{controls:true,preload:'none',src:file,on:{play(){serverDownload(m,false).catch(()=>{})}}});
+  bindMediaSession(au,m);
+  const spB=h('button',{class:'aud-pill',text:'1x',title:'Change Voice/Audio Playback Speed',on:{click(e){e.stopPropagation();const rs=[1,1.25,1.5,1.75,2];const nx=rs[(rs.indexOf(au.playbackRate)+1)%rs.length];au.playbackRate=nx;spB.textContent=nx+'x'}}});
+  const lpB=h('button',{class:'aud-pill',style:'opacity:.65',text:'🔁',title:'Loop Audio',on:{click(e){e.stopPropagation();au.loop=!au.loop;lpB.style.opacity=au.loop?'1':'.65';toast(au.loop?'🔁 Loop enabled':'Loop off',1400)}}});
+  return h('div',{style:'min-width:230px'},h('div',{class:'mut',style:'font-size:13px;display:flex;justify-content:space-between;align-items:center;gap:6px'},
+   h('span',{style:'overflow:hidden;text-overflow:ellipsis;white-space:nowrap',text:(x.kind==='voice'?'🎤 Voice ':'🎵 '+(x.name||'Audio')+' ')+dur(x.dur)+' · '+sz(x.size)}),
+   h('div',{style:'display:flex;gap:4px;align-items:center;flex:none'},spB,lpB,h('button',{class:'aud-pill',text:'⬇',title:'Download audio',on:{click(e){e.stopPropagation();downloadMsg(m)}}}))
+  ),au)
  }
  return fileCard(m,x,file)}
 
@@ -820,11 +906,12 @@ function bubbleRow(m,first,last,showName,album){const out=m.out;const row=h('div
  if(album&&album.length>1){const g=h('div',{style:`display:grid;grid-template-columns:repeat(${album.length>3?2:Math.min(album.length,2)},1fr);gap:2px;margin:-2px -4px 3px`});album.forEach(a=>g.append(mediaNode(a)));b.append(g);const tx=album.find(a=>a.text);if(tx)b.append(...bodyNode(Object.assign({},tx,{media:null,reply:null,fwd:'',via:'',react:tx.react,btn:null})))}
  else b.append(...bodyNode(m));
  b.append(h('span',{class:'meta'},m._deleted?h('b',{style:'color:#ef4444',text:'👻 deleted'}):null,m.pinned?'📌':null,m.views?'👁 '+m.views:null,m.edited?'edited':null,tm(m.ts),ticks(m)));b.append(h('div',{style:'clear:both'}));
- b.addEventListener('contextmenu',e=>{e.preventDefault();msgMenu(e.clientX,e.clientY,m)});let lp;let tx0=0,ty0=0,swiped=false;
- b.addEventListener('touchstart',e=>{const t=e.touches[0];tx0=t.clientX;ty0=t.clientY;swiped=false;lp=setTimeout(()=>msgMenu(t.clientX,t.clientY,m),520)},{passive:true});
- b.addEventListener('touchmove',e=>{clearTimeout(lp);const t=e.touches[0],dx=t.clientX-tx0,dy=Math.abs(t.clientY-ty0);if(dy<28&&Math.abs(dx)>22){b.style.transform=`translateX(${Math.max(-55,Math.min(55,dx*0.5))}px)`;swiped=Math.abs(dx)>48}},{passive:true});
+ b.addEventListener('contextmenu',e=>{e.preventDefault();msgMenu(e.clientX,e.clientY,m)});let lp,lpFired=false,tx0=0,ty0=0,swiped=false;
+ b.addEventListener('touchstart',e=>{const t=e.touches[0];tx0=t.clientX;ty0=t.clientY;swiped=false;lpFired=false;clearTimeout(lp);lp=setTimeout(()=>{lpFired=true;if(navigator.vibrate)try{navigator.vibrate(18)}catch(_){}msgMenu(t.clientX,t.clientY,m)},500)},{passive:true});
+ b.addEventListener('touchmove',e=>{const t=e.touches[0],dx=t.clientX-tx0,dy=Math.abs(t.clientY-ty0);if(Math.hypot(dx,dy)>10)clearTimeout(lp);if(dy<28&&Math.abs(dx)>22){b.style.transform=`translateX(${Math.max(-55,Math.min(55,dx*0.5))}px)`;swiped=Math.abs(dx)>46}},{passive:true});
  b.addEventListener('touchend',()=>{clearTimeout(lp);b.style.transform='';if(swiped){if(navigator.vibrate)try{navigator.vibrate(15)}catch(e){}setReply(m);swiped=false}},{passive:true});
- b.addEventListener('click',e=>{if(S.sel.size||e.shiftKey)toggleSel(m.id);else if(e.detail===2)setReply(m)});row.append(b);return row}
+ b.addEventListener('touchcancel',()=>{clearTimeout(lp);b.style.transform='';swiped=false},{passive:true});
+ b.addEventListener('click',e=>{if(lpFired){lpFired=false;e.stopPropagation();e.preventDefault();return}if(S.sel.size||e.shiftKey)toggleSel(m.id);else if(e.detail===2)setReply(m)},true);row.append(b);return row}
 
 function drawMsgs(mode,jumpId){const box=$('#msgs'),mi=$('#mi'),keep=box.scrollHeight-box.scrollTop;const kids=[];let prev=null;const L=S.msgs;
  for(let i=0;i<L.length;i++){const m=L[i];
@@ -882,13 +969,38 @@ function fullReactPicker(m){
  const c=modal('Choose Reaction',g,[{t:'Close'}]);
  EMOJI.forEach(e=>g.append(h('button',{style:'font-size:24px;padding:4px;border-radius:6px',text:e,on:{click(){c();react(m,e)}}})));
 }
-async function translateMsg(m){
- const lang=prompt('Translate message to language code (en = English, mr = Marathi, hi = Hindi):','en');
- if(!lang)return;
+async function doTranslateMsg(m,lang){
+ S.set.trLang=lang;saveSet();
+ toast('🌐 Translating to '+lang.toUpperCase()+'…',2000);
  try{
   const r=await api('/app/api/translate',A({chat:S.chat,id:m.id,to:lang.trim()}));
   m._tr=r.text;drawMsgs('keep');
  }catch(e){toast(e.message)}
+}
+function translateMsg(m){
+ const langs=[['mr','🇮🇳 मराठी (Marathi)'],['hi','🇮🇳 हिंदी (Hindi)'],['en','🇬🇧 English'],['gu','🇮🇳 गुजराती'],['ta','🇮🇳 तमिळ'],['te','🇮🇳 तेलुगू'],['ru','🇷🇺 Russian'],['es','🇪🇸 Spanish']];
+ const custom=h('input',{value:S.set.trLang||'mr',placeholder:'Language code (e.g. mr, hi, en)'});
+ const grid=h('div',{style:'display:grid;grid-template-columns:1fr 1fr;gap:8px'});
+ const close=modal('🌐 1-Tap Message Translator',[
+  h('div',{class:'mut',style:'font-size:12.5px',text:'कोणत्या भाषेत भाषांतर करायचे आहे ते निवडा:'}),
+  grid,
+  custom
+ ],[
+  {t:'Cancel'},
+  {t:'Translate',c:'p',fn(c){c();if(custom.value.trim())doTranslateMsg(m,custom.value.trim())}}
+ ]);
+ langs.forEach(([code,label])=>{
+  grid.append(h('button',{class:'dl-card',style:'padding:10px;font-weight:700;text-align:center;border:1.5px solid '+(S.set.trLang===code?'var(--acc)':'transparent'),text:label,on:{click(){close();doTranslateMsg(m,code)}}}));
+ });
+}
+function toggleBookmark(m){
+ const key=S.acc+':'+S.chat+':'+m.id;
+ const idx=(S.bookmarks||[]).findIndex(b=>b.key===key);
+ if(idx>=0){S.bookmarks.splice(idx,1);LS.set('bookmarks',S.bookmarks);toast('⭐ Removed from Bookmarks');return}
+ S.bookmarks.unshift({key,acc:S.acc,chat:S.chat,chat_name:(S.cd&&S.cd.name)||'Chat',id:m.id,from:m.out?'You':(m.from||'User'),text:m.text||(m.media?'📎 '+(m.media.name||m.media.kind):'Message'),ts:m.ts||Math.floor(Date.now()/1e3)});
+ if(S.bookmarks.length>200)S.bookmarks.length=200;
+ LS.set('bookmarks',S.bookmarks);
+ toast('⭐ Saved to Local Bookmarks & Study Notes!');
 }
 function copyMsgLink(m){
  const d=S.cd||{};
@@ -898,6 +1010,7 @@ function copyMsgLink(m){
 }
 function msgMenu(x,y,m){
  closeMenu();
+ const isBkm=(S.bookmarks||[]).some(b=>b.key===(S.acc+':'+S.chat+':'+m.id));
  const top=h('div',{class:'rb'},
   ...REACT.map(e=>h('button',{text:e,on:{click(){closeMenu();react(m,e)}}})),
   h('button',{text:'＋',title:'More reactions',on:{click(){closeMenu();fullReactPicker(m)}}})
@@ -905,15 +1018,17 @@ function msgMenu(x,y,m){
  showMenu(x,y,[
   {ic:'↩',t:'Reply',fn:()=>setReply(m)},
   m.text?{ic:'❝',t:'Quote & Reply',fn:()=>{const sel=(window.getSelection&&window.getSelection().toString().trim())||'';const q=sel&&m.text.includes(sel)?sel:prompt('Quote specific part of message:',m.text.slice(0,180));if(q&&q.trim())setReply(m,q.trim())}}:null,
+  {ic:'⭐',t:isBkm?'Remove Study Bookmark':'Star / Bookmark Note',fn:()=>toggleBookmark(m)},
+  m.text?{ic:'🇮🇳',t:'Translate to मराठी (1-Tap)',fn:()=>doTranslateMsg(m,'mr')}:null,
+  m.text?{ic:'🌐',t:'Translate (All Languages)…',fn:()=>translateMsg(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'👁',t:'Open & Cache on Server',fn:()=>openFile(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'⬇',t:'Download to Device',fn:()=>downloadMsg(m)}:null,
   (m.media&&m.media.kind!=='sticker'&&navigator.share)?{ic:'📱',t:'Share to Phone / Apps (WhatsApp, Files…)',fn:()=>shareFileMobile(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'🔗',t:'Public Share / VLC Stream Link',fn:()=>shareLinkModal(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'📦',t:'Backup to Storage Group',fn:()=>backupToStorageModal(m)}:null,
   m.media&&m.media.kind!=='sticker'?{ic:'⚡',t:'Pre-Download on Server ('+S.dlCfg.threads+'T)',fn:()=>serverDownload(m,false).then(()=>toast('⚡ Server multi-thread download started'))}:null,
-  {ic:'🔖',t:'Save to Saved Messages',fn:()=>saveMsg(m)},
+  {ic:'🔖',t:'Save to Telegram Saved Messages',fn:()=>saveMsg(m)},
   m.text?{ic:'⧉',t:'Copy text',fn:()=>copyText(m.text)}:null,
-  m.text?{ic:'🌐',t:'Translate',fn:()=>translateMsg(m)}:null,
   (S.cd&&S.cd.type!=='user')?{ic:'🔗',t:'Copy message link',fn:()=>copyMsgLink(m)}:null,
   {ic:'➦',t:'Forward',fn:()=>forwardDlg([m.id])},
   {ic:m.pinned?'📍':'📌',t:m.pinned?'Unpin':'Pin',fn:()=>pinMsg(m)},
@@ -923,7 +1038,11 @@ function msgMenu(x,y,m){
   {ic:'🗑',t:'Delete',red:true,fn:()=>deleteDlg([m.id])}
  ],top);
 }
-function copyText(t){if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(()=>toast('Copied'),()=>toast('Copy failed'));else toast('Copy not available')}
+function copyText(t){
+ const fallback=()=>{try{const ta=h('textarea',{value:t,style:'position:fixed;left:-9999px;top:0'});document.body.append(ta);ta.focus();ta.select();document.execCommand('copy');ta.remove();toast('📋 Copied!')}catch(e){toast('Copy failed')}};
+ if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(()=>toast('📋 Copied!'),fallback);
+ else fallback();
+}
 async function pinMsg(m){
  if(m.pinned){try{await api('/app/api/pin',A({chat:S.chat,id:m.id,unpin:true}));m.pinned=false;S.pinned=null;drawPinned();drawMsgs('keep');toast('Unpinned')}catch(e){toast(e.message)};return}
  const nf=h('input',{type:'checkbox',checked:false});
@@ -961,7 +1080,7 @@ $('#selrng').onclick=()=>{
 $('#self').onclick=()=>forwardDlg([...S.sel]);$('#seld').onclick=()=>deleteDlg([...S.sel]);
 
 /* ---------- composer, polls, scheduled messages & voice recorder ---------- */
-function autosize(){const t=$('#txt');t.style.height='auto';t.style.height=Math.min(180,t.scrollHeight)+'px'}
+function autosize(){const t=$('#txt');if(!t)return;t.style.height='auto';t.style.height=Math.min(180,t.scrollHeight)+'px';const sb=$('#send');if(sb){sb.textContent=S.edit?'✓':'➤';sb.classList.toggle('ready',!!t.value.trim())}}
 function barUpdate(){const b=$('#bar2'),c=b.firstElementChild;b.style.display=(S.reply||S.edit)?'flex':'none';const m=S.edit||S.reply;if(m){c.replaceChildren(h('b',{style:'color:var(--acc);font-size:13px;display:block',text:S.edit?'✎ Edit message':(S.quote?'❝ Quote reply to ':'↩ Reply to ')+(m.out?'yourself':m.from||'message')}),h('span',{class:'mut',style:'display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis',text:S.quote||m.text||'📎 Media'}))}}
 function setReply(m,quote){S.reply=m;S.quote=quote||null;S.edit=null;barUpdate();$('#txt').focus()}
 function startEdit(m){S.edit=m;S.reply=null;S.quote=null;$('#txt').value=m.text;autosize();barUpdate();$('#txt').focus()}
@@ -1024,11 +1143,16 @@ async function send(opt){opt=opt||{};const t=$('#txt').value;if(!t.trim()||!S.ch
   if(!navigator.onLine||/fetch|network|offline/i.test(e.message)){queueOffline();return}
   toast(e.message);$('#txt').value=tx;autosize();
  }}
-$('#send').onclick=()=>send();$('#send').oncontextmenu=e=>{e.preventDefault();sendMenu(e.clientX,e.clientY)};
-let sendLP;$('#send').addEventListener('touchstart',e=>{const t=e.touches[0];sendLP=setTimeout(()=>sendMenu(t.clientX,t.clientY-120),600)},{passive:true});$('#send').addEventListener('touchend',()=>clearTimeout(sendLP),{passive:true});
-function sendMenu(x,y){showMenu(x-160,y-110,[
- {ic:'🔕',t:'Send without sound',fn:()=>send({silent:true})},
+let sendLP=null,sendLpFired=false;
+$('#send').onclick=e=>{if(sendLpFired){sendLpFired=false;e.preventDefault();return}if(REC){REC.stop();return}send()};
+$('#send').oncontextmenu=e=>{e.preventDefault();sendMenu(e.clientX,e.clientY)};
+$('#send').addEventListener('touchstart',e=>{const t=e.touches[0];sendLpFired=false;clearTimeout(sendLP);sendLP=setTimeout(()=>{sendLpFired=true;if(navigator.vibrate)try{navigator.vibrate(18)}catch(_){}sendMenu(t.clientX,t.clientY-140)},550)},{passive:true});
+$('#send').addEventListener('touchend',()=>clearTimeout(sendLP),{passive:true});
+$('#send').addEventListener('touchcancel',()=>clearTimeout(sendLP),{passive:true});
+function sendMenu(x,y){showMenu(x-170,y-140,[
+ {ic:'🔕',t:'Send without sound (Silent)',fn:()=>send({silent:true})},
  {ic:'⏰',t:'Schedule message',fn:()=>{const dt=h('input',{type:'datetime-local'});modal('Schedule Message',dt,[{t:'Cancel'},{t:'Schedule',c:'p',fn(c){const ts=Math.floor(new Date(dt.value).getTime()/1e3);if(!ts||ts<Date.now()/1e3+30){toast('Choose a future time');return}c();send({schedule:ts})}}])}},
+ {ic:'⚡',t:'Quick Reply Templates',fn:()=>openQuickTemplatesModal()},
  {ic:'📅',t:'View Scheduled Messages',fn:()=>openScheduled()}
 ])}
 $('#csched').onclick=()=>openScheduled();
@@ -1051,24 +1175,39 @@ async function openScheduled(){
  }catch(e){body.replaceChildren(h('div',{class:'empty',text:e.message}))}
 }
 
-/* Voice Recorder */
-let REC=null;
+/* Voice Recorder with Live Timer & Cancel Bar */
+let REC=null,recTimer=null,recCanceled=false;
+function stopRecUI(){
+ clearInterval(recTimer);recTimer=null;
+ $('#mic').classList.remove('rec');
+ const rb=$('#recbar');if(rb)rb.style.display='none';
+}
+$('#reccancel').onclick=()=>{if(REC){recCanceled=true;REC.stop()}};
+$('#recsend').onclick=()=>{if(REC){recCanceled=false;REC.stop()}};
 $('#mic').onclick=async()=>{
  if(!S.chat)return;
- if(REC){REC.stop();return}
+ if(REC){recCanceled=false;REC.stop();return}
  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){toast('Microphone not supported in this browser');return}
  try{
   const stream=await navigator.mediaDevices.getUserMedia({audio:true});
   const chunks=[];
   const mr=new MediaRecorder(stream);
   const t0=Date.now();
+  recCanceled=false;
   $('#mic').classList.add('rec');
-  toast('🎤 Recording voice note… Click 🎤 again to send');
+  $('#recbar').style.display='flex';
+  $('#rectm').textContent='0:00';
+  recTimer=setInterval(()=>{
+   const sec=Math.floor((Date.now()-t0)/1000);
+   $('#rectm').textContent=Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0');
+  },500);
+  if(navigator.vibrate)try{navigator.vibrate(20)}catch(_){}
   mr.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data)};
   mr.onstop=()=>{
-   $('#mic').classList.remove('rec');
+   stopRecUI();
    stream.getTracks().forEach(t=>t.stop());
    REC=null;
+   if(recCanceled){toast('🗑 Voice recording canceled',1600);return}
    if(!chunks.length||Date.now()-t0<600){toast('Voice recording canceled (too short)');return}
    const blob=new Blob(chunks,{type:mr.mimeType||'audio/ogg'});
    const ext=(mr.mimeType||'').includes('mp4')?'m4a':'ogg';
@@ -1076,7 +1215,7 @@ $('#mic').onclick=async()=>{
    queueUpload(file,false,{is_voice:true});
   };
   REC=mr;mr.start();
- }catch(e){toast('Microphone access denied: '+e.message)}
+ }catch(e){stopRecUI();toast('Microphone access denied: '+e.message)}
 };
 
 let lastTyping=0;$('#txt').addEventListener('input',()=>{autosize();if(S.chat)S.drafts[S.chat]=$('#txt').value;if(Date.now()-lastTyping>4500&&$('#txt').value&&S.chat){lastTyping=Date.now();api('/app/api/typing',A({chat:S.chat})).catch(()=>{})}});
@@ -1094,6 +1233,7 @@ $('#att').onclick=e=>{
   {ic:'🎥',t:'Record Round Video Note',fn:()=>recordRoundVideoModal()},
   {ic:'📊',t:'Create Poll / Quiz',fn:()=>createPollModal()},
   {ic:'🎲',t:'Send Animated Dice / Game',fn:()=>sendDiceModal()},
+  {ic:'⚡',t:'Quick Reply Templates',fn:()=>openQuickTemplatesModal()},
   {ic:'📍',t:'Send Location',fn:()=>sendLocationModal()},
   {ic:'👤',t:'Share Contact',fn:()=>sendContactModal()}
  ]);
@@ -1542,14 +1682,27 @@ async function drawAnalytics(b){
  }catch(e){b.replaceChildren(h('div',{class:'empty',text:e.message}))}
 }
 
-/* ---------- lightbox ---------- */
+/* ---------- lightbox (Swipe Left/Right + Double-Tap Zoom + Share) ---------- */
 let LB=null;
-function lightbox(id){const L=S.msgs.filter(m=>m.media&&m.media.kind==='photo');let i=L.findIndex(m=>m.id===id);if(i<0)return;const lb=$('#lb'),im=lb.querySelector('img');
- const show=()=>{const m=L[i];im.src=fileUrl({acc:S.acc,chat:S.chat,id:m.id},false);$('#lbc').textContent=(i+1)+' / '+L.length};
+function lightbox(id){const L=S.msgs.filter(m=>m.media&&m.media.kind==='photo');let i=L.findIndex(m=>m.id===id);if(i<0)return;const lb=$('#lb'),im=lb.querySelector('img'),cap=$('#lbcap');
+ let zoom=1;
+ const setZoom=z=>{zoom=z;im.style.transform=`scale(${zoom})`};
+ const show=()=>{const m=L[i];setZoom(1);im.src=fileUrl({acc:S.acc,chat:S.chat,id:m.id},false);$('#lbc').textContent=(i+1)+' / '+L.length;if(cap){cap.style.display=m.text?'block':'none';cap.textContent=m.text||''}};
  const step=d=>{const n=i+d;if(n>=0&&n<L.length){i=n;show()}};LB={step};lb.style.display='flex';pushNav('photo');show();
- const close=()=>{lb.style.display='none';im.removeAttribute('src');LB=null;ensureNavGuard()};
- lb.querySelector('.x').onclick=close;lb.onclick=e=>{if(e.target===lb)close()};$('#lbd').onclick=()=>downloadMsg(L[i]);
- const nv=lb.querySelectorAll('.nv');nv[0].onclick=()=>step(-1);nv[1].onclick=()=>step(1)}
+ const close=()=>{setZoom(1);lb.style.display='none';im.removeAttribute('src');LB=null;ensureNavGuard()};
+ lb.querySelector('.x').onclick=close;lb.onclick=e=>{if(e.target===lb)close()};$('#lbd').onclick=()=>downloadMsg(L[i]);$('#lbsh').onclick=()=>shareFileMobile(L[i]);
+ const nv=lb.querySelectorAll('.nv');nv[0].onclick=()=>step(-1);nv[1].onclick=()=>step(1);
+ let lx0=0,ly0=0,lastTap=0;
+ im.ontouchstart=e=>{if(e.touches.length===1){lx0=e.touches[0].clientX;ly0=e.touches[0].clientY}};
+ im.ontouchend=e=>{
+  const now=Date.now();
+  if(now-lastTap<280){setZoom(zoom>1?1:2.2);lastTap=0;return}
+  lastTap=now;
+  if(zoom>1||!e.changedTouches.length)return;
+  const dx=e.changedTouches[0].clientX-lx0,dy=Math.abs(e.changedTouches[0].clientY-ly0);
+  if(Math.abs(dx)>50&&dy<60)step(dx<0?1:-1);
+ };
+}
 
 /* ---------- info panel & official user/group management ---------- */
 function toggleInfo(){S.info=!S.info;document.body.classList.toggle('info-on',S.info);if(S.info){pushNav('info');drawInfo()}else ensureNavGuard()}
@@ -1711,7 +1864,12 @@ function openDrawer(noRefresh){const dr=$('#dr'),c=cur(),st=S.st||{};dr.replaceC
   h('div',{class:'it',on:{click(){closeDrawer();addAccount()}}},'＋','Add Telegram Account'),
   h('hr',{style:'border:0;border-top:1px solid var(--bd);width:100%'}),
   h('div',{class:'it',on:{click(){closeDrawer();installPwaModal()}}},'📲','Install App (Mobile APK / PC)'),
-  h('div',{class:'it',on:{click(){closeDrawer();openDlManager()}}},'⚡','Downloads & Server Cache'),
+  h('div',{class:'it',on:{click(){closeDrawer();openThemeStudio()}}},'🎨','Premium Themes & Appearance'),
+  h('div',{class:'it',on:{click(){closeDrawer();openFolderManager()}}},'📁','Folder Manager & Swipe Settings'),
+  h('div',{class:'it',on:{click(){closeDrawer();openBookmarksModal()}}},'⭐',`Starred Bookmarks & Notes (${(S.bookmarks||[]).length})`),
+  h('div',{class:'it',on:{click(){closeDrawer();openQuickTemplatesModal()}}},'⚡','Quick Reply Templates'),
+  h('div',{class:'it',on:{click(){closeDrawer();openAppLockModal()}}},'🔒',S.set.pinCode?'App Passcode Lock (Active)':'App Passcode / Privacy Lock'),
+  h('div',{class:'it',on:{click(){closeDrawer();openDlManager()}}},'🚀','Downloads & Server Cache'),
   h('div',{class:'it',on:{click(){closeDrawer();openGhostAndAutoReply()}}},'👻','Ghost Vault & Auto-Reply'),
   h('div',{class:'it',on:{click(){closeDrawer();openStoriesModal()}}},'⭕','Active Telegram Stories'),
   h('div',{class:'it',on:{click(){closeDrawer();openCrossSearch()}}},'🌐','Cross-Account Search'),
@@ -1739,22 +1897,300 @@ function newGroupOrChannel(kind){const t=h('input',{placeholder:kind==='group'?'
  modal(kind==='group'?'👥 New Group':'📢 New Channel',[t,a,err],[{t:'Cancel'},{t:'Create',c:'p',async fn(c){const title=t.value.trim();if(!title){err.textContent='नाव टाक';return}try{const r=await api('/app/api/chat/create',A({title,about:a.value,kind}));c();await loadDialogs();openChat(r.dialog)}catch(e){err.textContent=e.message}}}]);t.focus()}
 $('#fab').onclick=newChat;
 
-function settings(){const sw=(k,t)=>{const i=h('input',{type:'checkbox'});i.checked=!!S.set[k];i.onchange=async()=>{S.set[k]=i.checked;if(k==='notif'&&i.checked&&window.Notification&&Notification.permission!=='granted'){const p=await Notification.requestPermission();if(p!=='granted'){S.set.notif=false;i.checked=false;toast('Notifications blocked by the browser')}}saveSet();if(k==='avatars'||k==='previews'){drawList();drawMsgs('keep')}};return h('div',{class:'sw'},h('span',{text:t}),i)};
- const th=h('select',{style:'width:auto'},['auto','light','dark'].map(v=>h('option',{value:v,text:v[0].toUpperCase()+v.slice(1)})));th.value=S.set.theme;th.onchange=()=>{S.set.theme=th.value;saveSet()};
+function settings(){const sw=(k,t)=>{const i=h('input',{type:'checkbox'});i.checked=S.set[k]!==false&&!!S.set[k];i.onchange=async()=>{S.set[k]=i.checked;if(k==='notif'&&i.checked&&window.Notification&&Notification.permission!=='granted'){const p=await Notification.requestPermission();if(p!=='granted'){S.set.notif=false;i.checked=false;toast('Notifications blocked by the browser')}}saveSet();if(k==='avatars'||k==='previews'){drawList();drawMsgs('keep')}};return h('div',{class:'sw'},h('span',{text:t}),i)};
+ const thOpts=[['auto','System Auto'],['light','Classic Light'],['dark','Night Blue (Dark)'],['amoled','Midnight AMOLED (Pure Black)'],['royal','Royal Purple (Premium)'],['emerald','Emerald Forest'],['rose','Cyber Rose'],['sunset','Sunset Gold']];
+ const th=h('select',{style:'width:auto'},thOpts.map(([v,l])=>h('option',{value:v,text:l})));th.value=S.set.theme||'auto';th.onchange=()=>{S.set.theme=th.value;saveSet()};
  const fsSel=h('select',{style:'width:auto'},[[13,'Small'],[15,'Normal'],[17,'Large'],[19,'Extra large']].map(([v,t])=>h('option',{value:v,text:t})));fsSel.value=String(S.set.fs||15);fsSel.onchange=()=>{S.set.fs=+fsSel.value;saveSet()};
- const dlBtn=h('button',{style:'color:var(--acc);font-weight:700;text-align:left;padding:6px 0',text:'⚡ Open Multi-Thread Download & Server Cache Settings',on:{click(){document.querySelector('.ov').remove();openDlManager()}}});
+ const dlBtn=h('button',{style:'color:var(--acc);font-weight:700;text-align:left;padding:6px 0',text:'⚡ Open Multi-Thread Download & Server Cache Settings',on:{click(){const ov=document.querySelector('.ov');if(ov)ov.remove();openDlManager()}}});
+ const fldBtn=h('button',{style:'color:var(--acc);font-weight:700;text-align:left;padding:6px 0',text:'📁 Manage Folders & Mobile Swipe Gestures',on:{click(){const ov=document.querySelector('.ov');if(ov)ov.remove();openFolderManager()}}});
  modal('⚙ Settings',[
-  h('div',{class:'sw'},h('span',{text:'Theme'}),th),
-  h('div',{class:'sw'},h('span',{text:'Text size'}),fsSel),
+  h('div',{class:'sw'},h('span',{text:'🎨 Premium Theme'}),th),
+  h('div',{class:'sw'},h('span',{text:'🔠 Text size'}),fsSel),
   dlBtn,
+  fldBtn,
+  sw('swipeFolders','📱 Mobile: Swipe Left/Right to change folders'),
   sw('avatars','Show profile photos'),
   sw('previews','Auto-load photo/video previews'),
-  sw('notif','Desktop notifications'),
+  sw('notif','Desktop / Mobile notifications'),
   sw('sound','Notification sound'),
-  sw('enter','Enter sends message'),
+  sw('enter','Enter sends message (Desktop)'),
   sw('md','Markdown formatting by default'),
-  h('div',{class:'mut',style:'font-size:12.5px',text:'Shortcuts: Ctrl+K search · Alt+↑/↓ switch chat · Esc close · ←/→ in photo viewer · Double-click message to reply · Shift+click to select'})
+  h('div',{class:'mut',style:'font-size:12.5px',text:'Mobile Gestures: Swipe Left/Right on chat list to switch folders · Swipe Right from left edge in chat to go back · Swipe message to reply · Hold chat or message for menu'})
  ],[{t:'Close'}])}
+
+/* ---------- 🌟 Advanced Premium Suite: Mobile Swipe Gestures, Theme Studio, Folder Manager, Bookmarks, Quick Templates & PIN Lock ---------- */
+(function initMobileGestures(){
+ const lst=$('#list');
+ let fx0=0,fy0=0,fLock=null;
+ lst.addEventListener('touchstart',e=>{
+  if(e.touches.length!==1)return;
+  fx0=e.touches[0].clientX;fy0=e.touches[0].clientY;fLock=null;
+ },{passive:true});
+ lst.addEventListener('touchmove',e=>{
+  if(S.set.swipeFolders===false||e.touches.length!==1)return;
+  const dx=e.touches[0].clientX-fx0,dy=e.touches[0].clientY-fy0;
+  if(!fLock){
+   if(Math.abs(dx)<14&&Math.abs(dy)<14)return;
+   fLock=Math.abs(dx)>Math.abs(dy)*1.35?'h':'v';
+  }
+  if(fLock==='h'){
+   const shift=Math.max(-64,Math.min(64,dx*0.32));
+   lst.style.transform=`translateX(${shift}px)`;
+   lst.style.opacity=String(Math.max(0.7,1-Math.abs(dx)/360));
+  }
+ },{passive:true});
+ const endSwipe=e=>{
+  lst.style.transform='';lst.style.opacity='';
+  if(fLock!=='h'||!e.changedTouches||!e.changedTouches.length){fLock=null;return}
+  const dx=e.changedTouches[0].clientX-fx0,dy=Math.abs(e.changedTouches[0].clientY-fy0);
+  fLock=null;
+  if(Math.abs(dx)>52&&dy<75){
+   _lastFolderSwipe=Date.now();
+   if(dx<0)stepFolder(1);
+   else{
+    const curKey=S.archived?'archived':S.folder;
+    if(curKey==='all'&&fx0<34){openDrawer();return}
+    stepFolder(-1);
+   }
+  }
+ };
+ lst.addEventListener('touchend',endSwipe,{passive:true});
+ lst.addEventListener('touchcancel',()=>{lst.style.transform='';lst.style.opacity='';fLock=null},{passive:true});
+
+ // Edge-swipe right inside open chat (#msgs) on mobile to go back to chat list
+ const ms=$('#msgs');
+ let cx0=0,cy0=0;
+ ms.addEventListener('touchstart',e=>{if(e.touches.length===1){cx0=e.touches[0].clientX;cy0=e.touches[0].clientY}},{passive:true});
+ ms.addEventListener('touchend',e=>{
+  if(innerWidth>820||!S.chat||cx0>34||!e.changedTouches.length)return;
+  const dx=e.changedTouches[0].clientX-cx0,dy=Math.abs(e.changedTouches[0].clientY-cy0);
+  if(dx>68&&dy<42){if(navigator.vibrate)try{navigator.vibrate(12)}catch(_){}closeChatView(false)}
+ },{passive:true});
+})();
+
+$('#theme-btn').onclick=()=>openThemeStudio();
+$('#bkm-btn').onclick=()=>openBookmarksModal();
+
+function openThemeStudio(){
+ const themes=[
+  ['auto','🌗 System Auto','#2481cc','#151f2b'],
+  ['light','☀️ Classic Day','#2481cc','#ffffff'],
+  ['dark','🌙 Night Blue','#5eb5f7','#151f2b'],
+  ['amoled','🖤 Midnight AMOLED (Battery Saver)','#38bdf8','#000000'],
+  ['royal','👑 Royal Purple (Premium)','#a855f7','#18112b'],
+  ['emerald','🌲 Emerald Matrix','#10b981','#0c241c'],
+  ['rose','🌹 Cyber Rose','#f43f5e','#240e19'],
+  ['sunset','🌅 Sunset Gold','#f59e0b','#24180e']
+ ];
+ const grid=h('div',{style:'display:grid;grid-template-columns:1fr 1fr;gap:8px'});
+ const render=()=>{
+  grid.replaceChildren(...themes.map(([k,name,acc,bg])=>h('button',{
+   class:'dl-card',
+   style:`padding:11px;border:2px solid ${(S.set.theme||'auto')===k?'var(--acc)':'var(--bd)'};text-align:left;display:flex;align-items:center;gap:10px`,
+   on:{click(){S.set.theme=k;saveSet();render();toast('🎨 Theme applied: '+name,1500)}}
+  },
+   h('span',{style:`width:26px;height:26px;border-radius:50%;background:${bg};border:3px solid ${acc};flex:none`}),
+   h('b',{style:'font-size:12.5px;white-space:normal',text:name})
+  )));
+ };
+ render();
+ const fsRange=h('input',{type:'range',min:13,max:19,step:1,value:S.set.fs||15,on:{input(e){S.set.fs=+e.target.value;saveSet()}}});
+ modal('🎨 Premium Theme & Appearance Studio',[
+  h('div',{class:'mut',style:'font-size:12.5px',text:'तुमच्या आवडीची प्रीमियम थीम निवडा (AMOLED थीम मोबाईलची बॅटरी वाचवते):'}),
+  grid,
+  h('div',{class:'dl-card'},h('div',{class:'sw'},h('b',{style:'font-size:13px',text:'🔠 Font Size (13px – 19px)'}),fsRange))
+ ],[{t:'Done',c:'p'}]);
+}
+
+function openFolderManager(){
+ const box=h('div',{style:'display:flex;flex-direction:column;gap:10px'});
+ const render=()=>{
+  const hid=new Set(S.hiddenFolders||[]);
+  const swChk=h('input',{type:'checkbox',checked:S.set.swipeFolders!==false,on:{change(e){S.set.swipeFolders=e.target.checked;saveSet();toast(S.set.swipeFolders?'📱 Folder swipe enabled':'Folder swipe disabled')}}});
+  const newTitle=h('input',{placeholder:'Folder Name (e.g. 📚 MPSC Study, 💼 Work)'});
+  const newKw=h('input',{placeholder:'Auto-match chat keyword (optional, e.g. MPSC, Test, Bot)'});
+  const chosen=new Set();
+  const chatPicker=h('div',{style:'max-height:24vh;overflow:auto;border:1px solid var(--bd);border-radius:8px;padding:4px'},
+   ...S.dl.slice(0,50).map(d=>h('label',{style:'padding:5px 6px;font-size:13px'},
+    h('input',{type:'checkbox',on:{change(e){e.target.checked?chosen.add(d.id):chosen.delete(d.id)}}}),
+    h('span',{text:d.name})
+   ))
+  );
+  const createBtn=h('button',{style:'background:var(--acc);color:#fff;padding:8px 12px;border-radius:8px;font-weight:700',text:'＋ Create Custom Folder',on:{click(){
+   const t=newTitle.value.trim();
+   if(!t){toast('Enter a folder name');return}
+   S.customFolders=S.customFolders||[];
+   S.customFolders.push({id:Date.now(),icon:'📌',title:t,keyword:newKw.value.trim(),peers:[...chosen]});
+   LS.set('cust_folders',S.customFolders);
+   drawFolders();render();toast('📁 Custom folder created!');
+  }}});
+  box.replaceChildren(
+   h('div',{class:'dl-card'},
+    h('label',{style:'font-weight:700'},swChk,'📱 Enable Swipe Left / Right on Chat List to Switch Folders'),
+    h('div',{class:'mut',style:'font-size:12px'},'चॅट लिस्टवर डावीकडे किंवा उजवीकडे स्वाइप केल्यास पुढचा/मागचा फोल्डर लगेच उघडतो.')
+   ),
+   h('div',{class:'dl-card'},
+    h('b',{style:'font-size:13px;color:var(--acc)',text:'👁 Show / Hide Built-in Folders'}),
+    ...FOLDERS.filter(([k])=>k!=='all').map(([k,n])=>h('label',{style:'font-size:13px;padding:3px 0'},
+     h('input',{type:'checkbox',checked:!hid.has(k),on:{change(e){
+      if(e.target.checked)hid.delete(k);else hid.add(k);
+      S.hiddenFolders=[...hid];LS.set('hid_folders',S.hiddenFolders);drawFolders();
+     }}}),
+     h('span',{text:n})
+    ))
+   ),
+   (S.customFolders&&S.customFolders.length)?h('div',{class:'dl-card'},
+    h('b',{style:'font-size:13px;color:var(--acc)',text:'📌 Your Custom Folders'}),
+    ...S.customFolders.map(lf=>h('div',{class:'sw',style:'font-size:13px'},
+     h('span',{text:`📌 ${lf.title} (${(lf.peers||[]).length} chats${lf.keyword?', kw: '+lf.keyword:''})`}),
+     h('button',{style:'color:#ef4444;font-weight:700',text:'🗑 Delete',on:{click(){
+      S.customFolders=S.customFolders.filter(x=>x.id!==lf.id);
+      LS.set('cust_folders',S.customFolders);
+      if(S.folder==='lf_'+lf.id){S.folder='all';drawList()}
+      drawFolders();render();
+     }}})
+    ))
+   ):null,
+   h('div',{class:'dl-card'},
+    h('b',{style:'font-size:13px;color:var(--acc)',text:'＋ Create New Custom Folder'}),
+    newTitle,newKw,
+    h('div',{class:'mut',style:'font-size:12px',text:'Select chats to include in this folder:'}),
+    chatPicker,createBtn
+   )
+  );
+ };
+ render();
+ modal('📁 Folder Manager & Mobile Swipe Settings',box,[{t:'Close'}]);
+}
+
+function openBookmarksModal(){
+ const box=h('div',{style:'display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow:auto'});
+ const q=h('input',{placeholder:'🔍 Search saved bookmarks & study notes…'});
+ let close=null;
+ const render=()=>{
+  const kw=q.value.trim().toLowerCase();
+  const list=(S.bookmarks||[]).filter(b=>!kw||(b.text||'').toLowerCase().includes(kw)||(b.chat_name||'').toLowerCase().includes(kw));
+  if(!list.length){
+   box.replaceChildren(h('div',{class:'empty',text:kw?'No matching bookmarks':'कोणत्याही मेसेजवर होल्ड करून ⭐ Star / Bookmark Note दाबा — तुमचे महत्त्वाचे मेसेजेस आणि नोट्स इथे ऑफलाईन सेव्ह राहतील!'}));
+   return;
+  }
+  box.replaceChildren(...list.map(b=>h('div',{class:'dl-card',style:'cursor:pointer',on:{async click(){
+   if(close)close();
+   if(b.acc&&b.acc!==S.acc)await switchAcc(b.acc);
+   openById(b.chat,b.id);
+  }}},
+   h('div',{class:'top'},
+    h('b',{style:'color:var(--acc)',text:'⭐ '+(b.chat_name||'Chat')}),
+    h('span',{class:'mut',style:'font-size:11.5px',text:dayLabel(b.ts)+' '+tm(b.ts)}),
+    h('button',{style:'color:#ef4444;font-weight:700;padding:0 4px',text:'✕',title:'Remove bookmark',on:{click(e){e.stopPropagation();S.bookmarks=S.bookmarks.filter(x=>x.key!==b.key);LS.set('bookmarks',S.bookmarks);render()}}})
+   ),
+   h('div',{style:'font-size:13px;white-space:pre-wrap',text:b.text}),
+   h('div',{style:'display:flex;justify-content:space-between;align-items:center;margin-top:4px'},
+    h('span',{class:'mut',style:'font-size:11.5px',text:'From: '+(b.from||'User')}),
+    h('button',{style:'color:var(--acc);font-size:12px;font-weight:600',text:'⧉ Copy',on:{click(e){e.stopPropagation();copyText(b.text)}}})
+   )
+  )));
+ };
+ q.oninput=render;
+ render();
+ close=modal('⭐ Starred Bookmarks & Study Notes',[
+  h('div',{style:'display:flex;gap:6px'},
+   q,
+   (S.bookmarks&&S.bookmarks.length)?h('button',{style:'background:var(--hov);color:var(--acc);padding:0 10px;border-radius:8px;font-weight:700;font-size:12px;white-space:nowrap',text:'⬇ Export .md',on:{click(){
+    const md='# ⭐ Telegram Study Notes & Bookmarks\n\n'+(S.bookmarks||[]).map(b=>`### ${b.chat_name} (${new Date(b.ts*1e3).toLocaleString()})\n${b.text}\n`).join('\n---\n\n');
+    const blob=new Blob([md],{type:'text/markdown;charset=utf-8'});
+    const u=URL.createObjectURL(blob);const a=h('a',{href:u,download:'telegram_bookmarks.md',style:'display:none'});document.body.append(a);a.click();a.remove();
+    toast('📄 Exported telegram_bookmarks.md');
+   }}}):null
+  ),
+  box
+ ],[{t:'Close'}]);
+}
+
+function openQuickTemplatesModal(){
+ const list=h('div',{style:'display:flex;flex-direction:column;gap:6px;max-height:45vh;overflow:auto'});
+ const inp=h('input',{placeholder:'Add new quick reply template…'});
+ let close=null;
+ const render=()=>{
+  const tpls=S.templates||[];
+  list.replaceChildren(...tpls.map((t,idx)=>h('div',{class:'dl-card',style:'flex-direction:row;align-items:center;justify-content:space-between;gap:8px;cursor:pointer',on:{click(){
+   if(close)close();
+   if(S.chat){const tx=$('#txt');tx.value=(tx.value?tx.value+' ':'')+t;autosize();tx.focus()}
+   else copyText(t);
+  }}},
+   h('span',{style:'font-size:13.5px;flex:1',text:'⚡ '+t}),
+   h('div',{style:'display:flex;gap:6px'},
+    S.chat?h('button',{style:'background:var(--acc);color:#fff;padding:4px 8px;border-radius:6px;font-size:12px;font-weight:600',text:'Send Now',on:{click(e){e.stopPropagation();if(close)close();$('#txt').value=t;send()}}}):null,
+    h('button',{style:'color:#ef4444;font-weight:700;padding:4px',text:'🗑',on:{click(e){e.stopPropagation();S.templates.splice(idx,1);LS.set('quick_tpls',S.templates);render()}}})
+   )
+  )));
+ };
+ const addBtn=h('button',{style:'background:var(--acc);color:#fff;padding:8px 12px;border-radius:8px;font-weight:700',text:'＋ Add',on:{click(){
+  const v=inp.value.trim();if(!v)return;
+  S.templates=S.templates||[];S.templates.unshift(v);LS.set('quick_tpls',S.templates);inp.value='';render();
+ }}});
+ render();
+ close=modal('⚡ Quick Reply Templates',[
+  h('div',{class:'mut',style:'font-size:12.5px',text:'मेसेजवर टॅप केल्यास तो इनपुट बॉक्समध्ये येईल किंवा थेट Send Now दाबा:'}),
+  h('div',{style:'display:flex;gap:6px'},inp,addBtn),
+  list
+ ],[{t:'Close'}]);
+}
+
+let mdLP=null,mdLpFired=false;
+$('#md').addEventListener('touchstart',()=>{mdLpFired=false;clearTimeout(mdLP);mdLP=setTimeout(()=>{mdLpFired=true;if(navigator.vibrate)try{navigator.vibrate(15)}catch(_){}openQuickTemplatesModal()},500)},{passive:true});
+$('#md').addEventListener('touchend',()=>clearTimeout(mdLP),{passive:true});
+$('#md').oncontextmenu=e=>{e.preventDefault();openQuickTemplatesModal()};
+
+function showLockScreen(){
+ if(!S.set.pinCode)return;
+ const ov=$('#lock-ov');
+ const inp=h('input',{type:'password',inputmode:'numeric',maxlength:8,placeholder:'Enter PIN',style:'text-align:center;font-size:22px;letter-spacing:8px;padding:10px 16px;border-radius:12px;border:1.5px solid #3b9de8;background:#151f2b;color:#fff;width:200px;outline:0'});
+ const err=h('div',{style:'color:#ef4444;font-size:13px;min-height:18px;margin-top:8px'});
+ const unlock=()=>{
+  if(inp.value===S.set.pinCode){ov.style.display='none';inp.value=''}
+  else{err.textContent='❌ चुकीचा PIN! पुन्हा प्रयत्न करा.';inp.value='';if(navigator.vibrate)try{navigator.vibrate([40,40,40])}catch(_){}}
+ };
+ inp.oninput=()=>{if(inp.value.length===S.set.pinCode.length)unlock()};
+ ov.replaceChildren(
+  h('div',{style:'font-size:48px;margin-bottom:10px'},'🔒'),
+  h('h3',{style:'margin:0 0 6px'},'TG Hub Locked'),
+  h('p',{style:'color:#94a3b8;font-size:13px;margin:0 0 16px'},'अनलॉक करण्यासाठी तुमचा सिक्युरिटी PIN टाका'),
+  inp,err,
+  h('button',{style:'margin-top:12px;background:#2481cc;color:#fff;padding:9px 24px;border-radius:10px;font-weight:700',text:'🔓 Unlock',on:{click:unlock}})
+ );
+ ov.style.display='flex';
+ setTimeout(()=>inp.focus(),80);
+}
+function openAppLockModal(){
+ const p=h('input',{type:'password',inputmode:'numeric',maxlength:8,value:S.set.pinCode||'',placeholder:'4-digit PIN (e.g. 1234)'});
+ const al=h('select',{style:'width:auto'},[[0,'Manual only'],[1,'After 1 min idle'],[5,'After 5 mins idle'],[15,'After 15 mins idle']].map(([v,t])=>h('option',{value:v,text:t})));
+ al.value=String(S.set.autoLockMin||0);
+ modal('🔒 App Passcode & Privacy Lock',[
+  h('div',{class:'mut',style:'font-size:12.5px'},'लायब्ररीत किंवा बाहेर असताना तुमचे चॅट्स सुरक्षित ठेवण्यासाठी PIN सेट करा:'),
+  p,
+  h('div',{class:'sw'},h('span',{text:'⏱ Auto-Lock Timer'}),al),
+  S.set.pinCode?h('button',{style:'background:#10b981;color:#fff;padding:9px;border-radius:8px;font-weight:700',text:'🔒 Lock App Right Now',on:{click(){const ov=document.querySelector('.ov');if(ov)ov.remove();showLockScreen()}}}):null,
+  S.set.pinCode?h('button',{style:'color:#ef4444;font-weight:700',text:'🗑 Disable PIN Lock',on:{click(){S.set.pinCode='';S.set.autoLockMin=0;saveSet();const ov=document.querySelector('.ov');if(ov)ov.remove();toast('🔓 PIN Lock disabled')}}}):null
+ ],[
+  {t:'Cancel'},
+  {t:'Save PIN',c:'p',fn(c){
+   const v=p.value.trim();
+   if(v&&v.length<4){toast('PIN किमान 4 अंकी असावा');return}
+   S.set.pinCode=v;S.set.autoLockMin=+al.value;saveSet();c();
+   toast(v?'🔒 PIN Lock enabled!':'🔓 PIN Lock disabled');
+  }}
+ ]);
+}
+let _idleTimer=null;
+function resetIdleLock(){
+ clearTimeout(_idleTimer);
+ if(S.set.pinCode&&S.set.autoLockMin>0){
+  _idleTimer=setTimeout(()=>showLockScreen(),S.set.autoLockMin*60000);
+ }
+}
+['touchstart','keydown','mousedown'].forEach(ev=>document.addEventListener(ev,resetIdleLock,{passive:true}));
+if(S.set.pinCode)setTimeout(showLockScreen,100);
 
 async function sessions(){const body=h('div',{},h('div',{class:'empty',text:'Loading…'}));const close=modal('🛡 Active Sessions / Devices',body,[{t:'Close'}]);try{const r=(await api('/app/api/sessions?'+Q({acc:S.acc}))).sessions;body.replaceChildren(...r.map(s=>h('div',{class:'dl-card'},h('b',{text:(s.current?'🟢 This server — ':'')+(s.app||s.device)}),h('div',{class:'mut',style:'font-size:13px',text:`${s.device} · ${s.platform} · ${s.ip} · ${s.country}`}),h('div',{class:'mut',style:'font-size:12px',text:'Last active '+new Date(s.active*1e3).toLocaleString()}),
   s.current?null:h('button',{style:'color:#ef4444;font-weight:600;text-align:left',text:'Terminate Session',on:{click(){confirmBox('Terminate this session?','Terminate',async()=>{try{await api('/app/api/sessions/terminate',A({hash:s.hash}));close();sessions()}catch(e){toast(e.message)}},true)}}}))))}catch(e){body.replaceChildren(h('div',{class:'err',text:e.message}))}}

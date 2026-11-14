@@ -2189,8 +2189,8 @@ _APP_MANIFEST = {
     ]
 }
 
-_APP_SW_JS = """const CACHE_NAME = 'tghub-pwa-v6';
-const DATA_CACHE = 'tghub-data-v6';
+_APP_SW_JS = """const CACHE_NAME = 'tghub-pwa-v8';
+const DATA_CACHE = 'tghub-data-v8';
 const SHELL_ASSETS = ['/app/manifest.json', '/app/manifest.json?v=5', '/app/icon-192.png', '/app/icon-512.png', '/app/icon-maskable-192.png', '/app/icon-maskable-512.png', '/app/icon.svg'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(SHELL_ASSETS)).catch(() => {}));
