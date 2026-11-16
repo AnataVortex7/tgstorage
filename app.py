@@ -70,6 +70,8 @@ if _missing:
     print("[config] Missing required environment variables: " + ", ".join(_missing), flush=True)
     sys.exit(1)
 
+import monitor                         # /memory: live stats of this + all other servers (stdlib only, works while booting)
+
 storage_app = hub_app = None
 _loaded = False
 
@@ -89,6 +91,11 @@ def load():
         _t.STORAGE = _s            # Telegram UI can show / share the Storage scanning account
     except Exception as _e:
         print(f"[boot] tgweb link: {_e}", flush=True)
+    _h.MONITOR = monitor           # /servers /addserver /delserver bot commands
+    try:
+        monitor.set_db(_h.MONGO_DB[0])     # bot-added servers survive restarts when MongoDB is configured
+    except Exception as _e:
+        print(f"[boot] monitor db: {_e}", flush=True)
     storage_app, hub_app = _s, _h
     _loaded = True
 
@@ -104,6 +111,8 @@ def _is_hub(path):
 
 def application(environ, start_response):
     path = environ.get("PATH_INFO", "")
+    if monitor.handles(path):            # public read-only monitor page: answers even while the app is still booting
+        return monitor.application(environ, start_response)
     if not _loaded:                      # still booting: health checks on /, /health, /healthz pass with 200 OK
         if path in ("/", "/healthz", "/health"):
             accept = environ.get("HTTP_ACCEPT", "")
@@ -191,6 +200,8 @@ if __name__ == "__main__":
         ports = ports[:1]
         server = create_server(application, listen=f"0.0.0.0:{ports[0]}", **opts)
     print(f"[web] listening on ports {', '.join(ports)} | RAM limit: {_mem or '?'} MB", flush=True)
+
+    monitor.start()                       # cheap: idle until somebody opens /memory
 
     # 2) then load the app and start the heavy parts one by one
     def _boot():

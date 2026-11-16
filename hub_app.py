@@ -36,6 +36,7 @@ except Exception as _e:                             # pragma: no cover
 
 app = Flask(__name__)
 STORAGE = None            # storage_app module, plugged in by app.py (Backup Browser, same bot)
+MONITOR = None            # monitor module, plugged in by app.py (/memory page: all servers on one page)
 FILES = Path(__file__).parent / 'files'
 
 COLAB_SECRET = os.environ['COLAB_SECRET']
@@ -266,6 +267,8 @@ def main_kb():
     rows.append([{'text': '🌐 सगळ्यांचा Job URL बदला', 'callback_data': 'ua'}])
     rows.append([{'text': '👤 Telegram Accounts', 'callback_data': 'ta'}])
     rows.append([{'text': '📦 Storage (Backup Browser)', 'callback_data': 'sb'}])
+    if re.match(r'^https://', os.environ.get('WEB_URL', '')):
+        rows.append([{'text': '📊 सगळ्या Servers चे stats', 'url': os.environ['WEB_URL'].rstrip('/') + '/memory'}])
     rows.append([{'text': '👥 Admins', 'callback_data': 'adm'}])
     rows.append([{'text': '💾 PC Backup command', 'callback_data': 'bk'}])
     rows.append([{'text': '➕ नवा PC install', 'callback_data': 'n'},
@@ -571,7 +574,45 @@ def on_callback(cbid, uid, chat, mid, data):
     else:
         ans()
 
+def monitor_cmd(chat, text):
+    """/servers  /addserver <name> <url>  /delserver <name>   (admins only - on_message is only reached by logged-in admins)"""
+    if MONITOR is None:
+        tg('sendMessage', chat_id=chat, text='⏳ Monitor अजून सुरू होतोय, थोड्या वेळाने पुन्हा प्रयत्न करा.'); return
+    cmd, _, arg = text.partition(' ')
+    cmd, arg = cmd.split('@')[0].lower(), arg.strip()
+    page = (os.environ.get('WEB_URL', '').rstrip('/') + '/memory') if os.environ.get('WEB_URL') else '/memory'
+    if cmd == '/addserver':
+        parts = arg.split(None, 1) if arg else []
+        if len(parts) == 2 and re.match(r'^https?://', parts[0]):          # also accept: /addserver <url> <name>
+            parts = [parts[1], parts[0]]
+        if len(parts) != 2:
+            tg('sendMessage', chat_id=chat, text='ऐसं लिहा:\n<code>/addserver Terminal https://hermesterminal.onrender.com</code>',
+               parse_mode='HTML'); return
+        ok, res = MONITOR.add_server(parts[0], parts[1])
+        tg('sendMessage', chat_id=chat, parse_mode='HTML', disable_web_page_preview=True,
+           text=(f'✅ <b>{esc(res)}</b> जोडला.\n📊 {esc(page)}' if ok else f'❌ {esc(res)}'))
+    elif cmd == '/delserver':
+        if not arg:
+            tg('sendMessage', chat_id=chat, text='ऐसं लिहा: /delserver <नाव>'); return
+        done = MONITOR.del_server(arg)
+        tg('sendMessage', chat_id=chat, text=f'🗑 {arg} काढला.' if done else
+           f'❌ "{arg}" बॉटने जोडलेला सापडला नाही. (MONITOR_SERVERS env मधले servers फक्त env मध्ये बदलता येतात.)')
+    else:
+        data = MONITOR.overview()
+        lines = ['📊 <b>Servers</b>', '']
+        icon = {'up': '🟢', 'warming': '🟡', 'checking': '🟡', 'down': '🔴', 'stale': '🔴'}
+        for c in data['servers']:
+            lines.append(f"{icon.get(c['status'], '⚪')} <b>{esc(c['name'])}</b> — CPU {c['cpu']['percent']}% · "
+                         f"RAM {c['ram']['percent']}% · Disk {c['disk']['percent']}%" if c.get('has_data') else
+                         f"{icon.get(c['status'], '⚪')} <b>{esc(c['name'])}</b> — {c['status']}")
+            for a in c['alerts'][:2]:
+                lines.append(f"   ⚠️ {esc(a)}")
+        lines += ['', f'📄 {esc(page)}', '', '/addserver &lt;नाव&gt; &lt;url&gt; · /delserver &lt;नाव&gt;']
+        tg('sendMessage', chat_id=chat, text='\n'.join(lines), parse_mode='HTML', disable_web_page_preview=True)
+
 def on_message(uid, chat, text, mid=None):
+    if text.split(' ', 1)[0].split('@')[0].lower() in ('/servers', '/addserver', '/delserver'):
+        monitor_cmd(chat, text); return
     if text == '/logout':
         if uid in ENV_ADMINS:
             tg('sendMessage', chat_id=chat, text='हा कायमचा admin आहे (env) — logout होत नाही'); return

@@ -23,5 +23,6 @@ services:
       MONGO_URI: ""                        # Atlas URI (MONGODB_URI also works)
       BACKUP_GROUP_ID: "-100XXXXXXXXXX"
       OWNER_CHAT_ID: "1193564058"
+      MONITOR_SERVERS: ""                  # optional: "Terminal=https://...onrender.com, Hermes=https://...koyeb.app" -> shown at /memory (or use /addserver in the bot)
 volumes:
   hub_data:

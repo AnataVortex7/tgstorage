@@ -26,6 +26,7 @@
 | `/app` (+ `/app/...`) | Telegram accounts UI (bot menu → Telegram Accounts → UI उघडा) |
 | `/api/sync`, `/i/<tok>`, `/f/<tok>/...` | Worker PCs |
 | `/healthz`, `/health` | `ok` — health check / heartbeat साठी **`/healthz`** वापरा |
+| `/memory` (+ `/memory/api` JSON) | **Public, read-only** — सगळ्या servers चे live stats एकाच page वर (खाली "Server monitor") |
 
 > जुना Hub heartbeat `/` वर होता; आता `/` Backup Browser चा आहे (login वर redirect). Pinger `/healthz` वर लावा.
 
@@ -60,6 +61,24 @@ server वर file बदलणं / package install करणं / debug कर
 (सगळे secrets वाचणं, files delete करणं, नवीन software चालवणं). `WEB_PASSWORD` पेक्षा वेगळा, लांब, फक्त इथेच
 वापरलेला password ठेव; गरज नसेल तेव्हा `TERMINAL_PASSWORD` env काढून हे पूर्ण बंद कर.
 (Terminal UI साठी लागणारी xterm.js library `term_assets/` मध्ये bundled आहे — कोणत्याही बाहेरच्या CDN वर अवलंबून नाही.)
+
+## 📊 Server monitor (`/memory`)
+एकाच public page वर: **हा server** (container चे अचूक CPU / RAM / Disk, `sysstats.py`) + तुमचे **इतर servers**
+(SSH terminal `hermes-ts`, `hermes` PicoClaw …). त्या servers च्या repo मध्ये काहीच बदलावं लागत नाही — monitor त्यांचं
+स्वतःचं stats JSON वाचतो (`<url>/api` किंवा `<url>/api/stats`, format आपोआप ओळखतो).
+
+**Server जोडणं (दोन मार्ग):**
+* env: `MONITOR_SERVERS="Terminal=https://hermesterminal.onrender.com, Hermes=https://xxx.koyeb.app"`
+* bot (फक्त logged-in admins): `/addserver Terminal https://hermesterminal.onrender.com` · `/delserver Terminal` · `/servers`
+  (bot ने जोडलेले MongoDB मध्ये — नसेल तर `/data/monitor_servers.json` मध्ये — save होतात). Bot menu मध्ये **📊 सगळ्या Servers चे stats** बटन पण येतं.
+
+**खर्च कमी:** page कोणी उघडला नसेल तर इतर servers ना **एकही request जात नाही** आणि इथे sampling पण थांबतं (दर 10 s ला एक cgroup file वाचन).
+Page उघडला की इथलं sampling 2 s ला आणि इतर servers चं polling 5 s ला (parallel, 4 s timeout); शेवटच्या visit नंतर ~15 s नी पुन्हा idle.
+Page कधीच servers चे URL दाखवत नाही; redirect follow होत नाहीत; loopback / link-local / metadata address नाकारले जातात.
+Render free वरचा server झोपला असेल तर page उघडल्यावर तो "waking up…" दिसतो आणि जागा होताच आकडे येतात.
+
+Env (optional): `MONITOR_SELF_NAME` (default `tgstorage`), `MONITOR_POLL_SECONDS` (5), `MONITOR_FILE`, `RAM_LIMIT_MB` / `CPU_LIMIT` / `DISK_LIMIT_MB`
+(हा server आणि बाकी — plan ची limit दिसली नाही तर default 512 MB / 0.1 vCPU / 15 GB).
 
 **Limits बंद आहेत:** bandwidth limit आणि account limit default ने लागू होत नाहीत. परत हवे असतील तर `ENFORCE_LIMITS=1`
 (मग `BW_LIMIT_GB` आणि `MAX_ACCOUNTS` लागू होतात).
