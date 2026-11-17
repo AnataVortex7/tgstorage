@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 
+# Tailscale (userspace mode). tailscaled is started lazily by machines.py only while the Machines page is in use.
+COPY --from=docker.io/tailscale/tailscale:stable /usr/local/bin/tailscaled /usr/local/bin/tailscaled
+COPY --from=docker.io/tailscale/tailscale:stable /usr/local/bin/tailscale  /usr/local/bin/tailscale
+
 WORKDIR /app
 
 COPY requirements.txt .

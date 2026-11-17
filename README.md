@@ -62,6 +62,16 @@ server वर file बदलणं / package install करणं / debug कर
 वापरलेला password ठेव; गरज नसेल तेव्हा `TERMINAL_PASSWORD` env काढून हे पूर्ण बंद कर.
 (Terminal UI साठी लागणारी xterm.js library `term_assets/` मध्ये bundled आहे — कोणत्याही बाहेरच्या CDN वर अवलंबून नाही.)
 
+## 🖥 Machines (`/machines`) — सगळ्या SSH terminals चा file manager
+Website च्या `⋯` menu → **🖥 Machines**. PC सारखा file manager: folders, open/edit text, image/video preview, upload (drag-drop), download,
+new folder, rename, cut / copy / paste, delete — आणि **एका machine वरून दुसऱ्या machine वर** copy/move (clipboard machines मध्ये चालतं).
+* Website login (`WEB_PASSWORD`) लागतो — हा server public आहे, म्हणून. Machines वर स्वतः कोणताही token/password नाही (tailnet ही security).
+* ही env टाका: `TAILSCALE_AUTHKEY` (hermes terminal साठी वापरलेलीच key). `TS_HOSTNAME` (default `tgstorage`), `TS_IDLE_MIN` (10), `FS_PORT` (8765),
+  `MACHINES="name=host:port"` (auto-discovery शिवाय हातानं जोडायला).
+* **RAM/CPU:** tailscaled (~30 MB) फक्त Machines page उघडल्यावर सुरू होतो आणि `TS_IDLE_MIN` मिनिटं वापर नसेल तर बंद होतो. Files नेहमी 256 KB
+  तुकड्यांनी stream होतात — मोठ्या files साठी पण RAM वाढत नाही. Upload दरम्यान body आधी disk वर (RAM नाही) येते.
+* प्रत्येक SSH terminal repo (`hermesterminal`) मध्ये `fsd.py` असावा — तो tailnet-only आहे, बाहेरून दिसत नाही.
+
 ## 📊 Server monitor (`/memory`)
 एकाच public page वर: **हा server** (container चे अचूक CPU / RAM / Disk, `sysstats.py`) + तुमचे **इतर servers**
 (SSH terminal `hermes-ts`, `hermes` PicoClaw …). त्या servers च्या repo मध्ये काहीच बदलावं लागत नाही — monitor त्यांचं

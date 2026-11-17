@@ -2388,6 +2388,7 @@ dialog input{width:100%;padding:8px 10px;border:1px solid var(--line);border-rad
     <button class="cb" id="c-dl"><span>⬇</span><span class="lbl">Download</span></button>
     <button class="cb" id="c-del"><span>🗑</span><span class="lbl">Delete</span></button>
     <span class="vsep"></span>
+    <button class="cb" id="c-mach" title="All SSH terminals (files)"><span>🖥</span><span class="lbl">Machines</span></button>
     <button class="cb" id="c-sel"><span>☑</span><span class="lbl">Select</span></button>
     <button class="cb" id="c-sort"><span>⇅</span><span class="lbl">Sort</span></button>
     <button class="cb" id="c-view"><span>▦</span><span class="lbl">View</span></button>
@@ -2937,6 +2938,15 @@ $('#c-dl').onclick = () => downloadFiles(selFiles());
 $('#c-del').onclick = () => delFiles(selFiles());
 $('#c-prev').onclick = () => { S.preview = !S.preview; $('#c-prev').classList.toggle('on', S.preview); drawPreview(); };
 $('#c-sel').onclick = () => setSelMode(!S.selMode);
+function openMachines() {      // Machines file manager opens as an overlay inside this page (same login, no separate page)
+  if ($('#mach-ov')) return;
+  const ov = document.createElement('div'); ov.id = 'mach-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9000;background:var(--bg)';
+  const fr = document.createElement('iframe'); fr.src = '/machines?embed=1'; fr.style.cssText = 'width:100%;height:100%;border:0';
+  ov.append(fr); document.body.append(ov);
+}
+window.closeMachines = () => { const o = $('#mach-ov'); if (o) o.remove(); };
+$('#c-mach').onclick = openMachines;
 $('#chips').addEventListener('click', e => { const b = e.target.closest('[data-f]'); if (b) { S.filter = b.dataset.f; render(); } });
 $('#th').onclick = () => { const t = store.get('xtheme', 'auto'); store.set('xtheme', THEMES[(THEMES.indexOf(t) + 1) % 3]); applyTheme(); toast('◐ Theme: ' + store.get('xtheme', 'auto')); };
 $('#v-d').onclick = () => setView('details');
@@ -2951,7 +2961,7 @@ $('#c-sort').onclick = e => {
 };
 $('#c-more').onclick = e => {
   e.stopPropagation();
-  btnMenu(e.currentTarget, [['🕘 Recent files', showRecent], ['Select all', () => { S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }], ['Check for new files now', checkNow], ['⏱ Check interval…', setIntervalDlg], '-', ['➕ Add group…', addGroup], ['➖ Remove this group', removeGroup], '-', ['Re-index this group', reindex], '-', ['💻 Server Terminal (admin)', () => window.open('/term', '_blank')], '-', ['Logout', () => { location.href = '/logout'; }]]);
+  btnMenu(e.currentTarget, [['🕘 Recent files', showRecent], ['Select all', () => { S.sel = new Set(S.items.map(i => i.key)); paintSel(); updateBar(); }], ['Check for new files now', checkNow], ['⏱ Check interval…', setIntervalDlg], '-', ['➕ Add group…', addGroup], ['➖ Remove this group', removeGroup], '-', ['Re-index this group', reindex], '-', ['🖥 Machines (all SSH terminals)', openMachines], ['💻 Server Terminal (admin)', () => window.open('/term', '_blank')], '-', ['Logout', () => { location.href = '/logout'; }]]);
 };
 let qT;
 $('#q').addEventListener('input', e => {
@@ -5082,6 +5092,12 @@ def api_term_stop():
 
 # ── Main ──────────────────────────────────────────────────────────────────
 _bg_started = False
+try:                                  # "Machines": PC-style file manager for every SSH terminal on the tailnet (see machines.py)
+    import machines
+    machines.register(app, require_auth, require_api)
+except Exception as _e:
+    print(f"[machines] disabled: {_e}", flush=True)
+
 def start_background():
     """Telegram client + indexer + poller + snapshotter. Idempotent (merged app.py calls it)."""
     global _bg_started
