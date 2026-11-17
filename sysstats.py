@@ -329,7 +329,30 @@ class Stats:
         with self._lock:
             self._disk = {"used_mb": total, "parts": parts, "at": self.clock()}
 
+    def _volume(self):
+        """(total_mb, used_mb, free_mb, device) of "/" when it is this instance's OWN block device (ext4/xfs on /dev/...,
+        e.g. a Koyeb microVM disk) - that is exactly the usable disk. None for overlay/tmpfs/shared roots (then du + limit is used)."""
+        try:
+            for ln in (_read(os.path.join(self.proc, "mounts")) or "").splitlines():
+                f = ln.split()
+                if len(f) >= 3 and f[1] == "/" and f[0].startswith("/dev/") and f[2] in ("ext4", "ext3", "xfs", "btrfs"):
+                    v = os.statvfs("/")
+                    mb = 1048576.0
+                    return (v.f_blocks * v.f_frsize / mb, (v.f_blocks - v.f_bfree) * v.f_frsize / mb, v.f_bavail * v.f_frsize / mb, f[0])
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
     def disk(self):
+        if not self.env.get("DISK_LIMIT_MB"):                  # no manual limit -> use the real usable volume if there is one
+            vol = self._volume()
+            if vol:
+                total, used, free, dev = vol
+                with self._lock:
+                    parts = dict(self._disk["parts"])
+                return {"total_mb": round(total, 1), "used_mb": round(used, 1), "free_mb": round(free, 1),
+                        "percent": min(100.0, round(100.0 * used / total, 1)) if total else 0.0, "parts": parts,
+                        "measured": f"real usable disk ({dev}, whole volume)", "limit_source": "filesystem size of /"}
         try:
             limit = float(self.env.get("DISK_LIMIT_MB") or 15360)
         except ValueError:
