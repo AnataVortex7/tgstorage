@@ -8,6 +8,9 @@ How it works (all stdlib, nothing runs until somebody opens /machines):
   * the browser only ever talks to tgstorage (same website login as the rest of the site); tgstorage streams
     files to / from the machines in 256 KB chunks, so RAM stays flat for any file size.
 
+Per-folder "N folders / M files" counts and recursive search use fsd.py's /fs/counts and /fs/search; for machines that still
+run an older fsd.py the same results are built here from /fs/list (slower, but works without redeploying them).
+
 Env: TAILSCALE_AUTHKEY, TS_HOSTNAME (tgstorage), TS_IDLE_MIN (10), TS_STATE_DIR, FS_PORT (8765), MACHINES.
 Without TAILSCALE_AUTHKEY it connects directly (use this if the host itself is already on the tailnet).
 """
@@ -187,7 +190,7 @@ def _probe(entry):
     try:
         st, d = _jcall(m, "GET", "/fs/ping", timeout=3.5)
         if st == 200 and d.get("ok"):
-            m.update(up=True, host=d.get("host", mid), root=d.get("root", "/"), free=d.get("free", 0), total=d.get("total", 0))
+            m.update(up=True, host=d.get("host", mid), root=d.get("root", "/"), free=d.get("free", 0), total=d.get("total", 0), places=d.get("places") or [])
     except Exception:
         pass
     return m
@@ -242,6 +245,94 @@ def get_machine(mid):
     if m:
         _ts["last"] = time.time()
     return m
+
+
+# ───────────────────────── counts + search (native fsd endpoints, with fallback for older fsd.py) ─────────────────────────
+PSEUDO = ("/proc", "/sys", "/dev")
+
+
+def _pseudo(v):
+    return any(v == p or v.startswith(p + "/") for p in PSEUDO)
+
+
+def _old_agent(st, d):
+    """older fsd.py has no /fs/counts or /fs/search: it answers 404 'not found' (a real missing path says 'No such file...')."""
+    return st == 404 and str((d or {}).get("error", "")).strip().lower() == "not found"
+
+
+def _matcher(q):
+    import fnmatch
+    q = (q or "").strip().lower()
+    if not q:
+        return lambda name: True
+    if any(c in q for c in "*?["):
+        return lambda name: fnmatch.fnmatchcase(name.lower(), q)
+    return lambda name: q in name.lower()
+
+
+def _fallback_counts(m, path, start, n):
+    st, d = _jcall(m, "GET", f"/fs/list?path={quote(path)}", timeout=20)
+    if st != 200:
+        return st, d
+    names = sorted(i["n"] for i in d.get("items", []) if i.get("d"))
+    part = names[start:start + min(n, 40)]
+
+    def one(name):
+        try:
+            s2, r = _jcall(m, "GET", f"/fs/list?path={quote(_join(path, name))}", timeout=12)
+            if s2 != 200:
+                return name, None
+            its = r.get("items", [])
+            nd = sum(1 for i in its if i.get("d"))
+            return name, [nd, len(its) - nd, bool(r.get("truncated"))]
+        except Exception:
+            return name, None
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        out = dict(ex.map(one, part))
+    nxt = start + len(part)
+    return 200, {"ok": True, "counts": out, "next": nxt if nxt < len(names) else None, "total": len(names)}
+
+
+def _fallback_search(m, path, q, kind, limit, budget=12.0):
+    match = _matcher(q)
+    start_pseudo = _pseudo(path)
+    out, level, scanned, trunc, timeup = [], [path], 0, False, False
+    t0 = time.time()
+
+    def lst(p):
+        try:
+            s2, r = _jcall(m, "GET", f"/fs/list?path={quote(p)}", timeout=10)
+            return p, (r if s2 == 200 else None)
+        except Exception:
+            return p, None
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        while level and not trunc and not timeup:
+            nxt = []
+            for i in range(0, len(level), 16):
+                if time.time() - t0 > budget:
+                    timeup = True
+                    break
+                for p, r in ex.map(lst, level[i:i + 16]):
+                    if not r:
+                        continue
+                    scanned += 1
+                    for it in sorted(r.get("items", []), key=lambda x: x["n"].lower()):
+                        fp = _join(p, it["n"])
+                        isdir = bool(it.get("d"))
+                        if isdir and not it.get("l") and (start_pseudo or not _pseudo(fp)):
+                            nxt.append(fp)
+                        if (kind == "files" and isdir) or (kind == "folders" and not isdir) or not match(it["n"]):
+                            continue
+                        out.append({"n": fp, "d": isdir, "s": it.get("s", 0), "m": it.get("m", 0), "l": bool(it.get("l"))})
+                        if len(out) >= limit:
+                            trunc = True
+                            break
+                    if trunc:
+                        break
+                if trunc:
+                    break
+            level = nxt
+    return 200, {"ok": True, "path": path, "items": out, "truncated": trunc, "timeup": timeup or bool(level and not trunc), "scanned": scanned}
 
 
 # ───────────────────────── cross-machine copy / move (background jobs) ─────────────────────────
@@ -382,7 +473,7 @@ def register(app, require_auth, require_api):
         if err:
             return jsonify({"ok": False, "error": err, "configured": bool(TS_KEY or MANUAL)}), 502
         ms = sorted(d["machines"].values(), key=lambda x: x["name"])
-        keep = ("id", "name", "os", "up", "host", "root", "free", "total")
+        keep = ("id", "name", "os", "up", "host", "root", "free", "total", "places")
         return jsonify({"ok": True, "machines": [{k: m.get(k) for k in keep} for m in ms], "others": d["others"],
                         "configured": bool(TS_KEY or MANUAL)})
 
@@ -394,6 +485,46 @@ def register(app, require_auth, require_api):
             return e
         try:
             st, d = _jcall(m, "GET", "/fs/list?path=" + quote(request.args.get("path", "/")))
+        except Exception as ex:
+            return fail(f"machine unreachable: {ex}")
+        return jsonify(d), st
+
+    def _int(v, d, lo, hi):
+        try:
+            return max(lo, min(int(v), hi))
+        except (TypeError, ValueError):
+            return d
+
+    @app.route("/api/m/<mid>/counts")
+    @require_api
+    def m_counts(mid):
+        m, e = machine_or_err(mid)
+        if e:
+            return e
+        path = request.args.get("path", "/")
+        start, n = _int(request.args.get("start"), 0, 0, 10**7), _int(request.args.get("n"), 60, 1, 200)
+        try:
+            st, d = _jcall(m, "GET", f"/fs/counts?path={quote(path)}&start={start}&n={n}", timeout=25)
+            if _old_agent(st, d):
+                st, d = _fallback_counts(m, path, start, n)
+        except Exception as ex:
+            return fail(f"machine unreachable: {ex}")
+        return jsonify(d), st
+
+    @app.route("/api/m/<mid>/search")
+    @require_api
+    def m_search(mid):
+        m, e = machine_or_err(mid)
+        if e:
+            return e
+        path, q = request.args.get("path", "/"), request.args.get("q", "")[:200]
+        kind = request.args.get("kind", "all")
+        kind = kind if kind in ("all", "files", "folders") else "all"
+        limit = _int(request.args.get("limit"), 1000, 1, 5000)
+        try:
+            st, d = _jcall(m, "GET", f"/fs/search?path={quote(path)}&q={quote(q)}&kind={kind}&limit={limit}", timeout=40)
+            if _old_agent(st, d):
+                st, d = _fallback_search(m, path, q, kind, limit)
         except Exception as ex:
             return fail(f"machine unreachable: {ex}")
         return jsonify(d), st
@@ -528,7 +659,7 @@ button:hover:not(:disabled){background:var(--hover)}button:disabled{opacity:.4;c
 .bar{display:flex;align-items:center;gap:2px;padding:6px 8px;flex-wrap:wrap}
 .bar .sp{flex:1}.sep{width:1px;height:20px;background:var(--line);margin:0 4px}
 #addr{flex:1;min-width:140px;border:1px solid var(--line);background:var(--content);border-radius:6px;padding:5px 9px}
-#q{width:150px;border:1px solid var(--line);background:var(--content);border-radius:6px;padding:5px 9px}
+#q{width:190px;border:1px solid var(--line);background:var(--content);border-radius:6px;padding:5px 9px}
 .main{flex:1;min-height:0;display:flex}
 #side{width:210px;flex:none;overflow:auto;padding:4px 6px;border-right:1px solid var(--line)}
 .m{display:block;width:100%;text-align:left;padding:7px 9px;border-radius:6px;margin-bottom:2px}
@@ -540,7 +671,9 @@ button:hover:not(:disabled){background:var(--hover)}button:disabled{opacity:.4;c
 table{width:100%;border-collapse:collapse}
 th{position:sticky;top:0;background:var(--content);text-align:left;font-weight:600;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
 td{padding:5px 8px;border-bottom:1px solid transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
-td.n{max-width:60vw}td.s,td.t{color:var(--muted)}th.s,td.s{text-align:right;width:90px}th.t,td.t{width:150px}th.c,td.c{width:30px;max-width:30px}
+td.n{max-width:60vw}td.s,td.t,td.k{color:var(--muted)}th.k,td.k{width:200px;max-width:200px;font-size:12.5px}.k .sh{display:none}.loc{color:var(--muted);font-size:12px;margin-left:10px}
+#sb{display:none;padding:6px 12px;border-bottom:1px solid var(--line);background:var(--hover);font-size:13px;gap:10px;align-items:center}#sb.on{display:flex}#sb span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sw{display:flex;gap:2px;align-items:center}th.s,td.s{text-align:right;width:90px}th.t,td.t{width:150px}th.c,td.c{width:30px;max-width:30px}
 tr.r{cursor:default}tr.r:hover{background:var(--hover)}tr.r.sel{background:var(--sel)}
 #status{padding:5px 12px;color:var(--muted);border-top:1px solid var(--line);font-size:12px;display:flex;gap:12px}
 #drop{display:none;position:absolute;inset:0;background:rgba(0,103,192,.12);border:2px dashed var(--acc);align-items:center;justify-content:center;font-size:18px;pointer-events:none}
@@ -559,16 +692,16 @@ button.pri{background:var(--acc);color:#fff}button.pri:hover:not(:disabled){back
 #ctx{position:fixed;background:var(--menu);box-shadow:var(--shadow);border-radius:8px;padding:4px;z-index:45;min-width:160px}
 #ctx button{display:block;width:100%;text-align:left}
 .card{margin:40px auto;max-width:520px;padding:20px;color:var(--muted);text-align:center}
-@media(max-width:720px){#side{position:absolute;z-index:10;height:100%;background:var(--bg);display:none;width:230px}#side.open{display:block}th.t,td.t{display:none}#q{display:none}}
+@media(max-width:720px){#side{position:absolute;z-index:10;height:100%;background:var(--bg);display:none;width:230px}#side.open{display:block}th.t,td.t{display:none}th.k,td.k{width:92px;max-width:92px}.k .lg{display:none}.k .sh{display:inline}.sw{flex:1 1 100%}#q{flex:1;width:auto}}
 @media(min-width:721px){#bm{display:none}}
 </style></head><body>
 <div class="bar">
  <button id="bm" title="Machines">☰</button>
  <button id="bk" title="Back (Alt+←)">←</button><button id="up" title="Up folder">↑</button><button id="rf" title="Refresh (F5)">⟳</button>
- <input id="addr" spellcheck="false" autocomplete="off"><input id="q" placeholder="Filter…" autocomplete="off">
+ <input id="addr" spellcheck="false" autocomplete="off"><span class="sw"><input id="q" placeholder="Filter / Enter = search" autocomplete="off"><button id="sr" title="Search in all sub-folders">🔍</button></span>
 </div>
 <div class="bar" style="padding-top:0">
- <button id="nf">＋ Folder</button><button id="upl">⬆ Upload</button><input type="file" id="fi" multiple hidden>
+ <button id="all" title="List every file inside this folder, including all sub-folders">🗂 All files</button><button id="nf">＋ Folder</button><button id="upl">⬆ Upload</button><input type="file" id="fi" multiple hidden>
  <span class="sep"></span>
  <button id="cut">✂ Cut</button><button id="cpy">⧉ Copy</button><button id="pst">📋 Paste</button>
  <span class="sep"></span>
@@ -576,7 +709,7 @@ button.pri{background:var(--acc);color:#fff}button.pri:hover:not(:disabled){back
  <span class="sp"></span><a id="back" href="/browse" style="color:var(--muted);text-decoration:none;padding:5px 9px">← Storage</a>
 </div>
 <div class="main"><div id="side"></div>
- <div id="pane"><div id="list"></div><div id="status"><span id="st1"></span><span id="st2"></span><span id="st3" style="margin-left:auto"></span></div><div id="drop">Drop files to upload here</div></div></div>
+ <div id="pane"><div id="sb"></div><div id="list"></div><div id="status"><span id="st1"></span><span id="st2"></span><span id="st3" style="margin-left:auto"></span></div><div id="drop">Drop files to upload here</div></div></div>
 <div id="tx"></div>
 <script>
 (()=>{
@@ -592,8 +725,10 @@ const fmt=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':b<1073741824?(b/1
 const when=t=>t?new Date(t*1000).toLocaleString([], {dateStyle:'short',timeStyle:'short'}):'';
 const join=(d,n)=>d==='/'?'/'+n:d+'/'+n;
 const base=p=>p.replace(/\/+$/,'').split('/').pop()||'/';
+const dirn=p=>{const x=p.replace(/\/+$/,'');const i=x.lastIndexOf('/');return i<=0?'/':x.slice(0,i)};
+const P=i=>S.search?i.n:join(S.path,i.n);   // in search results i.n is already the full path
 let toastT;const toast=m=>{document.querySelectorAll('.toast').forEach(x=>x.remove());const t=h('div',{class:'toast'},m);document.body.append(t);clearTimeout(toastT);toastT=setTimeout(()=>t.remove(),3500)};
-const S={ms:[],m:null,path:'/',items:[],sel:new Set(),last:null,sort:'name',desc:false,clip:null,hist:[],filter:'',busy:false,disk:null};
+const S={ms:[],m:null,path:'/',items:[],sel:new Set(),last:null,sort:'name',desc:false,clip:null,hist:[],filter:'',busy:false,disk:null,search:null};
 const TXT=/\.(txt|md|json|ya?ml|toml|ini|cfg|conf|log|sh|bash|zsh|py|js|mjs|ts|css|html?|xml|csv|env|service|sql|c|h|cpp|go|rs|java|php|rb|lua|dockerfile|gitignore)$|^[^.]+$/i;
 const IMG=/\.(png|jpe?g|gif|webp|avif|bmp)$/i, VID=/\.(mp4|webm|ogv)$/i, AUD=/\.(mp3|wav|ogg|m4a|flac|opus)$/i;
 
@@ -615,11 +750,14 @@ async function loadMachines(force){
    h('p',{},'Deploy the updated hermesterminal (fsd.py) on your SSH terminal box and make sure it is online in Tailscale.'),h('button',{class:'pri',onclick:()=>loadMachines(true)},'Rescan'))); return}
  const want=location.hash.slice(1).split('|');const m=S.ms.find(x=>x.id===want[0]&&x.up)||S.ms.find(x=>x.up);
  if(m)openMachine(m.id,want[1]||'/')}
-function drawSide(){const s=$('side');s.replaceChildren(...S.ms.map(m=>{
+function drawSide(){const s=$('side');s.replaceChildren(...S.ms.flatMap(m=>{
   const used=m.total?Math.round((1-m.free/m.total)*100):0;
-  return h('button',{class:'m'+(S.m&&S.m.id===m.id?' on':''),onclick:()=>{if(m.up){openMachine(m.id,'/');s.classList.remove('open')}else toast('Machine is offline')}},
+  const on=S.m&&S.m.id===m.id;
+  const btn=h('button',{class:'m'+(on?' on':''),onclick:()=>{if(m.up){openMachine(m.id,'/');s.classList.remove('open')}else toast('Machine is offline')}},
    h('span',{class:'dot'+(m.up?'':' off')}),m.name,h('small',{},m.up?[m.os,fmt(m.free)+' free'].filter(Boolean).join(' · '):'offline'),
-   m.up&&m.total?h('div',{class:'dsk'},h('i',{style:`width:${used}%`})):'')}),
+   m.up&&m.total?h('div',{class:'dsk'},h('i',{style:`width:${used}%`})):'');
+  const pl=(on&&m.up&&m.places||[]).map(x=>h('button',{class:'m',style:'padding:4px 9px 4px 22px;font-size:13px',title:x.path,onclick:()=>{S.busy=false;go(x.path);$('side').classList.remove('open')}},'📍 '+x.name));
+  return [btn,...pl]}),
   h('button',{class:'m',onclick:()=>loadMachines(true),style:'color:var(--muted)'},'⟳ Rescan'),
   S.others?h('small',{style:'display:block;padding:4px 9px;color:var(--muted)'},S.others+' other tailnet device(s) without file agent'):'')}
 async function openMachine(id,path){S.m=S.ms.find(x=>x.id===id);S.hist=[];drawSide();await go(path||'/',true)}
@@ -629,22 +767,43 @@ async function go(path,fresh){
  if(!S.m||S.busy)return;S.busy=true;
  try{const d=await api(`/api/m/${S.m.id}/ls?path=${enc(path)}`);
   if(!fresh&&S.path&&(S.path!==d.path))S.hist.push(S.path);
-  S.path=d.path;S.parent=d.parent;S.items=d.items;S.trunc=d.truncated;S.sel=new Set();S.last=null;$('addr').value=d.path;S.filter='';$('q').value='';
-  history.replaceState(null,'','#'+S.m.id+'|'+d.path);document.title=S.m.name+' · '+d.path;render()}
+  S.search=null;banner();S.path=d.path;S.parent=d.parent;S.items=d.items;S.trunc=d.truncated;S.sel=new Set();S.last=null;$('addr').value=d.path;S.filter='';$('q').value='';
+  history.replaceState(null,'','#'+S.m.id+'|'+d.path);document.title=S.m.name+' · '+d.path;render();loadCounts()}
  catch(e){toast(e.message)}finally{S.busy=false}}
-const reload=()=>{S.busy=false;return go(S.path,true)};
-function sorted(){const k=S.sort,f=S.filter.toLowerCase();let a=S.items.filter(i=>!f||i.n.toLowerCase().includes(f));
+const reload=()=>{S.busy=false;return S.search?runSearch(S.search.q,S.search.kind,S.search.path):go(S.path,true)};
+function sorted(){const k=S.sort,f=S.filter.toLowerCase();let a=S.items.filter(i=>S.search||!f||i.n.toLowerCase().includes(f));
  a.sort((x,y)=>{if(x.d!==y.d)return x.d?-1:1;let r=k==='size'?x.s-y.s:k==='date'?x.m-y.m:x.n.localeCompare(y.n,undefined,{numeric:true,sensitivity:'base'});return S.desc?-r:r});return a}
+// folder contents ("3 folders · 12 files"), filled in batches after the listing so big folders stay fast
+function kcell(i){if(!i.d||S.search)return[''];if(i.k===undefined)return['…'];if(i.k===null)return[''];if(i.k===false)return['–'];
+ const[d,f,c]=i.k,pl=(n,w)=>n+' '+w+(n===1?'':'s'),m=c?'+':'';
+ return[h('span',{class:'lg',title:'sub-folders · files'},pl(d,'folder')+m+' · '+pl(f,'file')+m),h('span',{class:'sh'},'📁'+d+m+' 📄'+f+m)]}
+function paintCounts(){const m=new Map(S.items.map(i=>[i.n,i]));document.querySelectorAll('tr.r').forEach(tr=>{const i=m.get(tr.dataset.n),c=tr.querySelector('td.k');if(i&&c&&i.d)c.replaceChildren(...kcell(i))})}
+let cntTok=0;
+async function loadCounts(){const tok=++cntTok,path=S.path,mid=S.m.id;if(!S.items.some(i=>i.d))return;
+ const by=new Map(S.items.filter(i=>i.d).map(i=>[i.n,i]));let start=0;
+ while(start!==null&&tok===cntTok){let d;try{d=await api(`/api/m/${mid}/counts?path=${enc(path)}&start=${start}&n=60`)}catch(e){break}
+  if(tok!==cntTok)return;for(const k in d.counts){const i=by.get(k);if(i)i.k=d.counts[k]||false}
+  paintCounts();start=d.next===undefined?null:d.next}
+ if(tok===cntTok){by.forEach(i=>{if(i.k===undefined)i.k=null});paintCounts()}}
+function banner(){const b=$('sb'),s=S.search;if(!s){b.className='';b.replaceChildren();return}
+ b.className='on';b.replaceChildren(h('span',{title:s.path},`🔍 ${s.q?'“'+s.q+'”':'all '+(s.kind==='files'?'files':'items')} in ${s.path} — ${S.items.length}${S.trunc?'+':''} found`+(s.scanned?` · ${s.scanned} folders searched`:'')+(s.timeup?' · stopped at time limit - search a smaller folder':'')),h('button',{onclick:clearSearch},'✕ Clear'))}
+async function runSearch(q,kind,basePath){if(!S.m||S.busy)return;const where=basePath||(S.search?S.search.path:S.path);S.busy=true;
+ $('sb').className='on';$('sb').replaceChildren(h('span',{},'🔍 Searching in '+where+' …'));
+ try{const d=await api(`/api/m/${S.m.id}/search?path=${enc(where)}&q=${enc(q)}&kind=${kind}&limit=2000`);
+  S.search={q,kind,path:where,scanned:d.scanned,timeup:d.timeup};S.items=d.items;S.trunc=d.truncated;S.sel=new Set();S.last=null;S.filter='';cntTok++;banner();render()}
+ catch(e){toast(e.message);banner()}finally{S.busy=false}}
+const clearSearch=()=>{if(!S.search)return;S.busy=false;go(S.search.path,true)};
+function doSearch(){const q=$('q').value.trim();if(!q)return toast('Type a name to search, e.g. config or *.log');runSearch(q,'all')}
 function render(){const a=sorted();const arrow=k=>S.sort===k?(S.desc?' ▼':' ▲'):'';
  const th=(k,l,c)=>h('th',{class:c,onclick:()=>{if(S.sort===k)S.desc=!S.desc;else{S.sort=k;S.desc=false}render()}},l+arrow(k));
  const tb=h('tbody');
  a.forEach(i=>{const cb=h('input',{type:'checkbox'});cb.checked=S.sel.has(i.n);
   cb.onclick=e=>{e.stopPropagation();pick(i.n,e,true)};
-  const tr=h('tr',{class:'r'+(S.sel.has(i.n)?' sel':''),'data-n':i.n},h('td',{class:'c'},cb),h('td',{class:'n',title:i.n},(i.d?'📁 ':i.l?'🔗 ':'📄 ')+i.n),h('td',{class:'s'},i.d?'':fmt(i.s)),h('td',{class:'t'},when(i.m)));
+  const tr=h('tr',{class:'r'+(S.sel.has(i.n)?' sel':''),'data-n':i.n},h('td',{class:'c'},cb),h('td',{class:'n',title:i.n},(i.d?'📁 ':i.l?'🔗 ':'📄 ')+(S.search?base(i.n):i.n),S.search?h('span',{class:'loc'},dirn(i.n)):''),h('td',{class:'k'},kcell(i)),h('td',{class:'s'},i.d?'':fmt(i.s)),h('td',{class:'t'},when(i.m)));
   tr.onclick=e=>pick(i.n,e);tr.ondblclick=()=>openItem(i);tr.oncontextmenu=e=>{e.preventDefault();if(!S.sel.has(i.n)){S.sel=new Set([i.n]);S.last=i.n;paintSel()}ctx(e.clientX,e.clientY)};tb.append(tr)});
  const all=h('input',{type:'checkbox'});all.checked=a.length>0&&S.sel.size===a.length;all.onclick=()=>{S.sel=all.checked?new Set(a.map(i=>i.n)):new Set();paintSel()};
- const t=h('table',{},h('thead',{},h('tr',{},h('th',{class:'c'},all),th('name','Name'),th('size','Size','s'),th('date','Modified','t'))),tb);
- $('list').replaceChildren(a.length?t:h('div',{class:'empty'},S.filter?'No match':'This folder is empty'));updateBar()}
+ const t=h('table',{},h('thead',{},h('tr',{},h('th',{class:'c'},all),th('name','Name'),h('th',{class:'k',style:'cursor:default'},S.search?'':'Contents'),th('size','Size','s'),th('date','Modified','t'))),tb);
+ $('list').replaceChildren(a.length?t:h('div',{class:'empty'},S.search?'Nothing found':S.filter?'No match':'This folder is empty'));updateBar()}
 function paintSel(){document.querySelectorAll('tr.r').forEach(tr=>{const on=S.sel.has(tr.dataset.n);tr.classList.toggle('sel',on);const c=tr.querySelector('input');if(c)c.checked=on});updateBar()}
 function pick(n,e,box){const a=sorted().map(i=>i.n);
  if(e.shiftKey&&S.last){const x=a.indexOf(S.last),y=a.indexOf(n);S.sel=new Set(a.slice(Math.min(x,y),Math.max(x,y)+1))}
@@ -652,18 +811,19 @@ function pick(n,e,box){const a=sorted().map(i=>i.n);
  else{S.sel=new Set([n]);S.last=n}paintSel()}
 const selItems=()=>S.items.filter(i=>S.sel.has(i.n));
 function updateBar(){const n=S.sel.size;['cut','cpy','dl','del'].forEach(i=>$(i).disabled=!n);$('ren').disabled=n!==1;$('pst').disabled=!S.clip;
- $('dl').disabled=!n||selItems().some(i=>i.d);
- $('st1').textContent=S.items.length+' items'+(S.trunc?' (truncated)':'');$('st2').textContent=n?n+' selected'+(selItems().every(i=>!i.d)?' · '+fmt(selItems().reduce((s,i)=>s+i.s,0)):''):'';
+ $('dl').disabled=!n||selItems().some(i=>i.d);$('nf').disabled=$('upl').disabled=!!S.search;if(S.search)$('pst').disabled=true;
+ const nd=S.items.filter(i=>i.d).length,nf=S.items.length-nd;
+ $('st1').textContent=(S.search?S.items.length+' result'+(S.items.length===1?'':'s'):nd+' folder'+(nd===1?'':'s')+' · '+nf+' file'+(nf===1?'':'s'))+(S.trunc?' (truncated)':'');$('st2').textContent=n?n+' selected'+(selItems().every(i=>!i.d)?' · '+fmt(selItems().reduce((s,i)=>s+i.s,0)):''):'';
  $('st3').textContent=S.clip?`${S.clip.cut?'✂':'⧉'} ${S.clip.items.length} on clipboard (${S.clip.mname})`:''}
 
 // ───── actions ─────
-async function openItem(i){const p=join(S.path,i.n);
+async function openItem(i){const p=P(i),nm=base(i.n);
  if(i.d)return go(p);
  const url=`/api/m/${S.m.id}/get?path=${enc(p)}`;
- if(IMG.test(i.n))return modal([h('h3',{},i.n),h('img',{src:url})]);
- if(VID.test(i.n))return modal([h('h3',{},i.n),h('video',{src:url,controls:true,autoplay:true})]);
- if(AUD.test(i.n))return modal([h('h3',{},i.n),h('audio',{src:url,controls:true,autoplay:true})]);
- if(TXT.test(i.n)&&i.s<=1048576)return edit(i,p);
+ if(IMG.test(nm))return modal([h('h3',{},nm),h('img',{src:url})]);
+ if(VID.test(nm))return modal([h('h3',{},nm),h('video',{src:url,controls:true,autoplay:true})]);
+ if(AUD.test(nm))return modal([h('h3',{},nm),h('audio',{src:url,controls:true,autoplay:true})]);
+ if(TXT.test(nm)&&i.s<=1048576)return edit(i,p);
  location.href=url+'&dl=1'}
 async function edit(i,p){let text;try{const r=await fetch(`/api/m/${S.m.id}/get?path=${enc(p)}&dl=1`);if(!r.ok)throw 0;text=await r.text()}catch(e){return toast('Cannot read file')}
  if(text.includes('\0')){location.href=`/api/m/${S.m.id}/get?path=${enc(p)}&dl=1`;return}
@@ -678,14 +838,14 @@ function put(p,body,overwrite,onprog){return new Promise((res,rej)=>{const x=new
 const op=async b=>{const d=await api(`/api/m/${S.m.id}/op`,b);return d};
 function report(d,what){if(d.errors&&d.errors.length)toast(`${what}: ${d.errors.length} failed - ${d.errors[0].error}`)}
 
-async function newFolder(){const n=await ask('New folder','New folder','Create');if(!n)return;try{await op({op:'mkdir',path:join(S.path,n)});reload()}catch(e){toast(e.message)}}
-async function rename(){const i=selItems()[0];if(!i)return;const n=await ask('Rename',i.n,'Rename');if(!n||n===i.n)return;try{await op({op:'rename',path:join(S.path,i.n),name:n});reload()}catch(e){toast(e.message)}}
+async function newFolder(){if(S.search)return toast('Open a folder first (✕ Clear the search)');const n=await ask('New folder','New folder','Create');if(!n)return;try{await op({op:'mkdir',path:join(S.path,n)});reload()}catch(e){toast(e.message)}}
+async function rename(){const i=selItems()[0];if(!i)return;const cur=base(i.n),n=await ask('Rename',cur,'Rename');if(!n||n===cur)return;try{await op({op:'rename',path:P(i),name:n});reload()}catch(e){toast(e.message)}}
 async function del(){const it=selItems();if(!it.length)return;
  const ok=await confirmBox('Delete permanently?',it.length===1?it[0].n:it.length+' items (folders are deleted with everything inside)','Delete',true);if(!ok)return;
- try{const d=await op({op:'delete',paths:it.map(i=>join(S.path,i.n))});report(d,'Delete')}catch(e){toast(e.message)}reload()}
-function download(){selItems().filter(i=>!i.d).forEach((i,k)=>setTimeout(()=>{const a=h('a',{href:`/api/m/${S.m.id}/get?path=${enc(join(S.path,i.n))}&dl=1`,download:i.n});document.body.append(a);a.click();a.remove()},k*300))}
-function setClip(cut){const it=selItems();if(!it.length)return;S.clip={cut,m:S.m.id,mname:S.m.name,dir:S.path,items:it.map(i=>({p:join(S.path,i.n),d:i.d&&!i.l}))};updateBar();toast((cut?'Cut ':'Copied ')+it.length+' item(s)')}
-async function paste(){const c=S.clip;if(!c)return;
+ try{const d=await op({op:'delete',paths:it.map(i=>P(i))});report(d,'Delete')}catch(e){toast(e.message)}reload()}
+function download(){selItems().filter(i=>!i.d).forEach((i,k)=>setTimeout(()=>{const a=h('a',{href:`/api/m/${S.m.id}/get?path=${enc(P(i))}&dl=1`,download:base(i.n)});document.body.append(a);a.click();a.remove()},k*300))}
+function setClip(cut){const it=selItems();if(!it.length)return;S.clip={cut,m:S.m.id,mname:S.m.name,dir:S.search?'':S.path,items:it.map(i=>({p:P(i),d:i.d&&!i.l}))};updateBar();toast((cut?'Cut ':'Copied ')+it.length+' item(s)')}
+async function paste(){const c=S.clip;if(!c)return;if(S.search)return toast('Open a folder first (✕ Clear the search)');
  if(c.m===S.m.id){if(c.cut&&c.dir===S.path)return toast('Already here');
   try{const d=await op({op:c.cut?'move':'copy',paths:c.items.map(i=>i.p),dest:S.path});report(d,c.cut?'Move':'Copy');if(c.cut)S.clip=null}catch(e){toast(e.message)}return reload()}
  try{const d=await api('/api/m/xfer',{src:c.m,dst:S.m.id,items:c.items,dir:S.path,move:c.cut});if(c.cut)S.clip=null;track(d.job,(c.cut?'Moving ':'Copying ')+c.items.length+' item(s) → '+S.m.name)}catch(e){toast(e.message)}}
@@ -697,7 +857,7 @@ function track(jid,title){const bar=h('i'),line=h('div',{},''),cancel=h('button'
 
 // uploads: 2 at a time, progress cards
 let upq=[],upRun=0;
-function upload(files){const here=S.path,mid=S.m.id,exist=new Set(S.items.map(i=>i.n));
+function upload(files){if(S.search)return toast('Open a folder first (✕ Clear the search)');const here=S.path,mid=S.m.id,exist=new Set(S.items.map(i=>i.n));
  [...files].forEach(f=>upq.push({f,here,mid,over:exist.has(f.name)}));pump()}
 async function pump(){while(upRun<2&&upq.length){const u=upq.shift();upRun++;(async()=>{
   let over=false;if(u.over){over=await confirmBox('Replace file?',u.f.name+' already exists in '+u.here,'Replace',true);if(!over){upRun--;return pump()}}
@@ -707,15 +867,17 @@ async function pump(){while(upRun<2&&upq.length){const u=upq.shift();upRun++;(as
 // ───── context menu / keyboard / wiring ─────
 function ctx(x,y){document.getElementById('ctx')?.remove();const n=S.sel.size,one=selItems()[0];
  const b=(l,f,dis)=>h('button',{disabled:dis?'':null,onclick:()=>{m.remove();f()}},l);
- const m=h('div',{id:'ctx'},...(n===1&&one?[b('Open',()=>openItem(one))]:[]),b('⬇ Download',download,!n||selItems().some(i=>i.d)),b('✂ Cut',()=>setClip(true),!n),b('⧉ Copy',()=>setClip(false),!n),b('✎ Rename',rename,n!==1),b('🗑 Delete',del,!n));
+ const m=h('div',{id:'ctx'},...(n===1&&one?[b('Open',()=>openItem(one))]:[]),...(S.search&&n===1&&one?[b('📂 Open containing folder',()=>{S.busy=false;go(dirn(one.n),true)})]:[]),b('⬇ Download',download,!n||selItems().some(i=>i.d)),b('✂ Cut',()=>setClip(true),!n),b('⧉ Copy',()=>setClip(false),!n),b('✎ Rename',rename,n!==1),b('🗑 Delete',del,!n));
  m.querySelectorAll('button[disabled=""]').forEach(x=>x.disabled=true);document.body.append(m);m.style.left=Math.min(x,innerWidth-m.offsetWidth-6)+'px';m.style.top=Math.min(y,innerHeight-m.offsetHeight-6)+'px'}
 document.addEventListener('click',()=>document.getElementById('ctx')?.remove());
 $('list').addEventListener('contextmenu',e=>{if(e.target.closest('tr'))return;e.preventDefault();S.sel=new Set();paintSel();document.getElementById('ctx')?.remove();
  const m=h('div',{id:'ctx'},h('button',{onclick:newFolder},'＋ New folder'),h('button',{onclick:()=>$('fi').click()},'⬆ Upload'),h('button',{onclick:paste,disabled:S.clip?null:''},'📋 Paste'));if(!S.clip)m.lastChild.disabled=true;document.body.append(m);m.style.left=e.clientX+'px';m.style.top=e.clientY+'px'});
 $('list').addEventListener('click',e=>{if(!e.target.closest('tr')&&!e.target.closest('th')){S.sel=new Set();paintSel()}});
-$('bk').onclick=()=>{const p=S.hist.pop();if(p)go(p,true)};$('up').onclick=()=>S.parent&&go(S.parent);$('rf').onclick=reload;
+$('bk').onclick=()=>{const p=S.hist.pop();if(p)go(p,true)};$('up').onclick=()=>S.search?clearSearch():S.parent&&go(S.parent);$('rf').onclick=reload;
 $('addr').onkeydown=e=>{if(e.key==='Enter')go($('addr').value.trim()||'/')};
-$('q').oninput=e=>{S.filter=e.target.value;render()};
+$('q').oninput=e=>{if(S.search)return;S.filter=e.target.value;render()};
+$('q').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();doSearch()}else if(e.key==='Escape'){$('q').value='';S.filter='';S.search?clearSearch():render()}};
+$('sr').onclick=doSearch;$('all').onclick=()=>runSearch('','files');
 $('nf').onclick=newFolder;$('upl').onclick=()=>$('fi').click();$('fi').onchange=e=>{upload(e.target.files);e.target.value=''};
 $('cut').onclick=()=>setClip(true);$('cpy').onclick=()=>setClip(false);$('pst').onclick=paste;$('ren').onclick=rename;$('dl').onclick=download;$('del').onclick=del;
 $('bm').onclick=()=>$('side').classList.toggle('open');
@@ -723,7 +885,7 @@ document.addEventListener('keydown',e=>{if(document.querySelector('.modal')||/IN
  const c=e.ctrlKey||e.metaKey;
  if(c&&e.key==='a'){e.preventDefault();S.sel=new Set(sorted().map(i=>i.n));paintSel()}
  else if(c&&e.key==='c')setClip(false);else if(c&&e.key==='x')setClip(true);else if(c&&e.key==='v')paste();
- else if(e.key==='Delete')del();else if(e.key==='F2')rename();else if(e.key==='F5'){e.preventDefault();reload()}
+ else if(e.key==='Escape'&&S.search)clearSearch();else if(e.key==='Delete')del();else if(e.key==='F2')rename();else if(e.key==='F5'){e.preventDefault();reload()}
  else if(e.key==='Backspace'||(e.altKey&&e.key==='ArrowLeft')){e.preventDefault();$('bk').click()}
  else if(e.key==='Enter'&&S.sel.size===1)openItem(selItems()[0])});
 const pane=$('pane');let dc=0;
